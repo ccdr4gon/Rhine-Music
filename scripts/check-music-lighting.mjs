@@ -31,7 +31,7 @@ assert.equal(a.column.x,-5.2,'Reduced motion snaps to the selected location');
 // CD itself has the desired exposure; checking only source-to-target misses it.
 const glb = fs.readFileSync(new URL('../public/assets/music-cd.glb', import.meta.url));
 const asset = await new GLTFLoader().parseAsync(glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength), '');
-asset.scene.traverse(object => { if (object instanceof THREE.Mesh) normalizeMusicGeometry(object.geometry); });
+asset.scene.traverse(object => { if (object instanceof THREE.Mesh) normalizeMusicGeometry(object.geometry, object.material.name.replace(/\.\d+$/, '')); });
 const shellBounds = new THREE.Box3().setFromObject(asset.scene);
 const shaderBounds = a.shader.uniforms.musicShellBounds.value;
 assert.ok(Math.abs(shaderBounds.x-shellBounds.min.x)<1e-6,'Warm spine begins at the actual transformed left glass edge');

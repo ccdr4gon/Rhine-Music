@@ -38,9 +38,9 @@ export function qualityMarkup(quality: RenderQuality) {
       "控制高密度屏幕的原生像素倍率",
       [1, 1.5, 2, 3].map((v) => [v, `${v}×`]),
     )}
-    ${select(quality, "antialias", "抗锯齿", "SMAA 平滑模型边缘与后处理结果", [
-      ["off", "原始"],
-      ["smaa", "SMAA"],
+    ${select(quality, "antialias", "抗锯齿", "基础使用多重采样，不可用时以 SMAA 补偿；增强叠加 SMAA", [
+      ["off", "基础"],
+      ["smaa", "增强（SMAA）"],
     ])}
     ${select(
       quality,

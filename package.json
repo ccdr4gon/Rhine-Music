@@ -11,6 +11,7 @@
     "desktop:prepare": "npm run build && node scripts/desktop-resources.mjs",
     "check:desktop": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
     "check:media": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-external-media.mjs",
+    "check:rendering": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-multisampling.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-quality.mjs && npm run check:viewport",
     "start:legacy": "node scripts/launch-music.mjs",
     "check:launcher": "node --test scripts/check-music-launcher.mjs",
     "predev": "node scripts/export-records.mjs",

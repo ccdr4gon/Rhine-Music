@@ -1354,7 +1354,7 @@ function updateQuality() {
   syncQualityUI(renderQuality);
   const summary = document.querySelector("#quality-summary");
   if (summary)
-    summary.textContent = `渲染 ${renderQuality.scale}% · 像素上限 ${renderQuality.pixelRatio}× · ${renderQuality.antialias === "off" ? "原始抗锯齿" : "SMAA"}`;
+    summary.textContent = `渲染 ${renderQuality.scale}% · 像素上限 ${renderQuality.pixelRatio}× · ${renderQuality.antialias === "off" ? "基础抗锯齿" : "基础 + SMAA"}`;
   savePrefs();
 }
 async function editGenres() {

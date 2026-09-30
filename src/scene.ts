@@ -8,7 +8,7 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { BokehPass } from "three/addons/postprocessing/BokehPass.js";
 import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
 import { normalizeQuality, type RenderQuality } from "./render-quality";
-import { applyTextureQuality, resizeQuality } from "./quality-renderer";
+import { applyAlbumPrintCoverage, applyTextureQuality, createQualityComposer, resizeQuality } from "./quality-renderer";
 import { CardAppearance } from "./appearance";
 import { configureInternalOptics } from "./internal-optics";
 import { DecryptionController } from "./decryption";
@@ -214,7 +214,7 @@ export class ArchiveScene {
     this.cameraAim.set(-0.5, 1.1, 0.4);
     this.camera.fov = 6.15;
     this.camera.lookAt(this.cameraAim);
-    this.composer = new EffectComposer(this.renderer);
+    this.composer = createQualityComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.ao = new SSAOPass(
       this.scene,
@@ -262,9 +262,9 @@ export class ArchiveScene {
         .clone()
         .applyMatrix4(mesh.matrixWorld)
         .scale(1, 1, 1);
-      if (musicLibrary) normalizeMusicGeometry(geom);
       const source = mesh.material as THREE.MeshStandardMaterial;
       const name = source.name.replace(/\.\d+$/, "");
+      if (musicLibrary) normalizeMusicGeometry(geom, name);
       const mat = musicLibrary
         ? new THREE.MeshPhysicalMaterial({ name: source.name, side: source.side })
         : source.clone() as THREE.MeshPhysicalMaterial;
@@ -423,6 +423,9 @@ export class ArchiveScene {
     this.loaded = true;
     if (musicLibrary) await this.refreshLibrary();
     this.setTheme(this.theme);
+    // Quality/resize may precede this asynchronous load. New prints must use
+    // the current framebuffer's coverage even when the quality key is unchanged.
+    applyAlbumPrintCoverage(this.scene, this.composer.readBuffer.samples);
   }
 
   /** Call after setMusicAlbums; reuse the allocated display pool and cover atlas. */
@@ -531,7 +534,7 @@ export class ArchiveScene {
     template.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
       const surface = (object.material as THREE.Material).name.replace(/\.\d+$/, "");
-      const geometry = normalizeMusicGeometry(object.geometry.clone().applyMatrix4(object.matrixWorld));
+      const geometry = normalizeMusicGeometry(object.geometry.clone().applyMatrix4(object.matrixWorld), surface);
       const mesh = new THREE.Mesh(geometry, object.material);
       mesh.userData.surface = surface;
       mesh.userData.musicShell = true;
@@ -749,7 +752,6 @@ export class ArchiveScene {
     }
     this.ao.enabled = quality.aoSamples > 0;
     this.bokeh.enabled = quality.depthOfField > 0;
-    this.smaa.enabled = quality.antialias === "smaa";
     this.renderer.shadowMap.enabled = quality.shadows > 0;
     const size = Math.min(
       quality.shadows || 1024,
@@ -947,6 +949,9 @@ export class ArchiveScene {
       this.composer,
       this.container,
       this.quality,
+      this.smaa,
+      false,
+      this.scene,
     );
     this.ao.setSize(
       Math.max(1, Math.floor(dimensions.width * this.quality.aoResolution)),

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Rhine edge review · development only</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:20px;color:#20242a;background:#eceef0}h1{font-size:20px}fieldset{margin:12px 0;max-width:1236px}label{display:inline-block;margin:5px 14px 5px 0}button,select,input{font:inherit}button{padding:5px 12px;margin-right:10px}input[type=text]{width:400px}input[type=number]{width:72px}pre{white-space:pre-wrap;background:#fff;padding:12px;max-width:1256px}#host{width:1280px;height:720px;overflow:hidden;position:relative;transform:none}#host canvas{display:block;width:1280px!important;height:720px!important;pointer-events:none}#frames canvas,#crops canvas{display:block;max-width:1280px;height:auto;margin:12px 0}table{border-collapse:collapse;background:white}th,td{padding:6px 10px;border:1px solid #b9bdc1;text-align:right}th:first-child,td:first-child{text-align:left}small{display:block;max-width:1280px}#status{font-weight:600}
+</style></head><body>
+<h1>Rhine 动态细边缘比较（仅开发验证）</h1>
+<small>真实 ArchiveScene / demoAlbums。固定绘制缓冲 1280×720、有效 DPR=1、original 画质；仅改变 composer samples / SMAA。
+帧序列冻结已落稳场景的其他动画，按 60 Hz 固定模拟时间做亚像素移动。二阶亮度差只是闪烁代理，不等于画质结论；须同时看 1:1 裁切，避免把模糊当作改善。GPU 读回会同步管线，耗时不能当作正常播放 FPS。</small>
+<fieldset><legend>固定场景</legend>
+<label>资产 <input id="asset" type="text"></label><button id="reload">重新加载资产</button>
+<label>姿态 <select id="pose"><option value="detail">详情盒体</option><option value="archive">专辑阵列</option></select></label>
+<label>运动 <select id="motion"><option value="camera">相机平移</option><option value="object">选中盒体平移</option><option value="both">相机＋盒体</option><option value="static">静止对照</option></select></label>
+<label>横向像素/帧 <input id="step" type="number" value="0.10" min="0" max="0.5" step="0.01"></label>
+<label>主题 <select id="themes"><option value="both">day＋night</option><option value="day">day</option><option value="night">night</option></select></label>
+</fieldset>
+<fieldset><legend>60 帧 × 四组模式</legend>
+<label>比较集 <select id="comparison"><option value="checkpoint-aa4">checkpoint 的 AA 四组</option><option value="current-product">当前产品默认管线</option><option value="all">checkpoint 四组＋当前产品</option></select></label>
+<button id="run" disabled>Run 四组比较</button><button id="cancel" disabled>停止</button>
+<button id="json" disabled>下载 JSON</button><button id="sheet" disabled>下载 contact sheet</button><button id="crop-sheet" disabled>下载 1:1 裁切</button>
+<label>裁切 x <input id="crop-x" type="number" value="160" min="0" max="960"></label>
+<label>裁切 y <input id="crop-y" type="number" value="170" min="0" max="480"></label><span>固定 320×240，所有组一致</span>
+</fieldset>
+<p id="status">加载中…</p><pre id="environment"></pre>
+<div data-layout="desktop"><div id="host"></div></div>
+<p id="progress"></p><div id="results"></div><div id="frames"></div><div id="crops"></div><pre id="log"></pre>
+<script type="module" src="./edge-review.js"></script></body></html>

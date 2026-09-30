@@ -12,6 +12,7 @@ import {
   applyTextureQuality,
   createViewerPipeline,
   resizeQuality,
+  viewerUsesComposer,
 } from "./quality-renderer";
 
 const PARTS = [
@@ -230,6 +231,9 @@ export class ModelViewer {
     // the same assembly group as the physical glass, including while mid-motion.
     coverGroup.add(cover.mesh);
     applyTextureQuality(cover.mesh, this.renderer, this.quality);
+    // This print is created after open() resized the empty viewer. Apply the
+    // current route's sampling before the first draw, also when replacing art.
+    this.resize();
     void cover.ready.then(() => {
       if (this.albumCover === cover && this.isOpen && !this.closing) this.update(this.lastTime);
     });
@@ -581,7 +585,6 @@ export class ModelViewer {
     if (this.appliedQuality === key) return;
     this.appliedQuality = key;
     this.quality = normalizeQuality(quality);
-    this.pipeline.smaa.enabled = this.quality.antialias === "smaa";
     applyTextureQuality(this.scene, this.renderer, this.quality);
     this.resize();
   }
@@ -595,6 +598,9 @@ export class ModelViewer {
       this.pipeline.composer,
       this.canvasHost,
       this.quality,
+      this.pipeline.smaa,
+      !viewerUsesComposer(this.renderer, this.quality),
+      this.scene,
     );
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
@@ -650,7 +656,7 @@ export class ModelViewer {
     fog.near = Math.max(0, objectDistance - 1);
     fog.far = objectDistance + 12;
     if (this.theme) this.themeAppearance.update(this.camera);
-    if (this.quality.antialias === "smaa") this.pipeline.composer.render();
+    if (viewerUsesComposer(this.renderer, this.quality)) this.pipeline.composer.render();
     else this.renderer.render(this.scene, this.camera);
     this.root.dataset.stats = JSON.stringify({
       ready: Boolean(this.source),

@@ -148,3 +148,18 @@ export function renderDimensions(
     limited: ratio < requested - 0.0001,
   };
 }
+
+/** Keep MSAA storage bounded without changing the requested image resolution. */
+export function multisampleCount(
+  colorSamples: readonly number[],
+  depthSamples: readonly number[],
+  width: number,
+  height: number,
+  maximum: number,
+): 0 | 2 | 4 {
+  const pixels = width * height;
+  if (!Number.isFinite(pixels) || width <= 0 || height <= 0 || !Number.isFinite(maximum)) return 0;
+  const budget = 8_294_400 * 2;
+  return ([4, 2] as const).find(samples => samples <= maximum &&
+    samples * pixels <= budget && colorSamples.includes(samples) && depthSamples.includes(samples)) ?? 0;
+}

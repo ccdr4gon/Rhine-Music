@@ -19,12 +19,38 @@ export const MUSIC_COVER = {
   z: MUSIC_MODEL.depth / 2 + 0.012,
 } as const;
 
-export function normalizeMusicGeometry(geometry: THREE.BufferGeometry) {
-  if (geometry.userData.musicDimensions) return geometry;
-  geometry.translate(0, -MUSIC_MODEL.center.y, 0);
-  geometry.scale(MUSIC_MODEL.width / 4.3, MUSIC_MODEL.height / 3.7, MUSIC_MODEL.depth / 0.26);
-  geometry.translate(0, MUSIC_MODEL.center.y, 0);
-  geometry.userData.musicDimensions = true;
+// The authored front/rear panels share top, bottom and right end faces with
+// the frame. A tiny XY inset separates those faces without changing the frame,
+// glass thickness, print placement, UVs or authored weighted-normal structure.
+export const MUSIC_PANEL_INSET = 0.002;
+
+export function normalizeMusicGeometry(geometry: THREE.BufferGeometry, surfaceName?: string) {
+  const normalize = !geometry.userData.musicDimensions;
+  const inset = !geometry.userData.musicPanelInset &&
+    (surfaceName === "Frosted_Polymer" || surfaceName === "Optical_Diffuser");
+  if (!normalize && !inset) return geometry;
+  // BufferGeometry.clone() shares userData. Do not mark the cached raw GLB
+  // template as transformed when only this scene/viewer copy has changed.
+  geometry.userData = { ...geometry.userData };
+  if (normalize) {
+    geometry.translate(0, -MUSIC_MODEL.center.y, 0);
+    geometry.scale(MUSIC_MODEL.width / 4.3, MUSIC_MODEL.height / 3.7, MUSIC_MODEL.depth / 0.26);
+    geometry.translate(0, MUSIC_MODEL.center.y, 0);
+    geometry.userData.musicDimensions = true;
+  }
+  // Keep this guard independent: callers may normalize before the material's
+  // name is known, then supply it later. Neither step may compound on reuse.
+  if (inset) {
+    geometry.computeBoundingBox();
+    const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
+    const size = geometry.boundingBox!.getSize(new THREE.Vector3());
+    const sx = (size.x - MUSIC_PANEL_INSET * 2) / size.x;
+    const sy = (size.y - MUSIC_PANEL_INSET * 2) / size.y;
+    geometry.applyMatrix4(new THREE.Matrix4().makeScale(sx, sy, 1).setPosition(
+      center.x * (1 - sx), center.y * (1 - sy), 0,
+    ));
+    geometry.userData.musicPanelInset = true;
+  }
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
@@ -77,9 +103,11 @@ export function createAlbumPrintMaterial(map: THREE.Texture) {
   const material = new THREE.MeshLambertMaterial({
     map,
     alphaTest: 0.025,
+    alphaToCoverage: false,
     toneMapped: false,
     fog: true,
   });
+  material.userData.albumPrint = true;
   material.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <opaque_fragment>",
