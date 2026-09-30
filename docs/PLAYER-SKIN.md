@@ -5,7 +5,7 @@ Rhine Music 的播放器皮肤模式复用现有三维场景，展示另一款�
 ## 入口与使用
 
 - 在客户端中点击“连接播放器”，选择一个正在运行的音乐来源。
-- 也可以运行安装目录或源码根目录的 `启动播放器皮肤.cmd`。它调用原生程序的 `--skin` 参数，不依赖 Node。
+- 也可以运行便携目录或源码根目录的 `启动播放器皮肤.cmd`。它调用原生程序的 `--skin` 参数，不依赖 Node。
 - 命令行可以运行 `rhine-music.exe --skin`；已有 Rhine 窗口时会把该窗口切到皮肤模式。`--local` 切回本地模式。
 - 原播放器可能需要先播放一首歌，Windows 才会发布它的媒体信息。Rhine 不代替原播放器登录、搜索云端歌单或获取付费歌曲。
 
@@ -33,7 +33,7 @@ Windows 的系统媒体会话（Global System Media Transport Controls，GSMTC�
 
 本次重新执行只读探测：`3.1.41.205529` 可通过窗口标题提供曲名和歌手，未发现它的系统媒体会话。检测时 Chrome 另有媒体会话，网易云兼容控制按规则禁用；没有对真实网易云或 Chrome 发送播放指令。通用控制使用自行建立的两个真实 Windows 媒体会话验收，不能据此宣称已逐一验证所有品牌播放器。
 
-Rhine 使用本进程 Rust 调用 Windows 接口，安装包不引入 Node、EarthOnline 后台程序或 PowerShell 服务。不读取网易云进程内存、Cookie、账号数据库和播放历史，不记录当前曲目或封面到磁盘。系统媒体封面仅作为受限大小的图片在内存中传给界面。
+Rhine 使用本进程 Rust 调用 Windows 接口，便携包不引入 Node、EarthOnline 后台程序或 PowerShell 服务。不读取网易云进程内存、Cookie、账号数据库和播放历史，不记录当前曲目或封面到磁盘。系统媒体封面仅作为受限大小的图片在内存中传给界面。
 
 官方接口说明：[会话与控制方法](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssession?view=winrt-26100)、[当前曲目属性](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmediaproperties?view=winrt-26100)。接口存在不表示所有播放器、所有版本均支持；最终以运行时检测和实际验收为准。
 

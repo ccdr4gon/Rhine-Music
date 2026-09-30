@@ -5,14 +5,18 @@ chcp 65001 >nul
 pushd "%~dp0"
 if errorlevel 1 goto directory_error
 
+if exist "Rhine Music.exe" goto portable
 if exist "rhine-music.exe" goto installed
 if exist "src-tauri\target\release\rhine-music.exe" goto release
 if exist "src-tauri\target\debug\rhine-music.exe" goto debug
-echo 未找到 Rhine Music 客户端。请使用 Windows 安装程序，或先运行 npm run desktop:build。
+echo 未找到 Rhine Music 客户端。请完整解压 Portable ZIP，或先运行 npm run desktop:build。
 popd
 pause
 exit /b 1
 
+:portable
+start "" "Rhine Music.exe" --local
+goto done
 :installed
 start "" "rhine-music.exe" --local
 goto done

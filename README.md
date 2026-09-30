@@ -8,17 +8,19 @@
 
 ![v0.3.0 Windows 安装版：独立窗口、三维专辑架与合成 MP3 测试曲库](docs/media/v0.3.0/native-night-library.png)
 
-> v0.3.0 使用 **Tauri + Rust 独立客户端**，运行时不需要 Node.js、npm 或外部浏览器，不附带歌曲。Windows 11 x64 的构建、安装、启动及核心交互已验证；尚未公开发布版本标签或下载链接。安装包约 **31.9 MiB**，安装后程序文件约 **47.6 MiB**，不含系统 WebView2、曲库和运行缓存。具体范围见 [Windows 记录](docs/WINDOWS.md)。macOS 保留原 Node 服务启动方式，原 v0.2.0 发布包不变。首图来自本次安装版与自行生成的测试 MP3；下方 v0.2.0 历史配图继续展示沿用的视觉设计。[客户端截图说明](docs/media/v0.3.0/README.md)
+> v0.3.0 使用 **Tauri + Rust 独立客户端**，Windows 现只提供 **Portable Edition 免安装版**。完整解压 ZIP 后双击 `Rhine Music.exe`，不需要 Node.js、npm 或外部浏览器，不附带歌曲。程序需要系统已有 WebView2，不会自动下载安装组件。设置和缓存位于程序旁的 `data/`；尚未公开发布新标签。具体范围见 [Windows 记录](docs/WINDOWS.md)。macOS 保留原 Node 服务启动方式，原 v0.2.0 发布包不变。上方是前期安装版使用合成 MP3 的历史截图，视觉实现继续沿用。[客户端截图说明](docs/media/v0.3.0/README.md)
 
 ## Windows 客户端
 
-使用 Windows x64 安装包时，无需安装 Node.js、Rust 或 Blender。界面使用 Microsoft Edge WebView2；安装器在系统缺少该组件时联网安装。当前使用系统共享组件，不附带完整浏览器，因此不是完全离线安装包。
+Windows 不再生成安装包，不需要安装 Node.js、Rust 或 Blender。界面使用系统已有的 Microsoft Edge WebView2；程序不自动安装任何组件。
 
-1. 安装构建产出的 `Rhine Music_*_x64-setup.exe`，从开始菜单打开 **Rhine Music**。
+1. 完整解压 `Rhine-Music-0.3.0-windows-x64-portable.zip` 到可写目录，进入 `Rhine Music` 文件夹，双击 **Rhine Music.exe**。
 2. 点击“**音乐库**”，通过“选择文件夹”添加音乐目录，也可以直接填写 `D:\Music` 这样的绝对路径，每行一个目录。
 3. 保存并扫描。歌曲仍从原目录只读播放，不复制进安装目录、不改写标签。
 
-尚未准备音乐时，可点击“先查看演示封面”体验三维界面。再次打开程序会聚焦现有窗口；关闭窗口退出程序并停止内部服务。`启动音乐播放器.cmd` 用于启动源码目录中已经构建好的客户端，缺少程序时会提示构建，不再自动安装 Node 或打开浏览器。
+不要直接在压缩包里运行，也不要单独移动 exe：`web/` 是必需资源，`data/` 是首次运行生成的设置、索引和界面缓存。搬移或备份时，先退出程序，再复制整个文件夹；更新程序时保留自己的 `data/`。应用不会自动导入旧安装版的数据。
+
+尚未准备音乐时，可点击“先查看演示封面”体验三维界面。再次打开程序会聚焦现有窗口；关闭窗口退出程序并停止内部服务。`启动音乐播放器.cmd` 也能打开客户端，不安装组件或打开外部浏览器。
 
 也可以点击“连接播放器”，或双击 `启动播放器皮肤.cmd`，把当前界面用作本机播放器的外观与控制窗口。它连接 Windows 系统媒体会话，按来源实际能力显示当前曲目、封面及播放控件；未提供标准会话的网易云另有兼容方式。声音由原播放器输出，不需要导入本地曲库。这里不提供云端歌单、账号或付费歌曲访问，兼容方式及限制见 [播放器连接说明](docs/PLAYER-SKIN.md)。
 
@@ -32,7 +34,7 @@ npm.cmd ci
 npm.cmd run desktop:build
 ```
 
-安装程序输出到 `src-tauri/target/release/bundle/nsis/`。开发运行用 `npm.cmd start`；Rust 测试用 `npm.cmd run check:desktop`。Node 和 Vite 只参与构建，不放入 Windows 安装包。更详细的依赖与命令见 [Windows 文档](docs/WINDOWS.md)。
+Portable ZIP 输出到 `release/`；构建强制使用 `--no-bundle`，不生成 NSIS/MSI。开发运行用 `npm.cmd start`；Rust 测试用 `npm.cmd run check:desktop`。Node 和 Vite 只参与构建，不放入便携包。更详细的依赖与命令见 [Windows 文档](docs/WINDOWS.md)。
 
 </details>
 

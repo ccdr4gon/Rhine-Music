@@ -1,6 +1,6 @@
 # 当前客户端结构
 
-v0.3.0 的 Windows 正式入口是 `src-tauri/src/main.rs`。Tauri 创建独立窗口、提供系统文件夹选择、管理单实例和偏好保存。窗口关闭时 Rust 内部服务结束；没有 Node 后台子程序。客户端默认将数据写入用户应用数据目录，可由 `MUSIC_DATA_DIR` 覆盖。
+v0.3.0 的 Windows 正式入口是 `src-tauri/src/main.rs`，目前只交付 Portable Edition。Tauri 创建独立窗口、提供系统文件夹选择、管理单实例和偏好保存。窗口关闭时 Rust 内部服务结束；没有 Node 后台子程序。客户端从 exe 旁的 `web/` 读取界面，默认将数据写入旁边的 `data/`，可由绝对路径 `MUSIC_DATA_DIR` 覆盖。WebView 的数据目录也明确设在其中的 `webview/`，不依赖启动工作目录。
 
 `src-tauri/src/server.rs` 在同一进程中绑定 `127.0.0.1`，提供现有 `/api/` 路由和安装目录下的 `web/` 资源。音频以文件流和单段 Range 返回，不通过 JSON 搬运整首歌曲。目录读取检查实际文件位置，并保留 Host、Origin 和 JSON 写入约束。
 
@@ -12,6 +12,6 @@ v0.3.0 的 Windows 正式入口是 `src-tauri/src/main.rs`。Tauri 创建独立�
 
 `src-tauri/src/media.rs` 及其 Windows 实现连接系统媒体会话，独立于本地曲库 HTTP 路由；`main.rs` 通过两个受窗口权限限制的 Tauri 命令提供状态和控制。`src/external-media.ts` 管理用户选择、能力及断线，`music-app.ts` 的 `?mode=external` 分支复用原场景，仅映射所选来源的当前曲目，且不创建本地 MusicPlayer。原播放器负责发声；媒体封面与状态仅保存在内存。具体能力与边界见 [播放器连接说明](../PLAYER-SKIN.md)。
 
-`npm run desktop:prepare` 构建界面并收集依赖许可，Tauri 将 `dist/` 作为 `web/` 资源打包。Node、Vite、TypeScript 和 Rust 工具链仅用于开发。旧 `scripts/music-*.mjs` 保留为 macOS 浏览器入口与行为对照，不进入桌面安装包。
+`npm run desktop:prepare` 构建界面并收集依赖许可。`build-desktop.mjs` 强制 `--no-bundle`，`package-portable.mjs` 从干净临时目录、按允许清单生成 ZIP；只带主程序、`dist/` 映射的 `web/`、原生启动脚本和许可，不复制现有用户数据。不再生成 NSIS/MSI，也不自动安装 WebView2。Node、Vite、TypeScript 和 Rust 工具链仅用于开发。旧 `scripts/music-*.mjs` 保留为 macOS 浏览器入口与行为对照，不进入便携包。
 
 已运行的验证和未覆盖范围见 [Windows 记录](../WINDOWS.md)，决策范围见 [迁移决策](../refactor/desktop-decision.md)。

@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use rhine_music::{library::Store, server::Service};
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 struct DesktopState {
@@ -75,6 +78,22 @@ fn option(name: &str) -> Option<String> {
     args.windows(2).find(|a| a[0] == name).map(|a| a[1].clone())
 }
 
+// Portable state follows the executable, never the shell's working directory.
+fn portable_paths(
+    executable: &Path,
+    override_data: Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let directory = executable
+        .parent()
+        .filter(|path| path.is_absolute())
+        .ok_or("无法确定便携版程序目录")?;
+    let data = override_data.unwrap_or_else(|| directory.join("data"));
+    if !data.is_absolute() {
+        return Err("MUSIC_DATA_DIR 必须是绝对路径".into());
+    }
+    Ok((directory.join("web"), data))
+}
+
 fn main() {
     // The same Rust backend can be exercised without a WebView or private library.
     if std::env::args().any(|a| a == "--headless") {
@@ -130,16 +149,23 @@ fn main() {
             media_control
         ])
         .setup(|app| {
-            let data_dir = std::env::var_os("MUSIC_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or(app.path().app_local_data_dir()?);
-            let resources = app.path().resource_dir()?.join("web");
+            let (resources, data_dir) = portable_paths(
+                &std::env::current_exe()?,
+                std::env::var_os("MUSIC_DATA_DIR").map(PathBuf::from),
+            ).map_err(std::io::Error::other)?;
             let assets_dir = if cfg!(debug_assertions) {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist")
             } else {
                 resources
             };
-            let store = Store::open(data_dir.clone()).map_err(std::io::Error::other)?;
+            if !assets_dir.join("index.html").is_file() {
+                return Err(std::io::Error::other("找不到 web 界面资源。请先完整解压 Portable ZIP，保留 exe 旁的 web 文件夹，不要直接从压缩包中运行。").into());
+            }
+            let store = Store::open(data_dir.clone()).map_err(|error| std::io::Error::other(
+                format!("无法打开便携数据目录：{error}。请将整个程序文件夹放在可写位置。")
+            ))?;
+            let webview_data = data_dir.join("webview");
+            std::fs::create_dir_all(&webview_data)?;
             let preferred = std::fs::read_to_string(data_dir.join("desktop-port.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<u16>(&s).ok())
@@ -164,6 +190,7 @@ fn main() {
                 origin
             };
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(entry.parse()?))
+                .data_directory(webview_data)
                 .title("Rhine Music")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(640.0, 480.0)
@@ -196,5 +223,38 @@ fn main() {
                 .set_level(rfd::MessageLevel::Error)
                 .show();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_resources_and_state_follow_the_executable_when_moved() {
+        let root = std::env::temp_dir();
+        for folder in ["便携 音乐 A", "另一位置 B"] {
+            let directory = root.join(folder);
+            let (web, data) = portable_paths(&directory.join("Rhine Music.exe"), None).unwrap();
+            assert_eq!(web, directory.join("web"));
+            assert_eq!(data, directory.join("data"));
+        }
+    }
+
+    #[test]
+    fn explicit_data_override_does_not_relocate_resources() {
+        let root = std::env::temp_dir();
+        let (web, data) = portable_paths(
+            &root.join("app/Rhine Music.exe"),
+            Some(root.join("custom-data")),
+        )
+        .unwrap();
+        assert_eq!(web, root.join("app/web"));
+        assert_eq!(data, root.join("custom-data"));
+        assert!(portable_paths(
+            &root.join("app/Rhine Music.exe"),
+            Some(PathBuf::from("relative-data"))
+        )
+        .is_err());
     }
 }

@@ -12,6 +12,9 @@ reference/**/*.jpg
 art/.cache/
 .worktrees/
 release/
+/data/
+/preferences.json
+/desktop-port.json
 video/
 __pycache__/
 *.pyc

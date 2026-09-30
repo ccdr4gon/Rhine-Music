@@ -1,51 +1,55 @@
-# Windows 独立客户端
+# Windows Portable Edition
 
-v0.3.0 使用 Tauri + Rust，保留原 TypeScript / Three.js 界面。客户端启动独立窗口，曲库服务运行在同一个 Rust 程序内；无需 Node 运行时、npm 或 Vite 开发服务器，启动不会打开外部浏览器。Windows 11 x64 的构建、安装、启动及核心交互已完成本机验证，尚未公开发布新标签或 Windows 下载链接。原 v0.2.0 macOS ZIP 保留原状。
+当前 Windows 版本只交付免安装 ZIP，构建不再生成 NSIS/MSI。Tauri + Rust 主程序与 Three.js 界面继续保留刚完成的边缘修复、本地播放和外部播放器连接，不需要 Node/npm 或外部浏览器。
 
-## 使用
+## 直接运行
 
-1. 运行 Windows x64 安装程序 `Rhine Music_*_x64-setup.exe`，安装到当前用户目录。
-2. 从开始菜单打开 **Rhine Music**，在“音乐库”点击“选择文件夹”，或填写 `D:\Music`，每行一个目录、不加引号。
-3. 保存并扫描。中文与空格目录按 Windows 路径规则处理，音乐只读，不复制进安装目录。
+1. 完整解压 `Rhine-Music-0.3.0-windows-x64-portable.zip`。
+2. 进入 `Rhine Music` 文件夹，双击 **Rhine Music.exe**。
+3. 在“音乐库”选择音乐文件夹并扫描，或点击“连接播放器”。皮肤模式也可双击 `启动播放器皮肤.cmd`。
 
-连接已有播放器时，点击“连接播放器”，或运行安装目录中的 `启动播放器皮肤.cmd`。`rhine-music.exe --skin` 进入连接模式，`--local` 切回本地模式；已有实例时切换同一窗口。连接能力和网易云限制见 [播放器皮肤说明](PLAYER-SKIN.md)。
+这是文件夹形式的便携版，不是单文件版。不要从 ZIP 内直接运行，也不要只复制 exe：它旁边的 `web/` 保存界面、字体、模型和许可证。程序不会创建快捷方式、卸载项，也不要求管理员权限。
 
-普通使用不需要 Node.js、Rust 或 Visual Studio。Windows 需要 Microsoft Edge WebView2 Runtime；当前安装器使用 `downloadBootstrapper`，已安装则复用系统组件，缺少时联网安装。未采用附带完整 WebView2 的离线安装方式。安装包目前没有代码签名。
+运行仍需要系统已有 Microsoft Edge WebView2 Runtime；便携包不附带完整浏览器，不自动下载安装任何组件。Windows 11 x64 已在本机验证，macOS 原 Node 入口保持原状，不能将 Windows 结果视为其他平台的验收。
 
-再次启动会显示并聚焦已有窗口；最小化保留应用，关闭窗口退出并停止内部服务。服务仍只监听 `127.0.0.1`，保留 Origin / Host 校验和只读音乐目录限制，使用可用本机端口；没有对局域网开放。外部资料链接通过默认浏览器打开，播放器本身保持独立窗口。
+## 数据与搬移
 
-默认数据目录为 `%LOCALAPPDATA%\io.github.ccdr4gon.rhine-music\`；界面偏好保存到其中的 `preferences.json`，不依赖内部端口保持不变。需要其他位置时，先退出应用，在 PowerShell 设置 `$env:MUSIC_DATA_DIR = 'D:\RhineMusicData'` 再运行安装目录中的 `rhine-music.exe`。它不会自动寻找旧曲库；迁移前备份旧数据、停止旧 Node 服务，禁止同时写同一目录。跨系统迁移需重新选择 Windows 音乐目录。
+首次运行在 exe 旁创建 `data/`，其中保存 `config.json`、索引、封面缓存、`preferences.json`、端口偏好和 `webview/` 界面缓存。位置取决于 exe，不依赖双击、快捷方式或终端的工作目录。放在普通可写文件夹即可；只读目录会明确报错，不会暗中改写到其他位置。
 
-源码根目录的 `启动音乐播放器.cmd` 只寻找现成 `rhine-music.exe`：优先根目录，其次 `src-tauri/target/release/`，最后 `src-tauri/target/debug/`。它不替用户安装开发环境；找不到时明确提示使用安装程序或先构建。复制 release 程序时必须同时保留它旁边的 `web/` 资源，不能只拿走 exe。
+搬移时先退出，再移动整个文件夹。更新程序时保留自己的 `data/`。音乐本身仍从原目录只读访问，不复制进便携包；换电脑或盘符后可能需要重新选择音乐目录。程序不会自动读取旧安装版的 AppData 曲库或配置。
 
-## 从源码构建
+开发或测试需要独立数据时，可将 `MUSIC_DATA_DIR` 设为绝对路径；曲库和 WebView 缓存会一起放到该位置。开发运行的默认数据也在 debug exe 旁的 `data/`。旧 macOS Node 服务的数据位置沿用原逻辑。
 
-开发环境需要 Node.js 22.12 或更新的 LTS、Rust MSVC 工具链、Visual Studio C++ 构建工具和 Windows SDK，以及 WebView2。在工程根目录运行：
+再次启动会聚焦已有窗口；关闭窗口停止本进程的本机服务。`--skin` 和 `--local` 可切换已就绪窗口的模式。服务仍仅监听 `127.0.0.1`，目录、Host/Origin 和只读约束保持。完整外部播放器能力见 [连接说明](PLAYER-SKIN.md)。
+
+## 从源码生成 ZIP
+
+开发需要 Node.js 22.12+、Rust MSVC、Visual Studio C++ 构建工具及 Windows SDK。普通用户不需要这些工具。
 
 ```powershell
 npm.cmd ci
-npm.cmd run desktop:build
+npm.cmd run desktop:portable
 ```
 
-安装程序输出到 `src-tauri/target/release/bundle/nsis/`，普通 release 程序在 `src-tauri/target/release/rhine-music.exe`。第一次构建需联网获取锁定 Rust 依赖和 Tauri 安装器工具。`npm.cmd start` 或 `npm.cmd run desktop:dev` 用于开发窗口，`npm.cmd run check:desktop` 运行 Rust 测试。客户端目前使用已构建前端，修改界面后需重新运行开发命令或准备资源，没有单独启动 Vite 实时更新服务器。
+`desktop:build` 是同一入口，也只生成 Portable ZIP。它强制 `tauri build --no-bundle -- --locked`，不接受安装器参数；配置同时关闭 bundling 并跳过 WebView 安装。产物在 `release/`，校验值在 `SHA256SUMS-portable.txt`。
 
-`npm.cmd run desktop:prepare` 会构建前端、根据 Cargo 目标收集许可证，并删除生成目录里的 `.music-build.json`、`pwa-build.json`；它不删除个人数据或源码。Tauri 的开发和正式构建都会自动执行此准备步骤。Rust 依赖版本来自 `src-tauri/Cargo.lock`；未随源码包附带的许可证从锁定提交补存在 `scripts/desktop-licenses/`，未知缺失许可会阻止资源准备。
+`scripts/package-portable.mjs` 从新建临时目录打包，只复制刚编译的 exe、`dist/`、原生启动脚本与许可，不从现有便携目录打包，因此不会将用户 `data/` 或缓存发出去。不会替换用户已经解压并运行的文件夹。完整许可在 `web/licenses/`；不包含 Node、npm、开发依赖、安装器或卸载器。
 
-正式构建通过 `scripts/build-desktop.mjs` 将 Rust 产物中的用户目录、Cargo 缓存目录和工程目录改为通用构建路径，避免错误消息携带构建者的本机用户名。开发调试入口仍保留可定位源码的原路径。
+`npm.cmd start` 用于开发，`check:desktop`、`check:music`、`check:media`、`check:rendering` 用于相应检查。独立前端 `npm run build` 不会产生便携 ZIP。旧 Node 浏览器入口仍为 `npm run start:legacy`。
 
-`npm.cmd run start:legacy` 保留旧 Node 服务和浏览器调试路径；macOS `启动音乐播放器.command` 继续使用旧服务。`npm.cmd run build` 只构建共享前端，不会生成客户端。开发依赖和旧 Node 服务源码都不进入桌面安装包。
+## 便携版验证记录
 
-## 实现范围
+本次 Portable ZIP 已实际构建并验证：36,360,433 字节（34.68 MiB），96 个文件，解压内容约 47.51 MiB；唯一的 `.exe` 是 `Rhine Music.exe`。不含用户 `data/`、Node、安装器、卸载器、PDB 或原生扩展。主程序导入项仅包含 Windows 系统 DLL，WebView2 由系统现有组件提供。
 
-- `src-tauri/src/main.rs`：窗口、文件夹选择、单实例、偏好保存和内部服务生命周期。
-- `src-tauri/src/`：Rust 曲库扫描、元数据／封面、增量缓存、流派规则、音频分段读取和在线资料查询。
-- `src/desktop.ts`：共享界面与桌面功能之间的小型调用入口，三维模型、材质、字轮、镜头与搜索沿用原实现。
-- `src-tauri/tauri.conf.json`：仅将 `dist/` 映射为安装目录中的 `web/`；无 Node 程序或后台子程序配置。启动页使用独立 `bootstrap/`，避免同时嵌入和复制整份界面资源。
-- `scripts/desktop-resources.mjs`：将项目、前端和 Rust 依赖许可整理到 `web/licenses/`，清单只写公开源码链接，不写本机路径。
+从 ZIP 解压到独立中文/空格目录，清除测试进程的 MUSIC_DATA_DIR、从 PATH 移除 Node、工作目录设为 Windows 目录，直接启动成功。初次生成空曲库，`data/webview/EBWebView` 在程序旁创建；实际 WebView 子进程使用该路径，没有读取旧 AppData 曲库。随后用两文件夹三首合成 MP3 验证扫描、播放、停止和主题保存。
 
-Rust 重写曲库服务不等同于原生音频引擎。实际音频仍由 WebView2 的 `HTMLAudioElement` 解码，DSF / DFF 只索引不播放；其他编码需要实际播放器验证。
+关闭程序后，将整个目录从“位置 A”搬到“位置 B”再启动：两专辑、三首曲目、原有 ID 和深夜主题保留，WebView 使用新位置，旧位置没有被重新创建。随包皮肤启动脚本可正常切换已有窗口。全程没有运行安装器或卸载器，卸载登记保持原状态；测试进程已退出。
 
-## v0.3.0 当前验证记录
+Rust 默认 39 项检查通过（另 2 项外部参考检查本轮按默认跳过）；Windows 启动器 14 项通过、2 项 macOS 检查跳过。SHA256：`62ebaa66f304e0ee30e8edb917744fe98ec5ad02748b5637e7c7cd61fd554909`。这不等于已验证缺少 WebView2 的电脑、所有 Windows 版本或跨电脑音频路径迁移。
+
+下列安装器记录属于被 Portable 取代之前的历史，不是当前使用方式。
+
+## v0.3.0 历史验证记录
 
 ### 动态边缘修正体验包
 

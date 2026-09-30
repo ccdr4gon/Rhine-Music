@@ -2,6 +2,8 @@
 
 2026-09-30，用户确认最终目标为 Tauri + Rust，并授权完成整个重构。
 
+后续用户明确禁止安装包，当前只交付 Portable ZIP；exe 旁的 web/ 为资源、data/ 为运行数据。构建强制 --no-bundle。以下早期安装器目标保留为历史，已由 [Windows Portable 说明](../WINDOWS.md) 取代。
+
 ## 交付目标
 
 Windows 独立客户端及安装程序，运行时不需要 Node、npm、开发服务器或外部浏览器。保留现有 TypeScript / Three.js 前端、材质、字轮、镜头、主题、搜索定位及音频交互。开发构建仍使用 Node 和 Vite。

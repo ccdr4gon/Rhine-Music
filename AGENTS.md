@@ -7,7 +7,8 @@
 - V0.2.0 原发布包仅支持 macOS；用户于 2026-09-30 授权新增 Windows 支持。当前开发范围包括 Windows 启动、目录处理、构建与验证，并保留 macOS 启动方式及既有交互。
 - 用户已确认最终目标为 Tauri + Rust 独立客户端并授权完成重构，开发版本为 V0.3.0。Windows 安装版运行时不得依赖 Node、npm、Vite 或外部浏览器；保留旧 Node 服务作为 macOS 入口和对照，`npm start` 为 Tauri 开发运行，`npm run start:legacy` 为旧入口。迁移目标见 `docs/refactor/desktop-decision.md`，本地构建不等于已发布。
 - 使用 TypeScript、Three.js、Tauri 和 Rust，Node.js / Vite 只用于客户端开发构建。音乐服务只监听 127.0.0.1；保留目录边界、Origin/Host 校验及只读音乐文件约束。
-- Windows 客户端默认使用用户应用数据目录，旧 Node 服务默认索引目录仍为工程旁的 music-data-v3，两者可用 MUSIC_DATA_DIR 覆盖。不要自动查找或迁移私人曲库。禁止提交真实歌曲、封面缓存、索引、配置、密钥和本机路径。
+- 用户最新明确禁止安装包。Windows 只交付 Portable ZIP：完整解压后双击 `Rhine Music.exe`；不得生成或调用 NSIS/MSI 安装器，不自动安装 WebView2，不创建快捷方式或卸载登记。历史安装器记录保留作历史，不能作为当前使用指引。
+- Windows 客户端默认将设置、曲库和 WebView 缓存写入 exe 旁的 `data/`，可用绝对路径 MUSIC_DATA_DIR 覆盖；资源从 exe 旁的 `web/` 读取，不依赖工作目录。旧 Node 服务默认索引目录仍为工程旁的 music-data-v3。不要自动查找或迁移私人曲库。禁止提交真实歌曲、封面缓存、索引、配置、密钥和本机路径。
 
 ## 视觉与交互
 
@@ -32,6 +33,6 @@
 
 - 用户于本次发布整理中补充授权打开工程并截图：允许使用独立临时数据目录和演示封面做浏览器展示检查及 README 截图，不公开私人曲库。继续执行源码静态检查、TypeScript 与生产构建；截图不等同完整性能、真实音乐解码或功能回归验收，不追加无关自动测试。
 - 开发检查脚本保留供后续维护；历史 verification 记录不代表 V0.2.0 已重新执行同样的检查。
-- 前端构建用 npm ci 和 npm run build；Windows 安装包用 npm run desktop:build，Rust 验证用 npm run check:desktop。Tauri 构建前执行 desktop:prepare，整理目标平台依赖许可证；安装包只包含 Rust 程序、已构建界面及许可，不打包 Node 或 node_modules。dist、src-tauri/target、缓存、临时验证截图和备份不进入发布源码包；按授权采集并审阅的 docs/media/v0.2.0 和 docs/media/v0.3.0 文档截图随源码分发。
+- 前端构建用 npm ci 和 npm run build；npm run desktop:build / desktop:portable 仅以 --no-bundle 构建并生成 Portable ZIP，Rust 验证用 npm run check:desktop。Tauri 构建前执行 desktop:prepare，整理目标平台依赖许可证；便携包只包含 Rust 程序、已构建界面及许可，不打包 Node、node_modules 或用户 data。dist、src-tauri/target、缓存、临时验证截图和备份不进入发布源码包；按授权采集并审阅的 docs/media/v0.2.0 和 docs/media/v0.3.0 文档截图随源码分发。
 - 当前客户端验证写入 docs/WINDOWS.md，分别记录实际运行、安装包、体积和未验证范围。旧浏览器验证和 v0.2.0 配图不代表 Tauri 已通过验收。
 - 原版入口 ?original=1 仍依赖 src、content 和 public 里的共享资源；不能仅按音乐界面删掉这些资源。
