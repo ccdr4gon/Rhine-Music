@@ -1,4 +1,6 @@
 node_modules/
+src-tauri/target/
+src-tauri/gen/
 backups/
 dist/
 .tools/

@@ -7,6 +7,7 @@
 | 范围 | 署名与来源 |
 | --- | --- |
 | 音乐播放器适配及后续修改 | **Copyright (c) 2026 RonaldDeng**。包括本地曲库与播放服务、音乐专辑模型适配、音乐界面、导航、相机交互、文字效果、响应式及版本维护中由本项目新增或修改的部分；不主张对未修改的上游代码或第三方素材享有原创权利。 |
+| Windows 独立客户端改编 | **ccdr4gon**。Tauri 窗口、Rust 曲库服务及 Windows 构建集成；保留 RonaldDeng 的音乐适配和 LBEILC 的上游署名，不将原有实现或第三方资源重新署名为客户端改编者原创。 |
 | 原版 RhineLabUI | **Copyright (c) 2026 LBEILC**。[原仓库](https://github.com/LBEILC/RhineLabUI)，初始基于提交 [`5abab02367465d9189f4ae65bcb6f17fdb5938f7`](https://github.com/LBEILC/RhineLabUI/tree/5abab02367465d9189f4ae65bcb6f17fdb5938f7)。保留其三维档案界面、渲染与动效基础、建模脚本、资料说明和 Git 历史。 |
 
 有权授权的程序代码、建模脚本和技术文档沿用 [MIT License](LICENSE)，保留以上两项署名。分发代码或其重要部分时须一并保留版权声明及完整许可证；适配者的署名不取代上游署名。MIT 允许使用、修改及商业分发，软件按原样提供；本说明不在 MIT 上另加用途限制。具体以许可证原文为准，参见 [MIT 许可说明](https://choosealicense.com/licenses/mit/)。
@@ -36,6 +37,16 @@
 | OpenCC-JS | nk2028，MIT；所用 OpenCC 字典数据另受 Apache-2.0 约束 | [MIT](public/licenses/opencc-js.txt)、[第三方说明](public/licenses/opencc-js-third-party.md)、[Apache-2.0](public/licenses/apache-2.0.txt) |
 
 这些文本保留依赖包原文。完整版本树见 `package-lock.json`；其他构建工具和间接依赖按安装包各自的 LICENSE / NOTICE 使用，不被本项目重新授权。
+
+## Windows 客户端依赖
+
+v0.3.0 使用 Tauri、Rust 和系统 Microsoft Edge WebView2。运行时不附带 Node.js、npm、music-metadata 或 OpenCC-JS 的后台程序；旧 Node 源码和既有许可仍保留，以支持 macOS 原入口和开发对照。Three.js、Rolling Number、字体及其他界面资源继续按上述许可分发。
+
+Rust 直接及间接依赖版本锁定在 `src-tauri/Cargo.lock`。`scripts/desktop-resources.mjs` 根据实际目标平台收集正常依赖和构建依赖的 LICENSE / COPYING / NOTICE，并生成安装目录下的 `web/licenses/rust-dependencies.txt` 和 `rust-dependencies.json`。清单提供包名、版本、声明许可、作者及准确版本的公开源码下载链接；包含 Tauri、Lofty、ID3、Reqwest、WebView2 bindings 等依赖，既有许可不被项目 MIT 取代。未修改的 MPL-2.0 依赖源码通过各自清单链接提供。
+
+部分 crates.io 包未携带许可文本，补充文件保存在 [scripts/desktop-licenses](scripts/desktop-licenses/README.md)，记录发布包对应提交的上游原文与标准许可来源。Ferrous OpenCC 的繁简字典来自 [OpenCC](https://github.com/BYVoid/OpenCC)，按字典文件头声明的 Apache-2.0 保留许可和出处；生成清单一并保留其字典说明。构建不修改这些第三方 Rust 源码。
+
+WebView2 Runtime 为 Microsoft 分发的系统组件，按其自身条款使用和更新；安装器缺少该组件时调用 Microsoft 引导程序获取，并未将它或相关商标改授为本项目 MIT。客户端安装程序不包含私人曲库或在线资料缓存。
 
 ## 在线资料
 

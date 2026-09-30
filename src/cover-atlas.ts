@@ -80,7 +80,9 @@ function paintCover(
   );
   context.font = `${Math.max(9, height * 0.025)}px sans-serif`;
   context.fillText(
-    "LOCAL COLLECTION / NO COVER",
+    record?.id.startsWith("external:")
+      ? "EXTERNAL PLAYER / NO COVER"
+      : "LOCAL COLLECTION / NO COVER",
     width / 2,
     height * 0.87,
     height * 0.83,

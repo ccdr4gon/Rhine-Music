@@ -1,10 +1,18 @@
 {
   "name": "rhine-music-demo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "tauri dev",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:prepare": "npm run build && node scripts/desktop-resources.mjs",
+    "check:desktop": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+    "check:media": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-external-media.mjs",
+    "start:legacy": "node scripts/launch-music.mjs",
+    "check:launcher": "node --test scripts/check-music-launcher.mjs",
     "predev": "node scripts/export-records.mjs",
     "dev": "vite --host 127.0.0.1",
     "prebuild": "node scripts/export-records.mjs",
@@ -16,7 +24,7 @@
     "format": "prettier --write src scripts index.html package.json tsconfig.json",
     "preview": "vite preview --host 127.0.0.1",
     "music": "node scripts/music-server.mjs",
-    "check:music": "node --test scripts/check-music-library.mjs scripts/check-album-introductions.mjs && node scripts/check-music-scene.mjs && node --experimental-strip-types --test scripts/check-music-player.mjs && node scripts/check-music-motion.mjs && node scripts/check-music-camera.mjs && node scripts/check-music-lighting.mjs && node scripts/check-music-presentation.mjs && node scripts/check-music-model.mjs"
+    "check:music": "node --test scripts/check-music-library.mjs scripts/check-album-introductions.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-scene.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-music-player.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-motion.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-camera.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-lighting.mjs && node scripts/check-music-presentation.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-model.mjs"
   },
   "dependencies": {
     "@kitlangton/rolling-number": "0.4.1",
@@ -25,6 +33,7 @@
     "three": "^0.183.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.12.0",
     "@types/three": "^0.183.0",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",

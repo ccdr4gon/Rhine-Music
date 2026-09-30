@@ -1,4 +1,5 @@
 import "@kitlangton/rolling-number/styles.css";
+import { chooseMusicFolders, flushDesktopPreferences, isDesktop, saveDesktopPreferences } from "./desktop";
 import "./style.css";
 import "./quality-settings.css";
 import "./document-decryption.css";
@@ -9,6 +10,12 @@ import "./music-navigation-ruler.css";
 import "./music-transport-title.css";
 import "./music-theme.css";
 import "./music-theme-switch.css";
+import "./external-media.css";
+import {
+  ExternalMediaConnection, nativeMediaPort, mediaLibrary, mediaVisualKey,
+  mediaConnectionLabel, mediaPlaybackLabel, mediaTime, mediaSourcesMarkup,
+  mediaPermissionMarkup, type MediaAction,
+} from "./external-media";
 import { DocumentDecryption } from "./document-decryption";
 import { ContentTransition, SurfaceTransition } from "./ui-transitions";
 import { qualityMarkup, syncQualityUI } from "./quality-settings";
@@ -51,7 +58,9 @@ import { MusicBoot } from "./music-boot";
 import { viewportLayout } from "./viewport-layout";
 
 type Theme = "day" | "night";
-type Panel = "library" | "search" | "settings" | null;
+type Panel = "library" | "search" | "settings" | "sources" | null;
+const externalMode = new URLSearchParams(location.search).get("mode") === "external";
+const externalMedia = externalMode ? new ExternalMediaConnection(nativeMediaPort) : undefined;
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
   document.querySelector<T>(selector)!;
 const svg = (path: string) =>
@@ -79,6 +88,7 @@ const save = (key: string, value: unknown) => {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {}
+  if (key === "rhine-music-preferences") saveDesktopPreferences(value);
 };
 const preferences = {
   ...{
@@ -156,22 +166,23 @@ let viewer: ModelViewer | undefined;
 let boot: MusicBoot | undefined;
 const effects = new TerminalAudio();
 effects.configure({
-  sound: preferences.sound,
+  sound: !externalMode && preferences.sound,
   music: false,
   soundVolume: preferences.soundVolume,
   musicVolume: 0,
 });
-document.addEventListener("pointerdown", () => void effects.unlock(), {
+if (!externalMode) document.addEventListener("pointerdown", () => void effects.unlock(), {
   once: true,
 });
-document.addEventListener("keydown", () => void effects.unlock(), {
+if (!externalMode) document.addEventListener("keydown", () => void effects.unlock(), {
   once: true,
 });
 let toastTimer: ReturnType<typeof setTimeout>,
   pollTimer: ReturnType<typeof setTimeout> | undefined;
 let columnMemory = new Map<string, string>();
-let playerState: MusicPlayerState;
-const player = new MusicPlayer({
+let playerState: MusicPlayerState | undefined;
+// Connection mode never creates an Audio element or a local playback queue.
+const player = externalMode ? undefined : new MusicPlayer({
   volume: preferences.volume,
   songFadeEnabled: preferences.songFade,
   bgmEnabled: preferences.bgm,
@@ -185,47 +196,51 @@ const stage = $("#stage");
 stage.className = "music-app";
 stage.dataset.mode = "archive";
 stage.dataset.theme = preferences.theme;
+stage.dataset.external = String(externalMode);
 stage.innerHTML = `
   <div id="three-scene" class="three-scene"></div>
   <div class="music-vignette" aria-hidden="true"></div>
   <header class="music-header">
-    <div class="music-identity"><a class="music-brand" href="/" aria-label="Rhine Music 音乐库"><strong>RHINE LAB</strong><span>MUSIC ARCHIVE <i>／</i> 私人音乐终端</span></a></div>
+    <div class="music-identity"><a class="music-brand" href="/" aria-label="Rhine Music 音乐库"><strong>RHINE LAB</strong><span>${externalMode ? "MUSIC CONNECTION <i>／</i> 外部播放器" : "MUSIC ARCHIVE <i>／</i> 私人音乐终端"}</span></a></div>
     <nav class="music-topnav" aria-label="音乐终端导航">
-      <button data-action="library" aria-label="音乐库">${icons.folder}<span>音乐库</span></button>
-      <button data-action="search" aria-label="搜索">${icons.search}<span>搜索</span></button>
+      ${externalMode ? '<button data-action="sources" class="external-connect" aria-label="选择外部播放器">↗<span>播放器</span></button><button data-action="local-mode" class="external-connect" aria-label="返回本地音乐库">←<span>本地音乐</span></button>' : `<button data-action="library" aria-label="音乐库">${icons.folder}<span>音乐库</span></button><button data-action="search" aria-label="搜索">${icons.search}<span>搜索</span></button>${isDesktop ? '<button data-action="external-mode" class="external-connect" aria-label="连接外部播放器">↗<span>连接播放器</span></button>' : ""}`}
       <div class="theme-switch" aria-label="主题">${(["day", "night"] as Theme[]).map((t) => `<button data-theme="${t}" aria-label="${themeNames[t]}主题" aria-pressed="${preferences.theme === t}"><i class="theme-dot ${t}"></i><span>${themeNames[t]}</span></button>`).join("")}</div>
       <button data-action="settings" class="icon-button" aria-label="播放与画质设置">${icons.settings}</button>
-      <div class="minimal-transport" role="group" aria-label="音乐播放"><span id="transport-track" class="transport-track" aria-hidden="true"><span id="transport-track-label"></span></span><button data-action="play-pause" id="play-pause" aria-label="播放" aria-pressed="false"><span class="transport-glyph transport-play" aria-hidden="true">${icons.play}</span><span class="transport-glyph transport-pause" aria-hidden="true">${icons.pause}</span></button><button data-action="stop" id="stop-playback" aria-label="停止">${icons.stop}</button></div>
+      <div class="minimal-transport" role="group" aria-label="音乐播放"><span id="transport-track" class="transport-track" aria-hidden="true"><span id="transport-track-label"></span></span>${externalMode ? '<button data-media-action="previous" class="external-header-prev" aria-label="外部播放器上一曲" disabled>‹</button>' : ""}<button data-action="play-pause" id="play-pause" aria-label="播放" aria-pressed="false"><span class="transport-glyph transport-play" aria-hidden="true">${icons.play}</span><span class="transport-glyph transport-pause" aria-hidden="true">${icons.pause}</span></button>${externalMode ? '<button data-media-action="next" class="external-header-next" aria-label="外部播放器下一曲" disabled>›</button>' : ""}<button data-action="stop" id="stop-playback" aria-label="停止">${icons.stop}</button></div>
     </nav>
   </header>
-  <div id="library-status" class="library-status"><i></i><span>正在读取本地音乐索引</span></div>
+  <div id="library-status" class="library-status"><i></i><span>${externalMode ? "正在发现外部播放器" : "正在读取本地音乐索引"}</span></div>
   <section id="music-browse" class="music-browse" aria-label="专辑浏览">
     <div class="music-browse-veil" aria-hidden="true"></div>
     <div class="album-callout"><p class="music-eyebrow">MUSIC ARCHIVE <span>／</span> <span id="selection-genre"></span></p>
-      <div class="selection-rule"><span id="selection-code">ALBUM <span id="selection-code-number">001</span></span><span id="selection-format"></span></div>
+      <div class="selection-rule"><span id="selection-code">${externalMode ? "LIVE TRACK" : "ALBUM"} <span id="selection-code-number" ${externalMode ? "hidden" : ""}>001</span></span><span id="selection-format"></span></div>
       <h1 id="selection-title"></h1><p id="selection-artist" class="selection-artist"></p>
       <div class="selection-meta" id="selection-meta"></div>
-      <button class="open-album" data-action="open">打开专辑 <span>↗</span></button>
+      <button class="open-album" data-action="open">${externalMode ? "当前曲目与控制" : "打开专辑"} <span>↗</span></button>
     </div>
     <div class="music-navigation">
       <div class="music-counter"><span class="music-eyebrow">ALBUM / SELECT</span><div><b id="selection-number">01</b><span>/ <i id="selection-total">00</i></span></div></div>
       <div class="album-stepper"><button data-action="prev" aria-label="上一个专辑">↑</button><div id="album-ticks"></div><button data-action="next" aria-label="下一个专辑">↓</button></div>
       <div class="genre-stepper"><button data-action="genre-prev" aria-label="上一个${sortLabel.column}">←</button><div><small id="genre-position">${sortLabel.code} <span id="genre-index">01</span> / <span id="genre-total">00</span></small><button data-action="genres" id="genre-name"></button></div><button data-action="genre-next" aria-label="下一个${sortLabel.column}">→</button></div>
     </div>
-    <div class="music-keyhint">← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑</div>
+    <div class="music-keyhint">${externalMode ? "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目" : `← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑`}</div>
   </section>
   <section id="music-detail" class="music-detail" aria-label="专辑详情" hidden>
     <button class="music-back" data-action="back">← 返回专辑架 <kbd>ESC</kbd></button>
     <div class="card-caption"><span id="detail-card-id"></span><small>拖动卡片，查看完整封面</small></div>
     <article id="album-detail-content" tabindex="-1"></article>
   </section>
-  <div id="music-empty" class="music-empty" hidden><small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><p>选择本地音乐文件夹，专辑封面会出现在每一张卡片上。</p><button data-action="library">设置音乐文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示封面</button></div>
-  <div class="music-bottomline"><span>LOCAL COLLECTION <i>·</i> <span id="library-count">0 ALBUMS</span></span><span id="runtime-info">THREE.JS / LOCAL</span></div>
+  <div id="music-empty" class="music-empty" hidden>${externalMode ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p>选择一个外部播放器，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。</p><button data-action="sources">选择播放器 ↗</button><button data-action="local-mode" class="subtle">返回本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><p>选择本地音乐文件夹，专辑封面会出现在每一张卡片上。</p><button data-action="library">设置音乐文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示封面</button>'}</div>
+  <div class="music-bottomline"><span>${externalMode ? "EXTERNAL PLAYER" : "LOCAL COLLECTION"} <i>·</i> <span id="library-count">${externalMode ? "NOT CONNECTED" : "0 ALBUMS"}</span></span><span id="runtime-info">THREE.JS / ${externalMode ? "EXTERNAL" : "LOCAL"}</span></div>
   <div id="music-panel-root"></div><div id="music-toast" role="status" aria-live="polite"></div>
   <div id="music-loading"><span class="loading-orbit"></span><strong>OPENING THE ARCHIVE</strong><small>正在载入三维专辑架</small></div>
 `;
 const titleMotion = setupMusicTitleLayout(stage);
 const textMotion = setupMusicTextMotion(stage);
+if (externalMode) {
+  $<HTMLButtonElement>("#play-pause").disabled = true;
+  $<HTMLButtonElement>("#stop-playback").disabled = true;
+}
 // Keep the previous navigation available while the ruler version is on trial.
 const tickMotion = new URLSearchParams(location.search).get("nav") === "previous"
   ? setupMusicTicks($("#album-ticks"))
@@ -425,6 +440,17 @@ function showBrowseSurface() {
 function savePrefs() {
   save("rhine-music-preferences", preferences);
 }
+function reloadPlayer() {
+  void flushDesktopPreferences().then(() => location.reload()).catch((error) => notify(String(error)));
+}
+function changePlayerMode(external: boolean) {
+  player?.stop();
+  player?.dispose();
+  const url = new URL(location.href);
+  if (external) url.searchParams.set("mode", "external");
+  else url.searchParams.delete("mode");
+  void flushDesktopPreferences().then(() => location.assign(url.href)).catch(error => notify(String(error)));
+}
 function setTheme(theme: Theme) {
   if (theme !== "day" && theme !== "night") theme = "day";
   if (theme === preferences.theme) return;
@@ -471,6 +497,7 @@ async function request<T>(url: string, body?: unknown): Promise<T> {
   return data as T;
 }
 async function loadLibrary(force = false) {
+  if (externalMode) return;
   // Keep the selected cards and cover atlas stable for the opening shot.
   if (boot?.active) {
     clearTimeout(pollTimer);
@@ -490,7 +517,7 @@ async function loadLibrary(force = false) {
     updateIntroductionStatus();
     if (force)
       notify(
-        `${(error as Error).message}。请使用 npm run music 启动本地音乐服务。`,
+        `${(error as Error).message}。${isDesktop ? "请关闭后重新打开播放器，本机曲库数据会保留。" : "请使用 npm run music 启动本地音乐服务。"}`,
       );
   } finally {
     refreshing = false;
@@ -535,7 +562,7 @@ async function receiveLibrary(next: MusicLibrary, force = false) {
   if (scanFailed) notify(`音乐库扫描失败：${next.scan.error}`);
   if (scanCompleted && !scanRefreshTimer) {
     notify("音乐库扫描完成，2 秒后自动刷新页面。");
-    scanRefreshTimer = setTimeout(() => location.reload(), 2000);
+    scanRefreshTimer = setTimeout(reloadPlayer, 2000);
   }
 }
 async function applyLibrary() {
@@ -549,9 +576,10 @@ async function applyLibrary() {
     ]);
   const oldVisual = visualKey(albums, genres);
   if (library.albums.length) demo = false;
-  albums = orderMusicAlbums(demo ? demoAlbums : library.albums, preferences.sortMode);
+  const displaySort = externalMode ? "genre" : preferences.sortMode;
+  albums = orderMusicAlbums(demo ? demoAlbums : library.albums, displaySort);
   genres = demo ? demoGenres : library.genres;
-  setMusicAlbums(albums, genres, preferences.sortMode);
+  setMusicAlbums(albums, genres, displaySort);
   selected = Math.max(
     0,
     records.findIndex((r) => r.id === previousId),
@@ -610,6 +638,12 @@ async function applyLibrary() {
   updateStatus();
 }
 function updateStatus() {
+  if (externalMedia) {
+    $("#library-status span").textContent = mediaConnectionLabel(externalMedia);
+    $("#library-status").classList.remove("working");
+    $("#library-count").textContent = externalMedia.selected ? "CURRENT TRACK ONLY" : "NOT CONNECTED";
+    return;
+  }
   const n = library.albums.length,
     tracks = library.albums.reduce((sum, a) => sum + a.tracks.length, 0);
   const label = !apiAvailable
@@ -656,11 +690,11 @@ function updateSelection(navigation?: ArchiveNavigation) {
       genreIndex: location.lane + 1,
       genre: archiveColumns[location.lane],
       genreName: archiveColumns[location.lane],
-      format: demo
+      format: externalMode ? "EXTERNAL / 当前曲目" : demo
         ? "DEMO"
         : [...new Set(a.tracks.map((t) => t.format))].join(" / "),
       artist: a.artist,
-      meta: [
+      meta: externalMedia ? [externalMedia.selected?.album || "专辑未提供", "仅当前曲目"].join("  /  ") : [
         a.year ? String(a.year) : "年份未提供",
         demo ? "演示封面" : `${a.tracks.length} 首曲目`,
         a.tracks.length ? time(albumDuration(a)) : "",
@@ -680,7 +714,7 @@ function updateSelection(navigation?: ArchiveNavigation) {
     navigation,
   );
   $("#detail-card-id").textContent =
-    `ALBUM / ${String(selected + 1).padStart(3, "0")}`;
+    externalMode ? "NOW PLAYING / 当前曲目" : `ALBUM / ${String(selected + 1).padStart(3, "0")}`;
   // Hidden archive content can prepare its static reels before the reveal.
   if (!animated) syncSelectionMotion();
 }
@@ -722,6 +756,7 @@ function navigationSelection() {
   return presentation.pendingSelection?.index ?? selected;
 }
 function stepAlbum(direction: number) {
+  if (externalMode) return;
   if (!records.length) return;
   const cursor = navigationSelection();
   const files = columnFiles(fileLocation(cursor).lane);
@@ -732,6 +767,7 @@ function stepAlbum(direction: number) {
     });
 }
 function stepGenre(direction: number) {
+  if (externalMode) return;
   if (!records.length || archiveColumns.length < 2) return;
   const lane = wrap(
     fileLocation(navigationSelection()).lane + direction,
@@ -781,6 +817,7 @@ function setTab(tab: "tracks" | "about") {
   effects.play("ui-tick");
 }
 function renderDetail() {
+  if (externalMedia) return renderExternalDetail();
   const a = currentAlbum();
   if (!a) return;
   trackFocus.cancel();
@@ -956,7 +993,7 @@ const transportTitleMotion = setupTransportTitle(
   $("#transport-track-label"),
 );
 transportTitleMotion.setReduced(preferences.reduced);
-player.subscribe((state) => {
+player?.subscribe((state) => {
   playerState = state;
   const titleVisible = !!state.currentTrack &&
     (state.transport === "playing" || state.transport === "paused" || state.transport === "loading");
@@ -973,6 +1010,171 @@ player.subscribe((state) => {
   lastPlayerError = state.error || "";
   updatePlayingRows();
 });
+
+let externalVisual: string | undefined;
+let externalPoll: ReturnType<typeof setTimeout> | undefined;
+let externalStopped = false;
+let externalRefreshing = false;
+let externalUpdating: Promise<void> = Promise.resolve();
+let sourcesVisual = "";
+let externalSeekPointer: number | undefined;
+const externalSeekKeys = new Set<string>();
+const seekAdjustmentKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+let externalSeekSettling = false;
+let externalSeekRelease: ReturnType<typeof setTimeout> | undefined;
+function beginExternalSeek() {
+  clearTimeout(externalSeekRelease);
+  externalSeekSettling = false;
+}
+function finishExternalSeek() {
+  if (externalSeekPointer !== undefined || externalSeekKeys.size) return;
+  clearTimeout(externalSeekRelease);
+  externalSeekSettling = true;
+  // Let the range's change event capture its committed value before polling
+  // can restore a position from the preceding native snapshot.
+  externalSeekRelease = setTimeout(() => {
+    externalSeekSettling = false;
+    updateExternalControls();
+  }, 0);
+}
+if (externalMode) {
+  document.addEventListener("pointerdown", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "external-seek" || target.disabled) return;
+    beginExternalSeek();
+    externalSeekPointer = event.pointerId;
+  });
+  for (const type of ["pointerup", "pointercancel"] as const) window.addEventListener(type, event => {
+    if (externalSeekPointer !== event.pointerId) return;
+    externalSeekPointer = undefined;
+    finishExternalSeek();
+  });
+  document.addEventListener("keydown", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "external-seek" || target.disabled || !seekAdjustmentKeys.has(event.key)) return;
+    beginExternalSeek();
+    externalSeekKeys.add(event.key);
+  });
+  window.addEventListener("keyup", event => {
+    if (externalSeekKeys.delete(event.key)) finishExternalSeek();
+  });
+  const releaseSeek = () => {
+    externalSeekPointer = undefined;
+    externalSeekKeys.clear();
+    finishExternalSeek();
+  };
+  document.addEventListener("focusout", event => {
+    if ((event.target as HTMLElement)?.id === "external-seek") releaseSeek();
+  });
+  window.addEventListener("blur", releaseSeek);
+}
+
+function updateExternalControls() {
+  if (!externalMedia) return;
+  const source = externalMedia.selected;
+  updateStatus();
+  transportTitleMotion.update(source?.title || "", !!source?.title);
+  const toggle = $<HTMLButtonElement>("#play-pause");
+  toggle.disabled = !externalMedia.can("toggle");
+  toggle.setAttribute("aria-pressed", String(source?.playback === "playing"));
+  const toggleLabel = source?.playback === "playing" ? "暂停" : source?.playback === "unknown" ? "播放 / 暂停（状态未知）" : "播放";
+  toggle.setAttribute("aria-label", toggleLabel);
+  toggle.title = source ? `${source.name}：${toggleLabel}` : "请先连接播放器";
+  $<HTMLButtonElement>("#stop-playback").disabled = !externalMedia.can("stop");
+  document.querySelectorAll<HTMLButtonElement>("[data-media-action]").forEach(button => {
+    button.disabled = !externalMedia.can(button.dataset.mediaAction as MediaAction);
+    if (button.dataset.mediaAction === "toggle") button.textContent = toggleLabel;
+  });
+  document.querySelectorAll<HTMLElement>("[data-media-playback]").forEach(node => { node.textContent = mediaPlaybackLabel(source); });
+  document.querySelectorAll<HTMLElement>("[data-media-album]").forEach(node => { node.textContent = source?.album || "未提供"; });
+  document.querySelectorAll<HTMLElement>("[data-media-position]").forEach(node => { node.textContent = mediaTime(source?.position); });
+  document.querySelectorAll<HTMLElement>("[data-media-duration]").forEach(node => { node.textContent = mediaTime(source?.duration); });
+  const timeline = document.querySelector<HTMLInputElement>("#external-seek");
+  if (timeline) {
+    timeline.disabled = !externalMedia.can("seek");
+    timeline.max = String(source?.duration || 1);
+    if (externalSeekPointer === undefined && !externalSeekKeys.size && !externalSeekSettling)
+      timeline.value = String(source?.position || 0);
+  }
+  const timelineLabel = document.querySelector<HTMLElement>("[data-media-timeline-label]");
+  if (timelineLabel) timelineLabel.textContent = source?.duration && source.duration > 0 ? "播放位置" : "时长不可用";
+  const warning = [externalMedia.warning, source?.warning, externalMedia.error].filter(Boolean).join("\n");
+  document.querySelectorAll<HTMLElement>("[data-media-warning]").forEach(node => { node.textContent = warning; });
+  const connection = document.querySelector<HTMLElement>("#external-connection-status");
+  if (connection) connection.textContent = mediaConnectionLabel(externalMedia);
+  const disconnected = document.querySelector<HTMLButtonElement>('[data-action="disconnect-source"]');
+  if (disconnected) disconnected.disabled = !externalMedia.selectedId;
+  if (panel === "sources") {
+    const key = JSON.stringify([externalMedia.sources.map(item => [item.id, item.name, item.title, item.artist]), source?.id]);
+    if (key !== sourcesVisual) {
+      sourcesVisual = key;
+      $("#external-sources").innerHTML = mediaSourcesMarkup(externalMedia);
+    }
+    const permission = $("#external-permission");
+    if (permission.dataset.source !== (source?.id || "")) {
+      permission.dataset.source = source?.id || "";
+      permission.innerHTML = mediaPermissionMarkup(externalMedia);
+    }
+    const consent = document.querySelector<HTMLInputElement>("#external-global-keys");
+    if (consent) consent.checked = externalMedia.allowGlobalMediaKeys;
+  }
+}
+function syncExternal(): Promise<void> {
+  // Serialize scene changes; a later snapshot wins after an in-flight cover upload.
+  externalUpdating = externalUpdating.catch(error => notify(String(error))).then(async () => {
+    if (!externalMedia || externalStopped) return;
+    updateExternalControls();
+    const nextVisual = mediaVisualKey(externalMedia.selected);
+    if (nextVisual !== externalVisual) {
+      library = mediaLibrary(externalMedia.selected);
+      await applyLibrary();
+      externalVisual = nextVisual;
+    }
+    updateExternalControls();
+  });
+  return externalUpdating;
+}
+async function refreshExternal() {
+  if (!externalMedia || externalStopped || externalRefreshing) return;
+  externalRefreshing = true;
+  clearTimeout(externalPoll);
+  try {
+    await externalMedia.refresh();
+    await syncExternal();
+  } catch (error) { notify(String(error)); }
+  finally {
+    externalRefreshing = false;
+    if (!externalStopped) externalPoll = setTimeout(() => void refreshExternal(), document.hidden ? 2000 : 1000);
+  }
+}
+async function controlExternal(action: MediaAction, position?: number) {
+  if (!externalMedia) return;
+  const pending = externalMedia.control(action, position);
+  updateExternalControls();
+  await pending;
+  if (externalMedia.error) notify(externalMedia.error);
+  await refreshExternal();
+}
+function renderSourcesPanel() {
+  if (!externalMedia) return;
+  sourcesVisual = "";
+  $("#panel-body").innerHTML = `<p class="panel-intro">选择要连接的播放器。只读取它的当前曲目、封面与可用控制；不会导入曲库，也不会自动选择其他来源。</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div><div id="external-permission"></div><p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，不猜测进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
+  updateExternalControls();
+}
+function renderExternalDetail() {
+  const source = externalMedia?.selected;
+  if (!source) return;
+  const article = $("#album-detail-content");
+  article.innerHTML = `<div class="detail-overline"><span>EXTERNAL / 当前曲目</span><button data-action="sources">${esc(source.name)} ↗</button></div><h1 title="${esc(source.title || "曲名未提供")}">${albumTitleMarkup(source.title || "曲名未提供")}</h1><p class="detail-artist">${esc(source.artist || "歌手未提供")}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span data-media-album>${esc(source.album || "未提供")}</span></div><div><small>STATUS / 播放状态</small><span data-media-playback></span></div></div><div class="external-controls" role="group" aria-label="外部播放器控制"><button data-media-action="previous">上一曲</button><button data-media-action="toggle">播放 / 暂停</button><button data-media-action="next">下一曲</button><button data-media-action="stop">停止</button></div><label class="external-timeline" for="external-seek"><span><span data-media-timeline-label>播放位置</span> <output><span data-media-position></span> / <span data-media-duration></span></output></span><input type="range" id="external-seek" min="0" max="1" step="1" value="0" disabled aria-label="外部播放器播放位置"></label><p class="external-note">只显示当前曲目，不代表完整专辑或播放队列。音量与音效由原播放器控制；灰色按钮表示该来源当前未提供相应能力。</p><p data-media-warning class="external-warning" role="status"></p>`;
+  documentDecryption.reset(article, preferences.reduced || scene?.decryptionFrame.phase === "clear");
+  updateExternalControls();
+}
+window.addEventListener("beforeunload", () => {
+  externalStopped = true;
+  clearTimeout(externalPoll);
+  clearTimeout(externalSeekRelease);
+  player?.dispose();
+}, { once: true });
 
 let panelFocus: HTMLElement | null = null;
 let panelTransition: SurfaceTransition | undefined,
@@ -1009,6 +1211,7 @@ function closePanel(after?: () => void) {
 }
 function openPanel(next: Panel) {
   if (!next) return closePanel();
+  if (externalMode && (next === "library" || next === "search")) next = "sources";
   cancelSearchTrack();
   panelTransition?.dispose();
   pendingPanelAfter = undefined;
@@ -1019,6 +1222,7 @@ function openPanel(next: Panel) {
     library: ["MUSIC LIBRARY", "本地音乐库"],
     search: ["FIND MUSIC", "搜索专辑与歌曲"],
     settings: ["SYSTEM SETTINGS", "播放与画质"],
+    sources: ["CONNECT YOUR PLAYER", "连接外部播放器"],
   };
   $("#music-panel-root").innerHTML =
     `<div class="music-panel-scrim" data-action="dismiss-panel"><section class="music-panel" role="dialog" aria-modal="true" aria-labelledby="music-panel-title"><div class="panel-heading"><div><small>${titles[next][0]}</small><h2 id="music-panel-title">${titles[next][1]}</h2></div><button data-action="close-panel" aria-label="关闭">×</button></div><div id="panel-body"></div></section></div>`;
@@ -1037,6 +1241,7 @@ function openPanel(next: Panel) {
   if (next === "library") renderLibraryPanel();
   if (next === "search") renderSearchPanel();
   if (next === "settings") renderSettingsPanel();
+  if (next === "sources") renderSourcesPanel();
   (
     document.querySelector<HTMLElement>("#album-search") ||
     $("#music-panel-root button")
@@ -1044,7 +1249,21 @@ function openPanel(next: Panel) {
 }
 function renderLibraryPanel() {
   $("#panel-body").innerHTML =
-    `<p class="panel-intro">根目录中的每首单曲各是一张卡片，优先使用自身内嵌封面。子文件夹按专辑展示，优先使用文件夹封面。</p><label class="field-label" for="music-roots">音乐文件夹<span>多个目录各占一行</span></label><textarea id="music-roots" rows="3" placeholder="/Users/你的用户名/Music">${esc(library.roots.map((r) => r.path).join("\n"))}</textarea><div class="panel-actions"><button class="primary-button" data-action="scan">保存目录并扫描 ↗</button><button data-action="rescan">重新扫描</button></div><div id="scan-status" class="scan-status"></div><div class="library-metrics"><div><b>${library.albums.length}</b><span>专辑</span></div><div><b>${library.albums.reduce((n, a) => n + a.tracks.length, 0)}</b><span>曲目</span></div><div><b>${library.genres.filter((g) => library.albums.some((a) => a.genreId === g.id)).length}</b><span>流派</span></div></div><section class="panel-section"><h3>在线资料与本地分类</h3><p>向 MusicBrainz 查询专辑名称与艺术家，补充流派和制作人员；音乐文件留在本机。已有资料使用缓存，人工分类优先保留。</p><button data-action="enrich-library" class="text-button">补充缺失的在线资料 ↗</button><button data-action="edit-genres" class="text-button">编辑流派归并规则 ↗</button></section><section class="panel-section"><h3>封面显示</h3><p>方形、竖版、横版封面均保持原始比例，完整放入卡片正面。没有封面时显示专辑名称占位，不使用其他专辑的图片。</p>${!library.albums.length ? '<button data-action="demo" class="text-button">查看演示封面 ↗</button>' : ""}</section>`;
+    `<p class="panel-intro">根目录中的每首单曲各是一张卡片，优先使用自身内嵌封面。子文件夹按专辑展示，优先使用文件夹封面。</p><label class="field-label" for="music-roots">音乐文件夹<span>多个目录各占一行</span></label><textarea id="music-roots" rows="3" placeholder="Windows: D:\\Music&#10;macOS: /Users/你的用户名/Music">${esc(library.roots.map((r) => r.path).join("\n"))}</textarea><div class="panel-actions"><button class="primary-button" data-action="scan">保存目录并扫描 ↗</button><button data-action="rescan">重新扫描</button></div><div id="scan-status" class="scan-status"></div><div class="library-metrics"><div><b>${library.albums.length}</b><span>专辑</span></div><div><b>${library.albums.reduce((n, a) => n + a.tracks.length, 0)}</b><span>曲目</span></div><div><b>${library.genres.filter((g) => library.albums.some((a) => a.genreId === g.id)).length}</b><span>流派</span></div></div><section class="panel-section"><h3>在线资料与本地分类</h3><p>向 MusicBrainz 查询专辑名称与艺术家，补充流派和制作人员；音乐文件留在本机。已有资料使用缓存，人工分类优先保留。</p><button data-action="enrich-library" class="text-button">补充缺失的在线资料 ↗</button><button data-action="edit-genres" class="text-button">编辑流派归并规则 ↗</button></section><section class="panel-section"><h3>封面显示</h3><p>方形、竖版、横版封面均保持原始比例，完整放入卡片正面。没有封面时显示专辑名称占位，不使用其他专辑的图片。</p>${!library.albums.length ? '<button data-action="demo" class="text-button">查看演示封面 ↗</button>' : ""}</section>`;
+  if (isDesktop) {
+    const picker = document.createElement("button");
+    picker.textContent = "选择音乐文件夹…";
+    picker.addEventListener("click", async () => {
+      try {
+        const initialDirectory = document.querySelector<HTMLTextAreaElement>("#music-roots")?.value.split("\n")[0]?.trim();
+        const paths = await chooseMusicFolders(initialDirectory);
+        const input = document.querySelector<HTMLTextAreaElement>("#music-roots");
+        if (!input || !paths.length) return;
+        input.value = [...new Set([...input.value.split("\n").map((s) => s.trim()).filter(Boolean), ...paths])].join("\n");
+      } catch (error) { notify((error as Error).message); }
+    });
+    $("#panel-body .panel-actions").prepend(picker);
+  }
   updateScanStatus();
   const configSection = document.createElement("section");
   configSection.className = "panel-section";
@@ -1116,8 +1335,14 @@ function renderSettingsPanel() {
     <section class="panel-section" id="introduction-settings"><h3>专辑介绍</h3><p>从公开百科查询并更新专辑介绍，附上资料来源。介绍保存在本机，不需要配置 MusicBrainz 联系信息；音乐文件不会上传。</p><p id="introduction-coverage"></p><button class="primary-button" id="introduction-refresh" data-action="introductions-library">查询 / 更新专辑介绍 ↗</button><progress id="introduction-progress" aria-label="专辑介绍查询进度" max="1" value="0" hidden></progress><p id="introduction-status" class="scan-status" role="status" aria-live="polite"></p><details id="introduction-missing" hidden><summary></summary><ul></ul></details></section>
     ${qualityMarkup(renderQuality)}
     <section class="panel-section"><h3>动效与显示</h3><label class="settings-row"><span>减少动态效果<small>简化镜头、文字加载和页签过渡</small></span><input type="checkbox" id="reduced-motion" ${preferences.reduced ? "checked" : ""}></label><button class="text-button" data-action="fullscreen">切换全屏 ↗</button></section>
-    <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，停止后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
+    <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，停止后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 Windows 和 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
     <section class="panel-section"><h3>开发与资源</h3><p>音乐适配与维护：<a href="https://github.com/RonaldDeng/Rhine-Music-Demo" target="_blank" rel="noopener">RonaldDeng ↗</a><br>原版界面：<a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener">LBEILC / RhineLabUI ↗</a></p><p><a href="/licenses/project-mit.txt" target="_blank" rel="noopener">代码 MIT 许可 ↗</a> · <a href="https://github.com/RonaldDeng/Rhine-Music-Demo/blob/v0.2.0/NOTICE.md" target="_blank" rel="noopener">版权与资源说明 ↗</a></p><a href="/?original=1&scene=archive" target="_blank" rel="noopener">打开原版档案界面 ↗</a><p><a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">MiSans 字体许可 ↗</a></p></section>`;
+  if (externalMode) {
+    $("#music-sort").closest(".panel-section")?.remove();
+    $("#introduction-settings").remove();
+    $("#volume").closest(".panel-section")?.remove();
+    $("#panel-body").insertAdjacentHTML("afterbegin", '<p class="panel-intro">外部播放器模式只调整此窗口的外观。歌曲音量、淡入淡出与曲库管理请在原播放器中设置，此窗口不会播放本地音乐或 BGM。</p>');
+  }
   updateQuality();
   updateIntroductionStatus();
 }
@@ -1133,6 +1358,7 @@ function updateQuality() {
   savePrefs();
 }
 async function editGenres() {
+  if (externalMode) return;
   const body = document.querySelector("#panel-body");
   try {
     const rules = await request<GenreRules>("/api/genre-rules");
@@ -1143,6 +1369,7 @@ async function editGenres() {
   }
 }
 async function scan(saveRoots = false) {
+  if (externalMode) return;
   if (scanSubmitting || library.scan.running) return;
   scanSubmitting = true;
   clearTimeout(scanRefreshTimer);
@@ -1168,6 +1395,7 @@ async function scan(saveRoots = false) {
   }
 }
 async function enrich(one = false) {
+  if (externalMode) return;
   if (demo) return;
   try {
     await request(
@@ -1181,6 +1409,7 @@ async function enrich(one = false) {
   }
 }
 async function queryIntroductions(one = false) {
+  if (externalMode) return;
   const album = currentAlbum();
   if (demo || !library.albums.length || (one && !album)) return;
   if (introductionsStarting || library.introductions?.running) {
@@ -1219,9 +1448,10 @@ async function queryIntroductions(one = false) {
   }
 }
 function playAlbum(id?: string) {
+  if (externalMode) { void controlExternal("toggle"); return; }
   const a = currentAlbum();
   if (!a?.tracks.length || a.offline) return;
-  void player.play(id || a.tracks[0].id, a.tracks);
+  void player?.play(id || a.tracks[0].id, a.tracks);
 }
 
 document.addEventListener("click", (e) => {
@@ -1230,6 +1460,15 @@ document.addEventListener("click", (e) => {
     "button, [data-action]",
   );
   if (!target) return;
+  if (target instanceof HTMLButtonElement && target.disabled) return;
+  if (target.dataset.mediaSource && externalMedia) {
+    if (externalMedia.select(target.dataset.mediaSource)) void syncExternal();
+    return;
+  }
+  if (target.dataset.mediaAction && externalMedia) {
+    void controlExternal(target.dataset.mediaAction as MediaAction);
+    return;
+  }
   if (target.dataset.action === "dismiss-panel" && e.target !== target) return;
   if (target.dataset.theme) {
     setTheme(target.dataset.theme as Theme);
@@ -1276,12 +1515,25 @@ document.addEventListener("click", (e) => {
     return;
   }
   const action = target.dataset.action;
-  if (["library", "search", "settings"].includes(action || "")) {
+  if (["library", "search", "settings", "sources"].includes(action || "")) {
     searchGenre = "";
     openPanel(action as Panel);
     return;
   }
   switch (action) {
+    case "external-mode":
+      changePlayerMode(true);
+      break;
+    case "local-mode":
+      changePlayerMode(false);
+      break;
+    case "refresh-sources":
+      void refreshExternal();
+      break;
+    case "disconnect-source":
+      externalMedia?.disconnect();
+      void syncExternal();
+      break;
     case "close-panel":
     case "dismiss-panel":
       closePanel();
@@ -1321,10 +1573,12 @@ document.addEventListener("click", (e) => {
       openPanel("search");
       break;
     case "play-pause":
-      playerState.currentTrack ? void player.toggle() : playAlbum();
+      if (externalMode) void controlExternal("toggle");
+      else playerState?.currentTrack ? void player?.toggle() : playAlbum();
       break;
     case "stop":
-      player.stop();
+      if (externalMode) void controlExternal("stop");
+      else player?.stop();
       break;
     case "scan":
       void scan(true);
@@ -1379,6 +1633,7 @@ document.addEventListener("click", (e) => {
       })();
       break;
     case "demo":
+      if (externalMode) break;
       demo = true;
       closePanel(() => void applyLibrary());
       break;
@@ -1394,11 +1649,13 @@ document.addEventListener("input", (e) => {
     updateQuality();
   }
   if (el.id === "bgm-volume") {
+    if (externalMode) return;
     preferences.bgmVolume = Number(el.value) / 100;
-    player.setBgmVolume(preferences.bgmVolume);
+    player?.setBgmVolume(preferences.bgmVolume);
     savePrefs();
   }
   if (el.id === "sound-volume") {
+    if (externalMode) return;
     preferences.soundVolume = Number(el.value) / 100;
     effects.configure({
       sound: preferences.sound,
@@ -1410,18 +1667,29 @@ document.addEventListener("input", (e) => {
   }
   if (el.id === "album-search") renderSearchResults();
   if (el.id === "volume") {
+    if (externalMode) return;
     preferences.volume = Number(el.value) / 100;
-    player.setVolume(preferences.volume);
+    player?.setVolume(preferences.volume);
     savePrefs();
   }
 });
 document.addEventListener("change", (e) => {
   const el = e.target as HTMLInputElement;
+  if (externalMedia && el.id === "external-global-keys") {
+    externalMedia.setGlobalMediaKeys(el.checked);
+    updateExternalControls();
+    return;
+  }
+  if (externalMedia && el.id === "external-seek") {
+    void controlExternal("seek", Number(el.value));
+    return;
+  }
   if (el.id === "music-sort" && ["genre", "artist", "album"].includes(el.value)) {
+    if (externalMode) return;
     if (preferences.sortMode === el.value) return;
     preferences.sortMode = el.value as MusicSortMode;
     savePrefs();
-    location.reload();
+    reloadPlayer();
     return;
   }
   if (el.id === "quality-preset") {
@@ -1438,6 +1706,7 @@ document.addEventListener("change", (e) => {
     updateQuality();
   }
   if (el.id === "sound-setting") {
+    if (externalMode) return;
     preferences.sound = el.checked;
     effects.configure({
       sound: el.checked,
@@ -1448,8 +1717,9 @@ document.addEventListener("change", (e) => {
     savePrefs();
   }
   if (el.id === "song-fade-setting") {
+    if (externalMode) return;
     preferences.songFade = el.checked;
-    player.setSongFadeEnabled(el.checked);
+    player?.setSongFadeEnabled(el.checked);
     savePrefs();
   }
   if (el.id === "reduced-motion") {
@@ -1466,8 +1736,9 @@ document.addEventListener("change", (e) => {
     savePrefs();
   }
   if (el.id === "bgm-setting") {
+    if (externalMode) return;
     preferences.bgm = el.checked;
-    player.setBgmEnabled(el.checked);
+    player?.setBgmEnabled(el.checked);
     savePrefs();
   }
 });
@@ -1548,7 +1819,8 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.code === "Space" && !(e.target as HTMLElement).closest("button, a")) {
     e.preventDefault();
-    playerState.currentTrack ? void player.toggle() : playAlbum();
+    if (externalMode) void controlExternal("toggle");
+    else playerState?.currentTrack ? void player?.toggle() : playAlbum();
   }
 });
 
@@ -1616,7 +1888,8 @@ async function start() {
     const registrations = await navigator.serviceWorker.getRegistrations();
     await Promise.all(registrations.map((r) => r.unregister()));
   }
-  await loadLibrary(true);
+  if (externalMode) await refreshExternal();
+  else await loadLibrary(true);
   try {
     fit();
     scene = new ArchiveScene($("#three-scene"));
@@ -1631,7 +1904,7 @@ async function start() {
     ready = true;
     $("#three-scene canvas").setAttribute(
       "aria-label",
-      `三维专辑阵列，左右切${sortLabel.column}，上下切专辑`,
+      externalMode ? "三维卡片，显示所选外部播放器的当前曲目" : `三维专辑阵列，左右切${sortLabel.column}，上下切专辑`,
     );
     stage.classList.toggle("reduce-motion", preferences.reduced);
     await scene.refreshLibrary(selected);
@@ -1639,11 +1912,11 @@ async function start() {
     scene.setQuality(renderQuality);
     scene.setReduced(preferences.reduced);
     scene.onSelect = (index, cell) => {
-      if (!boot?.active && presentation.phase === "archive" && !panel)
+      if (!externalMode && !boot?.active && presentation.phase === "archive" && !panel)
         select(index, cell ? { cell } : undefined);
     };
     scene.onNavigate = (axis, direction) => {
-      if (!boot?.active && presentation.phase === "archive" && !panel)
+      if (!externalMode && !boot?.active && presentation.phase === "archive" && !panel)
         axis === "lane" ? stepGenre(direction) : stepAlbum(direction);
     };
     $("#music-loading").remove();
@@ -1679,7 +1952,13 @@ Object.assign(window, {
       return currentAlbum();
     },
     get player() {
-      return player.state;
+      return player?.state;
+    },
+    get external() {
+      return externalMedia ? { sources: externalMedia.sources, selected: externalMedia.selected,
+        selectedId: externalMedia.selectedId, disconnected: externalMedia.disconnected,
+        allowGlobalMediaKeys: externalMedia.allowGlobalMediaKeys, warning: externalMedia.warning,
+        error: externalMedia.error, busy: externalMedia.busy } : undefined;
     },
     stats: () => scene?.getStats(),
     get presentation() {

@@ -12,7 +12,7 @@ const exists = async (file) => fs.access(file).then(() => true, () => false)
 
 export function supportedNode(version) {
   const [major, minor] = version.split('.').map(Number)
-  return major === 20 ? minor >= 19 : major === 22 ? minor >= 12 : major > 22
+  return major === 22 ? minor >= 12 : major > 22
 }
 
 function requestJson(port, route) {
@@ -80,9 +80,22 @@ export async function choosePort(projectDir, probe = probeMusicService, preferre
   return available
 }
 
-async function runNpm(args, projectDir) {
+// npm.cmd cannot be spawned directly on Windows. Run its JS entry with Node,
+// keeping paths out of shell command strings (including spaces and & / % / !).
+export async function npmCommand(args) {
+  if (process.platform !== 'win32') return { command: 'npm', args }
+  const directories = [path.dirname(process.execPath), ...(process.env.PATH ?? '').split(path.delimiter)]
+  const candidates = [process.env.npm_execpath, ...directories.filter(Boolean).map((directory) => path.join(directory.replace(/^"|"$/g, ''), 'node_modules/npm/bin/npm-cli.js'))]
+  for (const candidate of candidates) {
+    if (candidate && path.basename(candidate) === 'npm-cli.js' && await exists(candidate)) return { command: process.execPath, args: [candidate, ...args] }
+  }
+  throw new Error('没有找到 npm。请重新安装包含 npm 的 Node.js LTS 版本。')
+}
+
+export async function runNpm(args, projectDir) {
+  const invocation = await npmCommand(args)
   await new Promise((resolve, reject) => {
-    const child = spawn('npm', args, { cwd: projectDir, stdio: 'inherit' })
+    const child = spawn(invocation.command, invocation.args, { cwd: projectDir, stdio: 'inherit', windowsHide: true })
     child.once('error', reject)
     child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`npm ${args.join(' ')} 未完成（退出码 ${code}）。请查看上方信息后重试。`)))
   })
@@ -135,7 +148,8 @@ export async function buildFingerprint(projectDir) {
 
 async function prepareBuild(projectDir) {
   if (!supportedNode(process.versions.node)) throw new Error(`当前 Node.js ${process.versions.node} 不满足要求。请安装 Node.js 22.12 或更新的 LTS 版本。`)
-  if (spawnSync('npm', ['--version'], { stdio: 'ignore' }).status !== 0) throw new Error('没有找到 npm。请重新安装包含 npm 的 Node.js LTS 版本。')
+  const npm = await npmCommand(['--version'])
+  if (spawnSync(npm.command, npm.args, { stdio: 'ignore', windowsHide: true }).status !== 0) throw new Error('没有找到 npm。请重新安装包含 npm 的 Node.js LTS 版本。')
   if (!await dependenciesReady(projectDir)) {
     console.log('首次准备或依赖已更新：正在安装锁定版本的依赖（需要联网）…')
     await runNpm(['ci'], projectDir)
@@ -195,7 +209,7 @@ async function startServer(projectDir, dataDir, port) {
   let startupError
   try {
     child = spawn(process.execPath, [path.join(projectDir, 'scripts/music-server.mjs'), '--port', String(port)], {
-      cwd: projectDir, detached: true,
+      cwd: projectDir, detached: true, windowsHide: true,
       env: { ...process.env, MUSIC_DATA_DIR: dataDir },
       stdio: ['ignore', log.fd, log.fd],
     })
@@ -215,8 +229,12 @@ async function startServer(projectDir, dataDir, port) {
   throw new Error(`播放器尚未就绪。${startupError?.message ?? ''}\n日志：${logPath}\n${tail}`)
 }
 
-function openBrowser(url) {
-  const result = spawnSync('/usr/bin/open', [url], { stdio: 'ignore' })
+export function openBrowser(url, { platform = process.platform, run = spawnSync } = {}) {
+  const result = platform === 'win32'
+    ? run(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:RHINE_MUSIC_URL"], {
+      env: { ...process.env, RHINE_MUSIC_URL: url }, stdio: 'ignore', windowsHide: true, timeout: 15000,
+    })
+    : run('/usr/bin/open', [url], { stdio: 'ignore' })
   if (result.status !== 0) console.log(`浏览器未自动打开，请手动访问：${url}`)
 }
 

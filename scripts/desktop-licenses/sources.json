@@ -1,0 +1,30 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+    "file": "alloc-stdlib-0.3.0-BSD.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+    "file": "defmt-parser-1.0.0-MIT.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/618731cee7aac784f5f08643bd5d8d005f3c01d6/LICENSE-MIT",
+    "file": "lofty-0.25.4-MIT.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/5affdd9aea68e7b06d5e1a651bec7814882f44c7/LICENSE-MIT",
+    "file": "lofty_attr-0.13.0-MIT.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/76ff7093a1f6a98c60297de4695709d04c8c1f47/LICENSE-MIT",
+    "file": "ogg_pager-0.7.2-MIT.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+    "file": "webview2-com-0.39.1-MIT.txt"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+    "file": "webview2-com-macros-0.8.1-MIT.txt"
+  }
+]

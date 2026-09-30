@@ -1,0 +1,31 @@
+.external-source-list { display: grid; gap: 10px; margin: 22px 0; }
+.music-app .external-source { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 16px; border: 1px solid var(--line); background: transparent; text-align: left; }
+.external-source[aria-pressed="true"] { border-color: var(--accent); }
+.external-source span { display: grid; gap: 6px; min-width: 0; }
+.external-source strong, .external-source small { overflow-wrap: anywhere; }
+.external-source small, .external-unavailable, .external-note, .external-warning { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.external-source em { color: var(--accent); font-size: 12px; font-style: normal; flex-shrink: 0; }
+.external-warning { white-space: pre-line; }
+.external-global-consent { margin: 16px 0; gap: 22px; }
+.external-global-consent small { max-width: 420px; line-height: 1.7; }
+.external-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 22px 0; }
+.music-app .external-controls button { background: transparent; border: 1px solid var(--line); padding: 10px 14px; }
+.external-timeline { display: grid; gap: 9px; margin: 20px 0; }
+.external-timeline input { width: 100%; }
+.external-timeline > span { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.external-timeline output { font-variant-numeric: tabular-nums; }
+.music-app[data-external="true"] .music-navigation { display: none; }
+.music-app[data-external="true"] .music-keyhint { pointer-events: none; }
+.music-app[data-external="true"] .music-empty p { max-width: 440px; }
+.music-app .external-header-prev, .music-app .external-header-next { font-size: 18px; }
+.music-app[data-external="true"] .music-topnav { gap: 18px; }
+.music-topnav:has([data-action="external-mode"]) { --song-cap: clamp(0px, calc(100vw - 880px), 200px); }
+.music-app[data-layout="portrait"] .music-topnav:has([data-action="external-mode"]) {
+  grid-template-columns: 28px 28px 28px 104px 28px minmax(0, 1fr);
+  --song-cap: clamp(0px, calc(100vw - 354px), 246px);
+}
+.music-app[data-external="true"][data-layout="portrait"] .music-topnav {
+  gap: 6px;
+  --song-cap: clamp(0px, calc(100vw - 370px), 230px);
+}
+.music-app[data-layout="portrait"] .external-connect span { display: none; }

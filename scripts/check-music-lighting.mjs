@@ -1,16 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import ts from 'typescript';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { COLUMN_SPACING, ROW_SPACING, LOOP_COLUMNS, LOOP_ROWS, visibleCell } from '../src/archive-loop.ts';
 import { MUSIC_MODEL, normalizeMusicGeometry, createAlbumPrintMaterial } from '../src/music-model.ts';
-
-const source = fs.readFileSync(new URL('../src/music-lighting.ts', import.meta.url), 'utf8');
-const moduleUrl = new URL('../node_modules/three/build/three.module.js', import.meta.url).href;
-const modelUrl = new URL('../src/music-model.ts', import.meta.url).href;
-const code = ts.transpileModule(source, {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace('"three"', JSON.stringify(moduleUrl)).replace('"./music-model.ts"', JSON.stringify(modelUrl));
-const { MusicSelectionLighting } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
+import { MusicSelectionLighting } from '../src/music-lighting.ts';
 function setup() {
   const light = new MusicSelectionLighting(new THREE.Scene());
   const model = new THREE.Group();

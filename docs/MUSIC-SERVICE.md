@@ -1,6 +1,8 @@
-# 本地音乐服务 · V0.2.0（macOS）
+# 本地音乐服务 · Rust 客户端与旧 Node 入口
 
-`node scripts/music-server.mjs` 同时提供 `dist/` 界面和本地音乐 API。默认仅监听 `127.0.0.1:5173`；端口可通过 `--port 5174` 或 `PORT` 指定。修改前端后重新构建并刷新。服务保持运行期间可编辑本地流派规则，下一次读取曲库就会生效。
+v0.3.0 Windows 客户端由 `src-tauri/src/server.rs` 在同一 Rust 进程中提供界面与音乐 API，关闭窗口时一并退出，不需要单独运行服务命令。API 与下文旧服务的公开数据合同保持兼容，原生实现与检查范围见 [Windows 客户端](WINDOWS.md) 和 [当前结构](architecture/overview.md)。
+
+`node scripts/music-server.mjs` 保留为 macOS 旧入口和开发对照，同时提供 `dist/` 界面和本地音乐 API。该入口默认仅监听 `127.0.0.1:5173`；端口可通过 `--port 5174` 或 `PORT` 指定。以下终端命令适用于旧入口；普通 Windows 客户端使用安装包即可。修改共享前端后需重新构建。服务保持运行期间可编辑本地流派规则，下一次读取曲库就会生效。
 
 ```sh
 npm ci
@@ -10,7 +12,11 @@ node scripts/music-server.mjs
 
 ## 数据与文件权限
 
-默认索引目录是仓库旁边的 `music-data-v3/`，可通过 `MUSIC_DATA_DIR` 覆盖。首次运行默认无音乐目录，请在界面填写并保存自己的音乐文件夹。`MUSIC_ROOTS` 也能提供首次根目录，多个目录按系统路径分隔符分隔（macOS 为冒号）；已有 `config.json` 优先，更新程序不会更换已保存的音乐目录。
+Windows 客户端的默认数据目录为 `%LOCALAPPDATA%\io.github.ccdr4gon.rhine-music\`；旧 Node 入口的默认索引目录是仓库旁边的 `music-data-v3/`。两者均可通过 `MUSIC_DATA_DIR` 覆盖。首次运行默认无音乐目录，请在界面选择或填写并保存自己的音乐文件夹。`MUSIC_ROOTS` 也能提供首次根目录，多个目录按系统路径分隔符分隔（Windows 为分号，macOS 为冒号）；已有 `config.json` 优先，更新程序不会更换已保存的音乐目录。
+
+Windows 使用带盘符的绝对路径（如 `D:\Music`），也接受 UNC 共享路径（如 `\\server\share\Music`，需要当前用户有读取权限）。界面每行一个目录，不加引号；JSON 中反斜杠需转义，例如 `{ "roots": ["D:\\Music"] }`。相同盘符/目录的大小写、斜杠差异和父子目录会去重。跨系统迁移时重新配置根目录，不直接复用旧系统路径。
+
+Windows PowerShell 可用 `$env:MUSIC_ROOTS = 'D:\Music;E:\Albums'` 和 `$env:MUSIC_DATA_DIR = 'D:\RhineMusicData'` 设置环境变量，再运行 `node scripts/music-server.mjs`。运行 npm 命令时可使用 `npm.cmd`，不需要放宽 PowerShell 执行策略。双击启动、日志和停止服务的方法见 [README](../README.md)。
 
 - `config.json`：根目录、是否在扫描后补充在线资料、可选的本机 Beefweb 地址。
 - `library-index.json`：自动扫描缓存。记录真实文件的引用、尺寸/修改时间、元数据、封面与在线来源，不复制歌曲。

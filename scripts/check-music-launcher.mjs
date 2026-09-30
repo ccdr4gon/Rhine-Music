@@ -5,13 +5,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { supportedNode, dependenciesReady, buildFingerprint, probeMusicService, choosePort, launchMusic, sameLegacyProcess, SERVICE_ID } from './launch-music.mjs'
+import { supportedNode, dependenciesReady, buildFingerprint, probeMusicService, choosePort, launchMusic, sameLegacyProcess, npmCommand, runNpm, openBrowser, SERVICE_ID } from './launch-music.mjs'
 import { createMusicServer } from './music-server.mjs'
 
 const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 async function fixture(t) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'music-launch-'))
-  const root = path.join(base, '中文 与 空格 $() 工程')
+  const root = path.join(base, '中文 与 空格 $() & % ! 工程')
   await fs.mkdir(root)
   t.after(() => fs.rm(base, { recursive: true, force: true }))
   return fs.realpath(root)
@@ -19,9 +19,9 @@ async function fixture(t) {
 const refusal = () => { throw Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }) }
 const free = async (port) => ({ port, kind: 'free' })
 
-test('Node engine matches the installed Vite requirement', () => {
-  for (const version of ['20.19.0', '22.12.0', '24.0.0', '26.3.0']) assert.equal(supportedNode(version), true)
-  for (const version of ['18.20.0', '20.18.0', '21.7.0', '22.11.0']) assert.equal(supportedNode(version), false)
+test('Node engine matches package.json', () => {
+  for (const version of ['22.12.0', '24.0.0', '26.3.0']) assert.equal(supportedNode(version), true)
+  for (const version of ['18.20.0', '20.18.0', '20.19.0', '21.7.0', '22.11.0']) assert.equal(supportedNode(version), false)
 })
 
 test('health identity distinguishes our project, another project, HTML, and free ports', async () => {
@@ -123,7 +123,7 @@ test('installed ESM-only and type-only dependencies are ready without require en
   assert.equal(await dependenciesReady(PROJECT_DIR), true)
 })
 
-test('Finder command changes cwd safely from another directory', async (t) => {
+test('Finder command changes cwd safely from another directory', { skip: process.platform !== 'darwin' }, async (t) => {
   const projectDir = await fixture(t)
   await fs.mkdir(path.join(projectDir, 'scripts'))
   const command = path.join(projectDir, '启动音乐播放器.command')
@@ -133,6 +133,51 @@ test('Finder command changes cwd safely from another directory', async (t) => {
   assert.equal(result.status, 0, result.stderr)
   assert.equal(JSON.parse(result.stdout).cwd, projectDir)
   assert.ok((await fs.stat(path.join(PROJECT_DIR, '启动音乐播放器.command'))).mode & 0o100)
+})
+
+test('npm runs lifecycle scripts in Chinese spaced paths without shell interpolation', async (t) => {
+  const projectDir = await fixture(t)
+  await fs.writeFile(path.join(projectDir, 'package.json'), JSON.stringify({ scripts: { check: 'node check.cjs' } }))
+  await fs.writeFile(path.join(projectDir, 'check.cjs'), "require('node:fs').writeFileSync('cwd.txt', process.cwd())")
+  const npm = await npmCommand(['--version'])
+  assert.equal(spawnSync(npm.command, npm.args, { windowsHide: true }).status, 0)
+  await runNpm(['run', 'check'], projectDir)
+  assert.equal(await fs.readFile(path.join(projectDir, 'cwd.txt'), 'utf8'), projectDir)
+  await assert.rejects(runNpm(['run', 'missing-script'], projectDir), /未完成/)
+})
+
+test('Explorer launcher never falls back to the legacy browser service when the native build is missing', { skip: process.platform !== 'win32' }, async (t) => {
+  const projectDir = await fixture(t)
+  await fs.mkdir(path.join(projectDir, 'scripts'))
+  const script = path.join(projectDir, 'scripts/launch-music.mjs')
+  const run = (command) => spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', '""%RHINE_TEST_LAUNCHER%""'], {
+    cwd: os.tmpdir(), encoding: 'utf8', input: '\n', timeout: 15000, windowsHide: true, windowsVerbatimArguments: true,
+    env: { ...process.env, RHINE_TEST_LAUNCHER: command },
+  })
+  await fs.writeFile(script, "import {writeFileSync} from 'node:fs'; writeFileSync('legacy-was-started.txt', 'unexpected')")
+  for (const name of ['启动音乐播放器.cmd', '启动播放器皮肤.cmd']) {
+    const command = path.join(projectDir, name)
+    await fs.copyFile(path.join(PROJECT_DIR, name), command)
+    const failure = run(command)
+    assert.equal(failure.status, 1, failure.stderr + failure.stdout)
+    await assert.rejects(fs.access(path.join(projectDir, 'legacy-was-started.txt')), { code: 'ENOENT' })
+  }
+})
+
+test('browser launch uses the platform opener and passes Windows URLs as data', () => {
+  const url = 'http://127.0.0.1:5175/'
+  openBrowser(url, { platform: 'win32', run: (command, args, options) => {
+    assert.match(command, /powershell\.exe$/)
+    assert.equal(options.env.RHINE_MUSIC_URL, url)
+    assert.equal(options.windowsHide, true)
+    assert.ok(!args.includes(url))
+    return { status: 0 }
+  } })
+  openBrowser(url, { platform: 'darwin', run: (command, args) => {
+    assert.equal(command, '/usr/bin/open')
+    assert.deepEqual(args, [url])
+    return { status: 0 }
+  } })
 })
 
 test('health endpoint is read-only and retains Host and Origin restrictions', async () => {

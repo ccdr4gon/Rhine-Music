@@ -78,9 +78,15 @@ export function resolveGenre(album, rules) {
 }
 
 export function safeRootList(roots) {
-  if (!Array.isArray(roots) || roots.length > 64 || roots.some((root) => typeof root !== 'string' || !path.isAbsolute(root) || root.includes('\0'))) throw new Error('音乐目录必须是绝对路径数组（最多 64 个）')
+  if (!Array.isArray(roots) || roots.length > 64 || roots.some((root) => typeof root !== 'string' || !path.isAbsolute(root) || root.includes('\0') || (process.platform === 'win32' && path.parse(root).root.length <= 1))) throw new Error('音乐目录必须是绝对路径数组（最多 64 个）；Windows 请包含盘符，例如 D:\\Music')
   // Nested roots would scan the same album twice; keep the highest selected root.
-  return unique(roots.map((root) => path.resolve(root))).filter((root, _, all) => !all.some((parent) => parent !== root && root.startsWith(`${parent}${path.sep}`)))
+  const resolved = unique(roots.map((root) => path.resolve(root)))
+  return resolved.filter((root, index) => !resolved.some((parent, parentIndex) => {
+    if (parentIndex === index) return false
+    const relative = path.relative(parent, root)
+    if (!relative) return parentIndex < index
+    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+  }))
 }
 
 function audioMime(file) {

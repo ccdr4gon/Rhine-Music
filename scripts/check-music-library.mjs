@@ -3,13 +3,13 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
-import { MusicLibraryStore } from './music-library.mjs'
+import { MusicLibraryStore, safeRootList } from './music-library.mjs'
 import { createMusicServer, parseRange } from './music-server.mjs'
 
 async function fixture(t, options = {}) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'rhine-music-test-'))
   t.after(() => fs.rm(temporary, { force: true, recursive: true }))
-  const root = path.join(temporary, 'music')
+  const root = path.join(temporary, '音乐 空格 & music')
   await fs.mkdir(root)
   const store = await new MusicLibraryStore({ dataDir: path.join(temporary, 'index'), defaultRoots: [root], ...options }).init()
   return { temporary, root, store }
@@ -35,9 +35,9 @@ function wavFixture() {
 
 test('real WAV parsing exposes duration, lossless technical metadata, and byte-accurate Range playback', async (t) => {
   const { root, store, temporary } = await fixture(t)
-  const folder = await fakeAlbum(root, 'Test WAV', [])
+  const folder = await fakeAlbum(root, '测试专辑 Test WAV', [])
   const bytes = wavFixture()
-  await fs.writeFile(path.join(folder, '1-01 Test.wav'), bytes)
+  await fs.writeFile(path.join(folder, '1-01 测试 Test.wav'), bytes)
   await store.scan()
   const track = store.snapshot().albums[0].tracks[0]
   assert.equal(track.format, 'WAV')
@@ -225,4 +225,18 @@ test('Range validation rejects malformed and multipart requests and clips an exc
   assert.equal(parseRange('bytes=7-2', 10), false)
   assert.equal(parseRange('bytes=0-', 0), false)
   assert.deepEqual(parseRange('bytes=7-99', 10), { start: 7, end: 9 })
+})
+
+test('root selection deduplicates nested paths including filesystem roots', () => {
+  const root = path.resolve('music')
+  assert.deepEqual(safeRootList([root, path.join(root, 'Album'), `${root}-other`, root]), [root, `${root}-other`])
+  const drive = path.parse(root).root
+  assert.deepEqual(safeRootList([root, drive]), [drive])
+})
+
+test('Windows roots require a drive or UNC share and deduplicate case and separators', { skip: process.platform !== 'win32' }, () => {
+  assert.deepEqual(safeRootList(['D:\\音乐 库', 'd:/音乐 库', 'd:/音乐 库/Album', 'E:\\Music']), ['D:\\音乐 库', 'E:\\Music'])
+  assert.deepEqual(safeRootList(['D:\\', 'd:/Music']), ['D:\\'])
+  assert.deepEqual(safeRootList(['\\\\server\\share\\Music', '\\\\SERVER\\share\\Music\\Album']), ['\\\\server\\share\\Music'])
+  for (const root of ['D:Music', '\\Music', '/Music', 'Music']) assert.throws(() => safeRootList([root]), /绝对路径/)
 })

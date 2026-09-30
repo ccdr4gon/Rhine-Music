@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "The player window can select folders, save preferences and connect to Windows media sources.",
+  "windows": ["main"],
+  "local": true,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["core:default", "allow-choose-music-folders", "allow-save-preferences", "allow-media-connection"]
+}

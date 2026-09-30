@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-choose-music-folders"
+description = "Select music folders through the system dialog. No arbitrary file writes."
+commands.allow = ["choose_music_folders"]
+
+[[permission]]
+identifier = "allow-save-preferences"
+description = "Save only the player's preference object to its application data directory."
+commands.allow = ["save_preferences"]
+
+[[permission]]
+identifier = "allow-media-connection"
+description = "Read Windows media sources and control only an explicitly selected source."
+commands.allow = ["media_snapshot", "media_control"]

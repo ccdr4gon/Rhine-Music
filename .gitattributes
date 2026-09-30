@@ -1,0 +1,3 @@
+# Keep the Explorer launcher readable by cmd.exe on every checkout.
+*.cmd text eol=crlf
+*.command text eol=lf

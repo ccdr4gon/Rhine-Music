@@ -1,29 +1,45 @@
-# Rhine Music Demo · v0.2.0
+# Rhine Music · v0.3.0 Windows 客户端
 
-**把本地音乐放进三维专辑架。** 以玻璃 CD 盒浏览收藏，打开专辑、查找歌曲，并在浏览器中播放本机音乐。
+**把本地音乐放进三维专辑架。** 以玻璃 CD 盒浏览收藏，打开专辑、查找歌曲，并在独立 Windows 窗口中播放本机音乐。
 
-音乐适配与维护：[RonaldDeng](https://github.com/RonaldDeng) · 基于 [LBEILC / RhineLabUI](https://github.com/LBEILC/RhineLabUI)
+音乐适配：[RonaldDeng](https://github.com/RonaldDeng) · Windows 客户端改编：ccdr4gon · 基于 [LBEILC / RhineLabUI](https://github.com/LBEILC/RhineLabUI)
 
-[**下载 macOS 源码包**](https://github.com/RonaldDeng/Rhine-Music-Demo/releases/download/v0.2.0/Rhine-Music-Demo-v0.2.0-macOS.zip) · [Release](https://github.com/RonaldDeng/Rhine-Music-Demo/releases/tag/v0.2.0) · [更新记录](CHANGELOG.md) · [设计细节](DESIGN.md) · [版权与来源](NOTICE.md)
+[Windows 使用与构建](docs/WINDOWS.md) · [连接本机播放器](docs/PLAYER-SKIN.md) · [更新记录](CHANGELOG.md) · [设计细节](DESIGN.md) · [版权与来源](NOTICE.md) · [原 v0.2.0 macOS 发布](https://github.com/RonaldDeng/Rhine-Music-Demo/releases/tag/v0.2.0)
 
-![v0.2.0 深夜主题：三维专辑架、专辑信息与底部滑尺](docs/media/v0.2.0/browse-night.jpg)
+![v0.3.0 Windows 安装版：独立窗口、三维专辑架与合成 MP3 测试曲库](docs/media/v0.3.0/native-night-library.png)
 
-> 本版本支持 **macOS**，在本机运行 Node.js 服务，由浏览器显示界面。下载的是源码包，**不是 `.app` 安装包，也不附带歌曲**。截图使用应用自带的三张演示封面，不包含私人音乐库；演示模式只有封面，没有可播放曲目。[截图说明](docs/media/v0.2.0/README.md)
+> v0.3.0 使用 **Tauri + Rust 独立客户端**，运行时不需要 Node.js、npm 或外部浏览器，不附带歌曲。Windows 11 x64 的构建、安装、启动及核心交互已验证；尚未公开发布版本标签或下载链接。安装包约 **31.9 MiB**，安装后程序文件约 **47.6 MiB**，不含系统 WebView2、曲库和运行缓存。具体范围见 [Windows 记录](docs/WINDOWS.md)。macOS 保留原 Node 服务启动方式，原 v0.2.0 发布包不变。首图来自本次安装版与自行生成的测试 MP3；下方 v0.2.0 历史配图继续展示沿用的视觉设计。[客户端截图说明](docs/media/v0.3.0/README.md)
 
-## 三步开始
+## Windows 客户端
 
-需要 [Node.js](https://nodejs.org/) **22.12 或更新的 LTS 版本**（包含 npm），以及支持 WebGL 2 的现代浏览器。普通运行无需 Blender。
+使用 Windows x64 安装包时，无需安装 Node.js、Rust 或 Blender。界面使用 Microsoft Edge WebView2；安装器在系统缺少该组件时联网安装。当前使用系统共享组件，不附带完整浏览器，因此不是完全离线安装包。
 
-1. 下载上方 ZIP，**完整解压**到一个固定位置。
-2. 双击 **`启动音乐播放器.command`**。首次启动会联网安装锁定依赖、构建界面并打开默认浏览器。
-3. 点击“**音乐库**”，填写自己的音乐文件夹**绝对路径**，例如 `/Users/你的用户名/Music`，保存并扫描。完成后自动显示专辑。
+1. 安装构建产出的 `Rhine Music_*_x64-setup.exe`，从开始菜单打开 **Rhine Music**。
+2. 点击“**音乐库**”，通过“选择文件夹”添加音乐目录，也可以直接填写 `D:\Music` 这样的绝对路径，每行一个目录。
+3. 保存并扫描。歌曲仍从原目录只读播放，不复制进安装目录、不改写标签。
 
-尚未准备音乐时，可点击“先查看演示封面”体验界面。日常使用再次双击同一启动器即可；已经运行的同一工程服务会直接复用。
+尚未准备音乐时，可点击“先查看演示封面”体验三维界面。再次打开程序会聚焦现有窗口；关闭窗口退出程序并停止内部服务。`启动音乐播放器.cmd` 用于启动源码目录中已经构建好的客户端，缺少程序时会提示构建，不再自动安装 Node 或打开浏览器。
+
+也可以点击“连接播放器”，或双击 `启动播放器皮肤.cmd`，把当前界面用作本机播放器的外观与控制窗口。它连接 Windows 系统媒体会话，按来源实际能力显示当前曲目、封面及播放控件；未提供标准会话的网易云另有兼容方式。声音由原播放器输出，不需要导入本地曲库。这里不提供云端歌单、账号或付费歌曲访问，兼容方式及限制见 [播放器连接说明](docs/PLAYER-SKIN.md)。
 
 <details>
-<summary>双击没有启动，或希望从终端运行</summary>
+<summary>从 Windows 源码构建</summary>
 
-在终端进入**解压后的工程目录**，执行：
+开发电脑需要 Node.js 22.12 或更新的 LTS、Rust 的 MSVC 工具链、Visual Studio C++ 构建工具及 Windows SDK。在工程目录用 PowerShell 执行：
+
+```powershell
+npm.cmd ci
+npm.cmd run desktop:build
+```
+
+安装程序输出到 `src-tauri/target/release/bundle/nsis/`。开发运行用 `npm.cmd start`；Rust 测试用 `npm.cmd run check:desktop`。Node 和 Vite 只参与构建，不放入 Windows 安装包。更详细的依赖与命令见 [Windows 文档](docs/WINDOWS.md)。
+
+</details>
+
+<details>
+<summary>macOS 原入口和浏览器调试方式</summary>
+
+macOS 原入口继续使用 Node.js 22.12 或更新的 LTS（包含 npm），以及支持 WebGL 2 的浏览器。完整解压源码后双击 `启动音乐播放器.command`，或执行：
 
 ```sh
 bash "启动音乐播放器.command"
@@ -31,7 +47,9 @@ bash "启动音乐播放器.command"
 
 若只是可执行权限丢失，可执行 `chmod +x "启动音乐播放器.command"` 后再双击。提示找不到 Node.js / npm 时，先安装符合版本要求的 Node.js，然后重新打开终端。
 
-也可以手动安装、构建并保持服务在前台运行：
+旧服务的跨平台入口现为 `npm run start:legacy`；`npm start` 已改为 Tauri 开发运行。Windows PowerShell 若阻止 `npm.ps1`，将命令中的 `npm` 写为 `npm.cmd`，无需修改系统执行策略。
+
+也可以手动安装、构建并保持服务在前台运行（Windows PowerShell 将 `npm` 写为 `npm.cmd`）：
 
 ```sh
 npm ci
@@ -41,7 +59,7 @@ npm run music -- --port 5175
 
 打开 [http://127.0.0.1:5175/](http://127.0.0.1:5175/)，以终端输出地址为准。前台运行用 `Ctrl+C` 停止。
 
-启动器优先使用 `5175`，占用时顺延到空闲端口。双击启动器创建的是后台服务，关闭终端或浏览器不等于停止服务；日志位于工程旁 `music-data-v3/player-service.log`。更新前，可在 macOS“活动监视器”中找到此工程的 Node 音乐服务进程并退出，避免同时启动两个版本操作同一数据目录。
+旧 Node 启动器优先使用 `5175`，占用时顺延到空闲端口。它创建的是后台服务，关闭终端或浏览器不等于停止服务；日志位于工程旁 `music-data-v3/player-service.log`。更新前，在任务管理器或活动监视器中退出对应服务；实际端口的 `/api/health` 提供 `pid`。不要让新旧服务同时操作同一数据目录。
 
 `npm run dev` / `npm run preview` 只提供前端，不能代替本地音乐服务。首次依赖安装与构建完成后，扫描本地文件和播放不要求在线资料查询成功。
 
@@ -97,25 +115,34 @@ npm run music -- --port 5175
 
 ## 数据与升级
 
-默认数据目录为工程旁的 **`../music-data-v3/`**，保存目录配置、索引、封面缓存、流派规则和日志。歌曲始终从原路径读取，不复制进工程、不修改标签。个人曲库和本机配置**不包含在 GitHub 仓库及 ZIP 中**。
+Windows 客户端默认数据目录为 **`%LOCALAPPDATA%\io.github.ccdr4gon.rhine-music\`**，保存目录配置、索引、封面缓存、流派规则和 `preferences.json` 中的界面偏好。歌曲始终从原路径读取，不复制进安装目录、不修改标签。个人曲库和本机配置**不包含在源码或安装包中**。
 
-从本地 V3、v0.1.0、v0.1.1 或 v0.1.1b 升级：先停止旧版服务，将新工程放在旧工程的同一父目录，继续使用旁边的 `music-data-v3`。保留旧目录便于回退，避免新旧服务同时写同一数据目录。主题、画质、音量等界面偏好保存在浏览器中；更换浏览器或端口可能使用另一套偏好。
+原 macOS／浏览器服务继续使用工程旁的 `../music-data-v3/`。客户端不会自动寻找、读取旧曲库。迁移时先退出旧服务，备份原数据；可以在客户端重新选择音乐目录，或用 `MUSIC_DATA_DIR` 指向已有数据。旧浏览器中的主题、画质和音量不会自动转移到客户端，需在客户端重新选择。保留旧目录便于回退，避免两套程序同时写同一数据目录。
 
-需要使用其他数据位置时，在工程目录运行：
+需要使用其他数据位置时，在工程目录运行。Windows PowerShell：
+
+```powershell
+$env:MUSIC_DATA_DIR = 'D:\RhineMusicData'
+.\启动音乐播放器.cmd
+```
+
+macOS：
 
 ```sh
 MUSIC_DATA_DIR="../music-data" bash "启动音乐播放器.command"
 ```
 
+从 macOS 转到 Windows 时，请重新填写 Windows 音乐目录并扫描；旧索引中的 macOS 路径不能直接使用。更换数据目录前退出已有客户端；已运行时再次启动只会聚焦原窗口。安装版也可在设置好环境变量的终端直接运行安装目录中的 `rhine-music.exe`。
+
 根目录直属音频各为一个单曲专辑；子文件夹按每个含音频的文件夹归并，多个 CD 子文件夹目前分别识别。移动歌曲或文件夹会产生新 ID；暂时离线的根目录保留缓存。旧根目录合辑重扫后变为独立单曲，原合辑的人工流派不会自动分发给新单曲。
 
 ## 支持范围与常见问题
 
-**能索引但不能播放？** 标签解析与播放解码是两件事。可读取 FLAC、WAV、M4A、MP3、DSF、DFF 等元数据，实际播放取决于浏览器和编码；DSF／DFF 暂不能播放。M4A 不一定是无损 ALAC。本版不提供外部播放器、DAC 或 DSD 直出承诺。
+**能索引但不能播放？** 标签解析与播放解码是两件事。Rust 读取 FLAC、WAV、M4A、MP3、DSF、DFF 等元数据，客户端播放仍由 WebView2 的音频组件处理；DSF／DFF 暂不能播放。M4A 不一定是无损 ALAC。本版不提供外部播放器、DAC 或 DSD 直出承诺。
 
 **大窗口下帧率较低？** 三维玻璃、阴影、环境遮蔽和景深会增加渲染开销，可在设置中降低画质或关闭景深。截图右下角数值仅是拍摄当时的状态，不是性能基准。
 
-**页面还是旧界面？** 修改源码后重新 `npm run build`；更换发布目录后停止旧服务再启动新版，并访问新启动器输出的地址。安装过离线应用时，留意界面的版本更新提示。
+**改了源码却没有更新？** 客户端请重新 `npm run desktop:build` 并运行新产物；仅执行 `npm run build` 只重建前端。旧浏览器调试方式需要停止旧服务后重启。
 
 **没有专辑介绍？** 介绍是可选查询结果，不会编造缺失资料。“查询／更新专辑介绍”核对正式百科页面的专辑、歌手和年份，保留出处。MusicBrainz 自动补全默认关闭，启用前填写自己的联系邮箱或项目网址；只发送查询所需文字／公开 ID，不上传歌曲。断网、限流、同名或资料不全时会保留对应状态。
 
@@ -124,14 +151,15 @@ MUSIC_DATA_DIR="../music-data" bash "启动音乐播放器.command"
 ## 开发文档与检查范围
 
 - [DESIGN.md](DESIGN.md)：现行视觉与交互设计、细节参数和演进依据。
-- [CHANGELOG.md](CHANGELOG.md)：从上游和早期音乐原型到 v0.2.0 的有效改动。
+- [CHANGELOG.md](CHANGELOG.md)：上游、音乐原型、v0.2.0 与 v0.3.0 客户端迁移记录。
 - [音乐服务说明](docs/MUSIC-SERVICE.md)：数据目录、索引规则、API、音频与在线资料。
-- [本次发布检查](docs/RELEASE-V0.2.0.md)：实际检查项目与未覆盖范围。
+- [v0.2.0 发布检查](docs/RELEASE-V0.2.0.md)：历史浏览器版本的检查项目与未覆盖范围。
+- [Windows 客户端检查](docs/WINDOWS.md)：Windows 安装、构建和当前验证范围。
 - [历史记录](verification/README.md)：上游、V2/V3 等阶段的设计与验证资料。
 
-技术栈为 TypeScript、Three.js、Vite 和 Node.js；发布包保留源码、锁文件、运行资源、模型源文件与生成脚本，排除 `node_modules`、`dist` 和个人数据。模型维护见 [art/README.md](art/README.md)。原版档案入口 `?original=1` 与音乐界面共享资源；旧导航可用 `?nav=previous` 对照。
+Windows 客户端使用 TypeScript、Three.js、Tauri 和 Rust；开发构建使用 Node.js 和 Vite。源码保留两种锁文件、运行资源、模型源文件与生成脚本，排除 `node_modules`、`dist`、Rust 构建目录和个人数据。安装包包含 Rust 程序、`web/` 下的已构建界面资源和许可证，不包含 Node、npm 或开发依赖目录。模型维护见 [art/README.md](art/README.md)。原版档案入口 `?original=1` 与音乐界面共享资源；旧导航可用 `?nav=previous` 对照。
 
-本次完成源码静态检查、TypeScript／生产构建，以及使用独立演示数据的浏览器展示截图。没有将截图检查等同于全部音频格式、真实设备性能、线上资料覆盖率或全套功能回归验收；历史测试结果也不代表本次重跑。
+验收以 [Windows 记录](docs/WINDOWS.md) 中实际执行的项目为准。历史浏览器截图不代表客户端已通过全部音频格式、真实设备性能、线上资料覆盖率或全套功能回归验收。
 
 ## 版权与来源
 
