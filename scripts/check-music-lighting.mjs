@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { COLUMN_SPACING, ROW_SPACING, LOOP_COLUMNS, LOOP_ROWS, visibleCell } from '../src/archive-loop.ts';
-import { MUSIC_MODEL, normalizeMusicGeometry, createAlbumPrintMaterial } from '../src/music-model.ts';
+import { MUSIC_MODEL, isMusicShellSurface, createAlbumPrintMaterial } from '../src/music-model.ts';
 import { MusicSelectionLighting } from '../src/music-lighting.ts';
 function setup() {
   const light = new MusicSelectionLighting(new THREE.Scene());
@@ -29,10 +29,11 @@ assert.equal(a.column.x,-5.2,'Reduced motion snaps to the selected location');
 // Use the actual shell bounds and complete instance pool, including its hidden
 // margins. A source inside this volume can burn a corner even when the selected
 // CD itself has the desired exposure; checking only source-to-target misses it.
-const glb = fs.readFileSync(new URL('../public/assets/music-cd.glb', import.meta.url));
+const glb = fs.readFileSync(new URL('../public/assets/music-case.glb', import.meta.url));
 const asset = await new GLTFLoader().parseAsync(glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength), '');
-asset.scene.traverse(object => { if (object instanceof THREE.Mesh) normalizeMusicGeometry(object.geometry, object.material.name.replace(/\.\d+$/, '')); });
-const shellBounds = new THREE.Box3().setFromObject(asset.scene);
+// The glass shell: the index inlay and screws stand slightly proud of it.
+const shellBounds = new THREE.Box3();
+asset.scene.traverse(object => { if (object instanceof THREE.Mesh && isMusicShellSurface(object.material.name.replace(/\.\d+$/, ''))) shellBounds.expandByObject(object); });
 const shaderBounds = a.shader.uniforms.musicShellBounds.value;
 assert.ok(Math.abs(shaderBounds.x-shellBounds.min.x)<1e-6,'Warm spine begins at the actual transformed left glass edge');
 assert.ok(Math.abs(shaderBounds.y-shellBounds.min.y)<1e-6,'Height falloff begins at the inset bottom edge');

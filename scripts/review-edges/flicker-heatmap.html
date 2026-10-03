@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Rhine flicker heatmap · development only</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:20px;color:#20242a;background:#eceef0}h1{font-size:20px}small{display:block;max-width:1280px}
+#host{width:1280px;height:720px;overflow:hidden}#host canvas{display:block;width:1280px!important;height:720px!important}
+#status{font-weight:600}pre{white-space:pre-wrap;background:#fff;padding:12px;max-width:1256px}figure{margin:16px 0}figure img{display:block;max-width:1280px;image-rendering:pixelated}
+</style></head><body>
+<h1>Rhine 逐像素闪烁热力图（仅开发验证）</h1>
+<small>真实 ArchiveScene / demoAlbums，original 画质，固定 1280×720。60 帧按 0.1 像素/帧做亚像素平移，统计每个像素线性亮度的平均二阶差 |L[t]−2L[t−1]+L[t−2]|；红黄处为闪烁。
+参数：code=current|checkpoint、theme=day|night、pose=archive|detail、motion=camera|object、step、samples（覆盖场景多重采样）、ss（整数超采样）、off=covers,ao,bokeh,shadow,model,array、crop=x,y,w,h、mode=gpu（只测完整帧 GPU 时间）。</small>
+<p id="status">加载中…</p>
+<div id="host"></div>
+<pre id="result"></pre>
+<div id="images"></div>
+<script type="module" src="./flicker-heatmap.js"></script>
+</body></html>

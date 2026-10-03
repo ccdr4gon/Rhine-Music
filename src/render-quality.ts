@@ -149,17 +149,22 @@ export function renderDimensions(
   };
 }
 
-/** Keep MSAA storage bounded without changing the requested image resolution. */
+/**
+ * Keep MSAA storage bounded without changing the requested image resolution.
+ * One dedicated scene target holds every sample: the budget equals the former
+ * pair of 4x composer buffers, so 8x fits up to ~4.1 MP and 4x up to 8.3 MP.
+ * Sub-pixel case edges need 8x: 4x steps their coverage in quarters while moving.
+ */
 export function multisampleCount(
   colorSamples: readonly number[],
   depthSamples: readonly number[],
   width: number,
   height: number,
   maximum: number,
-): 0 | 2 | 4 {
+): 0 | 2 | 4 | 8 {
   const pixels = width * height;
   if (!Number.isFinite(pixels) || width <= 0 || height <= 0 || !Number.isFinite(maximum)) return 0;
-  const budget = 8_294_400 * 2;
-  return ([4, 2] as const).find(samples => samples <= maximum &&
+  const budget = 8_294_400 * 4;
+  return ([8, 4, 2] as const).find(samples => samples <= maximum &&
     samples * pixels <= budget && colorSamples.includes(samples) && depthSamples.includes(samples)) ?? 0;
 }

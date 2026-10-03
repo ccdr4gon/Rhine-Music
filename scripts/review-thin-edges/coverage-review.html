@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rhine 细面覆盖验证 · development only</title>
+  <style>
+    body{margin:20px;font:14px/1.5 system-ui,sans-serif;background:#eceef0;color:#20242a}
+    h1{font-size:20px}p{max-width:1100px}button{font:inherit;padding:6px 14px;margin-right:10px}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:12px;max-height:560px;overflow:auto}
+    #comparisons{display:grid;grid-template-columns:repeat(auto-fit,minmax(528px,1fr));gap:12px}
+    #comparisons canvas{display:block;width:528px;height:290px;max-width:100%;background:white}
+    #status{font-weight:600}#renderer-host{display:none}table{border-collapse:collapse;background:white}
+    td,th{padding:5px 10px;border:1px solid #bbb;text-align:right}th:first-child,td:first-child{text-align:left}
+  </style>
+</head>
+<body>
+  <h1>细矩形面：真实宽度覆盖与原始几何比较</h1>
+  <p>仅开发验证。256×256 实际像素、4× MSAA、黑底、无灯光的白色自发光材质。默认与产品相同的半浮点 RGBA16F；RGBA8 保留作量化误差对照。真实投影宽度为 0.8 / 0.4 / 0.2 / 0.1px，长度 100px；角度从竖直方向计，整条线沿屏幕 X 方向平移 0→1px，共 24 帧。新方法只扩大参与计算的区域，真实线宽保持不变。</p>
+  <p>主指标读取线性 RGB。分箱只统计中间 80px，按沿线位置分成 20 个 4px 箱；斜线的离散像素分箱本身也会引入波动，不能把它当作精确面积积分。对比图使用同一帧并转成 sRGB 显示，保持 1:1 像素。遮挡测试在黑色不透明板内部、距板边至少 3px 处检查漏光。</p>
+  <p>追加三组边界检查：透视下倾斜长条、穿过相机近裁剪面、两个不同旋转与缩放的 InstancedMesh 实例。方向修正的 tent 是有限二维过滤的近似，不保证所有角度、端点与遮挡处都有严格恒定覆盖。</p>
+  <label>读回格式 <select id="format"><option value="half">RGBA16F / HalfFloat（默认）</option><option value="byte">RGBA8 / 8-bit 量化对照</option></select></label>
+  <button id="run" disabled>Run GPU comparison</button>
+  <button id="download" disabled>下载 JSON</button>
+  <p id="status">加载模块…</p>
+  <pre id="environment"></pre>
+  <div id="summary"></div>
+  <pre id="auxiliary-summary"></pre>
+  <div id="comparisons"></div>
+  <h2>完整结果 JSON</h2>
+  <pre id="results">尚未运行</pre>
+  <div id="renderer-host"></div>
+  <script type="module" src="./coverage-review.js"></script>
+</body>
+</html>

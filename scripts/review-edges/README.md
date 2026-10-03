@@ -21,3 +21,15 @@ npm.cmd run dev -- --port 5192 --strictPort
 - 完成后可下载 JSON、全画面对照和 1:1 裁切。临时原始数据放在 `.tools/`，不要混入个人播放截图。
 
 修改源码后刷新页面再测。当前页面会读取 TypeScript 编译后的内部字段；如果场景结构改名，需要同步维护。该页面不修改产品偏好。
+
+## 逐像素闪烁热力图
+
+`flicker-heatmap.html` 回答“哪里在闪”，不只给一个平均值。它同样使用真实 `ArchiveScene`、演示封面、original 画质和固定 1280×720，60 帧按 0.1 像素/帧移动，对每个像素统计线性亮度的平均二阶差，并输出首帧、热力图和连续 8 帧的 3× 裁切。`code=checkpoint` 读取 `.tools/subpixel-baseline/`，准备方式与上文相同，只需把 `d2de624` 换成要对照的提交（2026-10-01 的对照使用 Portable 基线 `6f86b3d`）。
+
+```text
+http://127.0.0.1:5192/scripts/review-edges/flicker-heatmap.html?code=current&theme=night&pose=archive
+```
+
+- `off=covers,ao,bokeh,shadow,model,array` 逐项隐藏来源，用于定位；`samples=` 覆盖场景多重采样数；`ss=2` 做 2×2 超采样对照；`crop=x,y,w,h` 选择裁切；`mode=gpu` 只测 40 个完整帧的 GPU 时间。
+- `meanD2x1e4` 是全帧平均二阶差 ×10⁴；`hotFraction` 是二阶差超过 0.01 的像素比例，对应肉眼可见的忽亮忽暗。真实移动本身也会产生较低的二阶差，因此结果须与裁切一起看。
+- 结果写入页面和 `window.__result`，可由无界面浏览器读取。它不修改偏好，也不读取个人曲库。

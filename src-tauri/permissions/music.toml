@@ -12,3 +12,13 @@ commands.allow = ["save_preferences"]
 identifier = "allow-media-connection"
 description = "Read Windows media sources and control only an explicitly selected source."
 commands.allow = ["media_snapshot", "media_control"]
+
+[[permission]]
+identifier = "allow-netease-queue"
+description = "Read NetEase Cloud Music's saved play queue (display fields only) after the user switches it on."
+commands.allow = ["netease_queue"]
+
+[[permission]]
+identifier = "allow-netease-debug"
+description = "Control NetEase Cloud Music through its local DevTools port (127.0.0.1:9233) while its queue is shown and song switching is not turned off."
+commands.allow = ["netease_debug_state", "netease_debug_play", "netease_debug_seek", "netease_debug_restart"]

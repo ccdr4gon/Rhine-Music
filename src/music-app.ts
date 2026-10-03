@@ -12,6 +12,11 @@ import "./music-theme.css";
 import "./music-theme-switch.css";
 import "./external-media.css";
 import {
+  nativeQueuePort, nativeDebugPort, queueLibrary, playingQueueTrack, queueTrackKey, queueSettingMarkup,
+  queueControlStatus, isNeteaseSource, PlaybackClock, type QueueTrack, type DebugState,
+} from "./external-queue";
+import { WheelNavigation, WHEEL_PIXELS_PER_ROW } from "./wheel-navigation";
+import {
   ExternalMediaConnection, nativeMediaPort, mediaLibrary, mediaVisualKey,
   mediaConnectionLabel, mediaPlaybackLabel, mediaTime, mediaSourcesMarkup,
   mediaPermissionMarkup, type MediaAction,
@@ -103,6 +108,10 @@ const preferences = {
     sound: true,
     soundVolume: 0.22,
     renderQuality: undefined as RenderQuality | undefined,
+    // Player-skin mode: show NetEase's saved play queue. Off until the user switches it on.
+    neteaseQueue: false,
+    // Selecting a queue song makes NetEase play it; only acts while its debugging port answers.
+    neteaseControl: true,
   },
   ...read<
     Partial<{
@@ -117,6 +126,8 @@ const preferences = {
       sound: boolean;
       soundVolume: number;
       renderQuality: RenderQuality;
+      neteaseQueue: boolean;
+      neteaseControl: boolean;
     }>
   >("rhine-music-preferences", {}),
 };
@@ -213,17 +224,17 @@ stage.innerHTML = `
   <section id="music-browse" class="music-browse" aria-label="专辑浏览">
     <div class="music-browse-veil" aria-hidden="true"></div>
     <div class="album-callout"><p class="music-eyebrow">MUSIC ARCHIVE <span>／</span> <span id="selection-genre"></span></p>
-      <div class="selection-rule"><span id="selection-code">${externalMode ? "LIVE TRACK" : "ALBUM"} <span id="selection-code-number" ${externalMode ? "hidden" : ""}>001</span></span><span id="selection-format"></span></div>
+      <div class="selection-rule"><span id="selection-code"><span id="selection-code-label">${externalMode ? "LIVE TRACK" : "ALBUM"}</span> <span id="selection-code-number" ${externalMode ? "hidden" : ""}>001</span></span><span id="selection-format"></span></div>
       <h1 id="selection-title"></h1><p id="selection-artist" class="selection-artist"></p>
       <div class="selection-meta" id="selection-meta"></div>
-      <button class="open-album" data-action="open">${externalMode ? "当前曲目与控制" : "打开专辑"} <span>↗</span></button>
+      <button class="open-album" data-action="open"><span id="open-album-label">${externalMode ? "当前曲目与控制" : "打开专辑"}</span> <span>↗</span></button>
     </div>
     <div class="music-navigation">
-      <div class="music-counter"><span class="music-eyebrow">ALBUM / SELECT</span><div><b id="selection-number">01</b><span>/ <i id="selection-total">00</i></span></div></div>
+      <div class="music-counter"><span class="music-eyebrow" id="selection-counter-label">ALBUM / SELECT</span><div><b id="selection-number">01</b><span>/ <i id="selection-total">00</i></span></div></div>
       <div class="album-stepper"><button data-action="prev" aria-label="上一个专辑">↑</button><div id="album-ticks"></div><button data-action="next" aria-label="下一个专辑">↓</button></div>
       <div class="genre-stepper"><button data-action="genre-prev" aria-label="上一个${sortLabel.column}">←</button><div><small id="genre-position">${sortLabel.code} <span id="genre-index">01</span> / <span id="genre-total">00</span></small><button data-action="genres" id="genre-name"></button></div><button data-action="genre-next" aria-label="下一个${sortLabel.column}">→</button></div>
     </div>
-    <div class="music-keyhint">${externalMode ? "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目" : `← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑`}</div>
+    <div class="music-keyhint" id="music-keyhint">${externalMode ? "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目" : `← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑`}</div>
   </section>
   <section id="music-detail" class="music-detail" aria-label="专辑详情" hidden>
     <button class="music-back" data-action="back">← 返回专辑架 <kbd>ESC</kbd></button>
@@ -584,6 +595,11 @@ async function applyLibrary() {
     0,
     records.findIndex((r) => r.id === previousId),
   );
+  if (externalMode && previousId && records[selected]?.id !== previousId) {
+    // The box the user rested on left NetEase's queue: nothing to play, follow NetEase again.
+    forgetQueueJumps();
+    queueFollowPaused = false;
+  }
   columnMemory = new Map(
     archiveColumns.map((name, lane) => [
       name,
@@ -641,7 +657,10 @@ function updateStatus() {
   if (externalMedia) {
     $("#library-status span").textContent = mediaConnectionLabel(externalMedia);
     $("#library-status").classList.remove("working");
-    $("#library-count").textContent = externalMedia.selected ? "CURRENT TRACK ONLY" : "NOT CONNECTED";
+    const queue = shownQueue();
+    $("#library-count").textContent = queue
+      ? `NETEASE QUEUE / ${albums.length} TRACKS`
+      : externalMedia.selected ? "CURRENT TRACK ONLY" : "NOT CONNECTED";
     return;
   }
   const n = library.albums.length,
@@ -690,11 +709,12 @@ function updateSelection(navigation?: ArchiveNavigation) {
       genreIndex: location.lane + 1,
       genre: archiveColumns[location.lane],
       genreName: archiveColumns[location.lane],
-      format: externalMode ? "EXTERNAL / 当前曲目" : demo
+      format: shownQueue() ? "NETEASE / 播放队列" : externalMode ? "EXTERNAL / 当前曲目" : demo
         ? "DEMO"
         : [...new Set(a.tracks.map((t) => t.format))].join(" / "),
       artist: a.artist,
-      meta: externalMedia ? [externalMedia.selected?.album || "专辑未提供", "仅当前曲目"].join("  /  ") : [
+      meta: shownQueue() ? [queueSong(a.id)?.album || "专辑未提供", a.tracks[0]?.duration ? time(a.tracks[0].duration) : "", a.id === queuePlaying ? "当前曲目" : ""].filter(Boolean).join("  /  ")
+        : externalMedia ? [externalMedia.selected?.album || "专辑未提供", "仅当前曲目"].join("  /  ") : [
         a.year ? String(a.year) : "年份未提供",
         demo ? "演示封面" : `${a.tracks.length} 首曲目`,
         a.tracks.length ? time(albumDuration(a)) : "",
@@ -714,7 +734,8 @@ function updateSelection(navigation?: ArchiveNavigation) {
     navigation,
   );
   $("#detail-card-id").textContent =
-    externalMode ? "NOW PLAYING / 当前曲目" : `ALBUM / ${String(selected + 1).padStart(3, "0")}`;
+    shownQueue() ? `QUEUE / ${String(selected + 1).padStart(3, "0")}`
+      : externalMode ? "NOW PLAYING / 当前曲目" : `ALBUM / ${String(selected + 1).padStart(3, "0")}`;
   // Hidden archive content can prepare its static reels before the reveal.
   if (!animated) syncSelectionMotion();
 }
@@ -727,6 +748,7 @@ function commitSelection(index: number, navigation?: ArchiveNavigation, keepDeta
   if (keepDetail) scene?.switchMusicAlbum(selected, navigation);
   else scene?.select(selected, navigation);
   updateSelection(navigation);
+  scheduleQueueJump();
   effects.play(
     navigation && "axis" in navigation && navigation.axis === "lane"
       ? "column"
@@ -756,7 +778,8 @@ function navigationSelection() {
   return presentation.pendingSelection?.index ?? selected;
 }
 function stepAlbum(direction: number) {
-  if (externalMode) return;
+  if (externalMode && !shownQueue()) return;
+  queueFollowPaused = true;
   if (!records.length) return;
   const cursor = navigationSelection();
   const files = columnFiles(fileLocation(cursor).lane);
@@ -767,7 +790,8 @@ function stepAlbum(direction: number) {
     });
 }
 function stepGenre(direction: number) {
-  if (externalMode) return;
+  if (externalMode && !shownQueue()) return;
+  queueFollowPaused = true;
   if (!records.length || archiveColumns.length < 2) return;
   const lane = wrap(
     fileLocation(navigationSelection()).lane + direction,
@@ -1012,6 +1036,56 @@ player?.subscribe((state) => {
 });
 
 let externalVisual: string | undefined;
+let externalQueue: { tracks: QueueTrack[]; truncated: boolean } | undefined;
+let queueStamp: string | undefined;
+let queueStatus = "";
+let queueSettingVisual = "";
+// The queue song the player reports, and whether the user browsed away from it. Following
+// resumes when NetEase changes song by itself or the user returns to the playing song.
+let queuePlaying = "";
+let queueFollowPaused = false;
+// NetEase's debugging port: the exact playing song, and the way to make it play another.
+let debugState: DebugState = { available: false };
+// NetEase's position, kept running between the once-a-second readings.
+const playbackClock = new PlaybackClock();
+// Whether the port has been asked since it was last wanted, and what it answered if not a state.
+let debugProbed = false;
+let debugError = "";
+let debugSettingVisual = "";
+let debugRestarting = false;
+// The song Rhine asked NetEase to play and NetEase has not reported yet, and earlier
+// requests the user moved on from before NetEase reported them (song -> time asked).
+let queueJump: { key: string; at: number } | undefined;
+const queueJumpsSuperseded = new Map<string, number>();
+let queueJumpTimer: ReturnType<typeof setTimeout> | undefined;
+// Long enough for a wheel glide or a held arrow key to finish before NetEase is asked.
+const QUEUE_SETTLE_MS = 520;
+const QUEUE_JUMP_TIMEOUT_MS = 6000;
+// Windows may only know NetEase as "cloudmusic.exe".
+const NETEASE_NAME = "网易云音乐";
+/** NetEase's queue is shown only for a selected NetEase source after the user opted in. */
+function shownQueue() {
+  return externalMedia && preferences.neteaseQueue && isNeteaseSource(externalMedia.selected) && externalQueue?.tracks.length
+    ? externalQueue : undefined;
+}
+function queueSong(boxId?: string) {
+  return boxId ? shownQueue()?.tracks.find((track) => queueTrackKey(track) === boxId) : undefined;
+}
+function queueControl() {
+  const control = { enabled: preferences.neteaseControl, available: debugState.available };
+  const status = !control.enabled ? ""
+    : debugRestarting ? "正在以调试端口重新启动网易云…"
+    : !debugProbed ? "正在检测网易云调试端口…"
+    : debugError || queueControlStatus(control, debugState);
+  // Offer a restart only once a probe has really found the port closed.
+  return { ...control, status, restart: control.enabled && debugProbed && !control.available && !debugError && !debugRestarting };
+}
+function forgetQueueJumps() {
+  clearTimeout(queueJumpTimer);
+  queueJumpTimer = undefined;
+  queueJump = undefined;
+  queueJumpsSuperseded.clear();
+}
 let externalPoll: ReturnType<typeof setTimeout> | undefined;
 let externalStopped = false;
 let externalRefreshing = false;
@@ -1034,6 +1108,7 @@ function finishExternalSeek() {
   // can restore a position from the preceding native snapshot.
   externalSeekRelease = setTimeout(() => {
     externalSeekSettling = false;
+    void sendSeeks();
     updateExternalControls();
   }, 0);
 }
@@ -1067,8 +1142,80 @@ if (externalMode) {
     if ((event.target as HTMLElement)?.id === "external-seek") releaseSeek();
   });
   window.addEventListener("blur", releaseSeek);
+  // The poll is once a second; the timeline's seconds tick in between. Text only, no frames.
+  setInterval(() => { if (!document.hidden && !externalStopped) updateExternalTimeline(); }, 250);
 }
 
+/**
+ * Position and length for the timeline. NetEase's media session has neither; while its
+ * debugging port answers they come from there, and the timeline can be dragged.
+ */
+function externalTimeline() {
+  const source = externalMedia?.selected;
+  const position = playbackClock.position(performance.now());
+  if (isNeteaseSource(source) && debugState.available && position !== undefined && playbackClock.duration)
+    // A stopped or finished song has nothing loaded to seek in.
+    return { position, duration: playbackClock.duration, seekable: preferences.neteaseControl && debugState.playback !== "stopped", debug: true };
+  return { position: source?.position, duration: source?.duration, seekable: !!externalMedia?.can("seek"), debug: false };
+}
+const setText = (node: HTMLElement, text: string) => { if (node.textContent !== text) node.textContent = text; };
+/** Also runs between polls (see the timer below), so it only writes what changed. */
+function updateExternalTimeline() {
+  if (!externalMedia) return;
+  const timeline = externalTimeline();
+  const known = typeof timeline.duration === "number" && timeline.duration > 0;
+  document.querySelectorAll<HTMLElement>("[data-media-position]").forEach(node => setText(node, mediaTime(timeline.position)));
+  document.querySelectorAll<HTMLElement>("[data-media-duration]").forEach(node => setText(node, mediaTime(timeline.duration)));
+  const slider = document.querySelector<HTMLInputElement>("#external-seek");
+  if (slider) {
+    const disabled = !(timeline.seekable && known), max = String(known ? Math.floor(timeline.duration!) : 1);
+    if (slider.disabled !== disabled) slider.disabled = disabled;
+    if (slider.max !== max) slider.max = max;
+    const value = String(Math.floor(timeline.position || 0));
+    if (externalSeekPointer === undefined && !externalSeekKeys.size && !externalSeekSettling && slider.value !== value)
+      slider.value = value;
+  }
+  const label = document.querySelector<HTMLElement>("[data-media-timeline-label]");
+  if (label) setText(label, known ? "播放位置" : "时长不可用");
+}
+// The newest place the user moved NetEase's timeline to and that has not been sent yet.
+let pendingSeek: number | undefined;
+let seekSending = false;
+/** The timeline shows the target at once; NetEase is asked when the key or pointer is let go. */
+function requestSeek(position: number) {
+  if (!Number.isFinite(position)) return;
+  pendingSeek = position;
+  playbackClock.seek(position, performance.now());
+  updateExternalTimeline();
+  if (externalSeekPointer === undefined && !externalSeekKeys.size) void sendSeeks();
+}
+/** One request at a time, always the newest target: a held arrow key is one seek, not thirty. */
+async function sendSeeks() {
+  if (seekSending) return;
+  seekSending = true;
+  try {
+    while (pendingSeek !== undefined) {
+      const position = pendingSeek;
+      pendingSeek = undefined;
+      await seekNetease(position);
+    }
+  } finally {
+    seekSending = false;
+  }
+}
+async function seekNetease(position: number) {
+  const trackId = debugState.trackId;
+  if (!trackId || !preferences.neteaseControl || !debugState.available) return playbackClock.release();
+  try {
+    const sent = await nativeDebugPort.seek(trackId, position);
+    // A trial clip limits the range: show where NetEase really went.
+    if (pendingSeek === undefined && Number.isFinite(sent) && Math.abs(sent - position) > 0.5) playbackClock.seek(sent, performance.now());
+  } catch (error) {
+    playbackClock.release();
+    notify(String(error instanceof Error ? error.message : error));
+  }
+  void refreshExternal();
+}
 function updateExternalControls() {
   if (!externalMedia) return;
   const source = externalMedia.selected;
@@ -1087,17 +1234,7 @@ function updateExternalControls() {
   });
   document.querySelectorAll<HTMLElement>("[data-media-playback]").forEach(node => { node.textContent = mediaPlaybackLabel(source); });
   document.querySelectorAll<HTMLElement>("[data-media-album]").forEach(node => { node.textContent = source?.album || "未提供"; });
-  document.querySelectorAll<HTMLElement>("[data-media-position]").forEach(node => { node.textContent = mediaTime(source?.position); });
-  document.querySelectorAll<HTMLElement>("[data-media-duration]").forEach(node => { node.textContent = mediaTime(source?.duration); });
-  const timeline = document.querySelector<HTMLInputElement>("#external-seek");
-  if (timeline) {
-    timeline.disabled = !externalMedia.can("seek");
-    timeline.max = String(source?.duration || 1);
-    if (externalSeekPointer === undefined && !externalSeekKeys.size && !externalSeekSettling)
-      timeline.value = String(source?.position || 0);
-  }
-  const timelineLabel = document.querySelector<HTMLElement>("[data-media-timeline-label]");
-  if (timelineLabel) timelineLabel.textContent = source?.duration && source.duration > 0 ? "播放位置" : "时长不可用";
+  updateExternalTimeline();
   const warning = [externalMedia.warning, source?.warning, externalMedia.error].filter(Boolean).join("\n");
   document.querySelectorAll<HTMLElement>("[data-media-warning]").forEach(node => { node.textContent = warning; });
   const connection = document.querySelector<HTMLElement>("#external-connection-status");
@@ -1117,19 +1254,210 @@ function updateExternalControls() {
     }
     const consent = document.querySelector<HTMLInputElement>("#external-global-keys");
     if (consent) consent.checked = externalMedia.allowGlobalMediaKeys;
+    const queueSetting = document.querySelector<HTMLElement>("#external-queue");
+    const control = queueControl();
+    // The control switch is not part of the key: rebuilding under it would drop its focus.
+    const restarting = debugRestarting && !isNeteaseSource(source);
+    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, restarting]);
+    if (queueSetting && queueKey !== queueSettingVisual) {
+      queueSettingVisual = queueKey;
+      debugSettingVisual = "";
+      // NetEase's source disappears while it restarts; keep saying what is happening.
+      queueSetting.innerHTML = restarting
+        ? '<p class="external-note" role="status">正在以调试端口重新启动网易云…</p>'
+        : queueSettingMarkup(source, preferences.neteaseQueue, queueStatus, control);
+    }
+    const queueStatusNode = document.querySelector<HTMLElement>("[data-queue-status]");
+    if (queueStatusNode) queueStatusNode.textContent = queueStatus;
+    // The port's state changes with NetEase, not with the panel: update it in place so a
+    // half-confirmed restart button is not rebuilt under the pointer.
+    const debugKey = JSON.stringify([control.status, control.restart]);
+    if (debugKey !== debugSettingVisual) {
+      debugSettingVisual = debugKey;
+      const debugStatusNode = document.querySelector<HTMLElement>("[data-debug-status]");
+      if (debugStatusNode) debugStatusNode.textContent = control.status;
+      const restart = document.querySelector<HTMLElement>("[data-debug-restart]");
+      if (restart) restart.hidden = !control.restart;
+    }
   }
+  updateQueueRows();
+}
+function updateQueueRows() {
+  const playing = !!queuePlaying && records[selected]?.id === queuePlaying;
+  document.querySelectorAll<HTMLElement>("[data-queue-state]").forEach((node) => {
+    node.textContent = playing ? mediaPlaybackLabel(externalMedia?.selected) : queueJump?.key === records[selected]?.id ? "正在切换…" : "队列中";
+  });
+  document.querySelectorAll<HTMLElement>("[data-media-now]").forEach((node) => {
+    node.textContent = externalMedia?.selected?.title || "未提供";
+  });
+  const note = !preferences.neteaseControl ? "切歌未开启：可在“播放器”面板中打开“选中盒子时让网易云切歌”。"
+    : debugState.available ? "停在一首歌上约半秒后，网易云播放它。"
+    : "网易云的调试端口未连接，选中盒子不会切歌；可在“播放器”面板中查看。";
+  document.querySelectorAll<HTMLElement>("[data-queue-control-note]").forEach((node) => { node.textContent = note; });
+}
+/** Header text and navigation that differ between the single live card and the queue. */
+function syncQueueChrome() {
+  const queue = !!shownQueue();
+  if (stage.dataset.queue === String(queue)) return;
+  stage.dataset.queue = String(queue);
+  $("#selection-code-label").textContent = queue ? "QUEUE" : "LIVE TRACK";
+  $("#selection-counter-label").textContent = queue ? "SONG / SELECT" : "ALBUM / SELECT";
+  $("#selection-code-number").hidden = !queue;
+  $("#open-album-label").textContent = queue ? "查看这首歌" : "当前曲目与控制";
+  $('.album-stepper [data-action="prev"]').setAttribute("aria-label", queue ? "队列中的上一首" : "上一个专辑");
+  $('.album-stepper [data-action="next"]').setAttribute("aria-label", queue ? "队列中的下一首" : "下一个专辑");
+  // Whether NetEase follows depends on the switch and its port, so the hint only says "select".
+  $("#music-keyhint").innerHTML = queue
+    ? "滚轮 / ↑ ↓ 选歌 <span>／</span> ENTER 打开 <span>／</span> SPACE 播放 / 暂停"
+    : "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目";
+}
+async function refreshQueue() {
+  const source = externalMedia?.selected;
+  if (!preferences.neteaseQueue || !isNeteaseSource(source)) {
+    externalQueue = undefined;
+    queueStamp = undefined;
+    return;
+  }
+  try {
+    const reply = await nativeQueuePort.read(queueStamp);
+    if (reply.status === "missing") {
+      externalQueue = undefined;
+      queueStamp = undefined;
+      queueStatus = "没有找到网易云保存的播放队列。请先在网易云中播放歌曲。";
+    } else if (reply.status === "queue") {
+      queueStamp = reply.stamp;
+      externalQueue = reply.tracks.length ? { tracks: reply.tracks, truncated: reply.truncated } : undefined;
+      queueStatus = reply.tracks.length
+        ? `已读取播放队列 ${reply.tracks.length} 首${reply.truncated ? "（只显示前 3000 首）" : ""}，随网易云更新。`
+        : "网易云的播放队列为空。";
+    }
+  } catch (error) {
+    // A file being rewritten keeps the queue already shown; the next poll reads it again.
+    queueStatus = String(error instanceof Error ? error.message : error);
+  }
+}
+async function refreshDebug() {
+  if (!preferences.neteaseQueue || !preferences.neteaseControl || !isNeteaseSource(externalMedia?.selected)) {
+    debugState = { available: false };
+    debugProbed = false;
+    debugError = "";
+    playbackClock.update(debugState, performance.now());
+    return;
+  }
+  try {
+    debugState = await nativeDebugPort.state();
+    debugError = "";
+  } catch (error) {
+    // Polled every second: e.g. NetEase's page is still starting. Report a change once.
+    debugState = { available: false };
+    const message = String(error instanceof Error ? error.message : error);
+    if (message !== debugError) console.warn(message);
+    debugError = message;
+  }
+  debugProbed = true;
+  playbackClock.update(debugState, performance.now());
+}
+/**
+ * The user is still moving along the shelf: a wheel glide, a step moments ago, or a step
+ * that waits for the detail text to leave before it is committed.
+ */
+function queueBrowsing() {
+  return wheelNavigation.active || queueJumpTimer !== undefined ||
+    (queueFollowPaused && (!!presentation.pendingSelection ||
+      (libraryRebuilding && !!libraryIntent && "index" in libraryIntent)));
+}
+/** Every committed selection restarts the wait; only the box the user rests on is played. */
+function scheduleQueueJump(key = records[selected]?.id) {
+  clearTimeout(queueJumpTimer);
+  queueJumpTimer = undefined;
+  if (!key || !shownQueue() || !queueFollowPaused) return;
+  queueJumpTimer = setTimeout(() => {
+    queueJumpTimer = undefined;
+    void jumpToSelectedSong(key);
+  }, QUEUE_SETTLE_MS);
+}
+/** `key` is the box the wait was started for; a rebuilt queue may no longer rest on it. */
+async function jumpToSelectedSong(key: string) {
+  // Still gliding, or a detail switch is waiting for its text to leave: ask again later.
+  if (wheelNavigation.active || presentation.pendingSelection || libraryRebuilding) return scheduleQueueJump(key);
+  const song = records[selected]?.id === key ? queueSong(key) : undefined;
+  if (!song || !queueFollowPaused || key === queuePlaying || queueJump?.key === key) return;
+  if (!preferences.neteaseControl || !debugState.available) return;
+  if (queueJump) queueJumpsSuperseded.set(queueJump.key, queueJump.at);
+  queueJumpsSuperseded.delete(key);
+  queueJump = { key, at: performance.now() };
+  updateQueueRows();
+  try {
+    await nativeDebugPort.play(song.id);
+  } catch (error) {
+    if (queueJump?.key === key) queueJump = undefined;
+    updateQueueRows();
+    notify(String(error instanceof Error ? error.message : error));
+    return;
+  }
+  // The poll confirms it; ask now rather than up to a second later.
+  void refreshExternal();
+}
+/** Bring the playing song forward unless the user is browsing elsewhere. */
+function followQueue() {
+  const queue = shownQueue();
+  const key = queue ? queueTrackKey(playingQueueTrack(queue.tracks, externalMedia?.selected, debugState)) : "";
+  const now = performance.now();
+  for (const [asked, at] of queueJumpsSuperseded) if (now - at > QUEUE_JUMP_TIMEOUT_MS) queueJumpsSuperseded.delete(asked);
+  if (queueJump && now - queueJump.at > QUEUE_JUMP_TIMEOUT_MS) {
+    queueJump = undefined;
+    notify("网易云没有切换到选中的歌曲。");
+  }
+  if (key !== queuePlaying) {
+    queuePlaying = key;
+    if (queueJump?.key === key) {
+      // NetEase reports the song Rhine asked for.
+      queueJump = undefined;
+      queueJumpsSuperseded.clear();
+    } else if (!queueJumpsSuperseded.delete(key)) {
+      // NetEase changed song by itself (or skipped a song it cannot play): follow it again,
+      // but never pull the shelf away from under a user who is still scrolling.
+      queueJump = undefined;
+      queueJumpsSuperseded.clear();
+      if (!queueBrowsing()) queueFollowPaused = false;
+    }
+    // Otherwise an earlier request landed after the user had moved on: the newer request,
+    // or the box the user rests on, still stands.
+    updateQueueRows();
+    updateSelection();
+  }
+  if (!key || !ready || boot?.active || panel || libraryRebuilding) return;
+  const index = records.findIndex((record) => record.id === key);
+  const cursor = navigationSelection();
+  if (index < 0) return;
+  if (index === cursor) {
+    queueFollowPaused = false;
+    return;
+  }
+  if (queueFollowPaused) return;
+  const files = columnFiles(fileLocation(index).lane);
+  const from = files.indexOf(cursor), to = files.indexOf(index);
+  let rows = to - from;
+  // The column loops: take the shorter way round.
+  if (Math.abs(rows) > files.length / 2) rows -= Math.sign(rows) * files.length;
+  select(index, from >= 0 && to >= 0 && rows ? { axis: "row", direction: rows } : undefined);
 }
 function syncExternal(): Promise<void> {
   // Serialize scene changes; a later snapshot wins after an in-flight cover upload.
   externalUpdating = externalUpdating.catch(error => notify(String(error))).then(async () => {
     if (!externalMedia || externalStopped) return;
     updateExternalControls();
-    const nextVisual = mediaVisualKey(externalMedia.selected);
+    const source = externalMedia.selected;
+    const queue = shownQueue();
+    // The queue's shelf changes only with the queue; a new song just moves the selection.
+    const nextVisual = queue && source ? JSON.stringify(["queue", source.id, source.name, queueStamp]) : mediaVisualKey(source);
     if (nextVisual !== externalVisual) {
-      library = mediaLibrary(externalMedia.selected);
+      library = queue && source ? queueLibrary(queue.tracks, NETEASE_NAME) : mediaLibrary(source);
+      syncQueueChrome();
       await applyLibrary();
       externalVisual = nextVisual;
     }
+    followQueue();
     updateExternalControls();
   });
   return externalUpdating;
@@ -1140,6 +1468,8 @@ async function refreshExternal() {
   clearTimeout(externalPoll);
   try {
     await externalMedia.refresh();
+    await refreshQueue();
+    await refreshDebug();
     await syncExternal();
   } catch (error) { notify(String(error)); }
   finally {
@@ -1158,14 +1488,27 @@ async function controlExternal(action: MediaAction, position?: number) {
 function renderSourcesPanel() {
   if (!externalMedia) return;
   sourcesVisual = "";
-  $("#panel-body").innerHTML = `<p class="panel-intro">选择要连接的播放器。只读取它的当前曲目、封面与可用控制；不会导入曲库，也不会自动选择其他来源。</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div><div id="external-permission"></div><p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，不猜测进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
+  queueSettingVisual = "";
+  $("#panel-body").innerHTML = `<p class="panel-intro">选择要连接的播放器。默认只读取它的当前曲目、封面与可用控制；网易云的播放队列与切歌在连接后于下方另行开关。不会导入曲库，也不会自动选择其他来源。</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div><div id="external-permission"></div><div id="external-queue"></div><p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，没有读数时不推算进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
+  updateExternalControls();
+}
+const externalControls = '<div class="external-controls" role="group" aria-label="外部播放器控制"><button data-media-action="previous">上一曲</button><button data-media-action="toggle">播放 / 暂停</button><button data-media-action="next">下一曲</button><button data-media-action="stop">停止</button></div><label class="external-timeline" for="external-seek"><span><span data-media-timeline-label>播放位置</span> <output><span data-media-position></span> / <span data-media-duration></span></output></span><input type="range" id="external-seek" min="0" max="1" step="1" value="0" disabled aria-label="外部播放器播放位置"></label>';
+function renderQueueDetail() {
+  const a = currentAlbum();
+  if (!a) return;
+  const song = queueSong(a.id);
+  const article = $("#album-detail-content");
+  detailIdentity = a.id;
+  article.innerHTML = `<div class="detail-overline"><span>NETEASE QUEUE / ${String(selected + 1).padStart(3, "0")}</span><div class="detail-album-navigation" role="group" aria-label="切换歌曲"><button data-action="prev" aria-label="队列中的上一首">↑ 上一首</button><button data-action="next" aria-label="队列中的下一首">下一首 ↓</button></div></div><h1 title="${esc(a.title)}">${albumTitleMarkup(a.title)}</h1><p class="detail-artist">${esc(a.artist)}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span>${esc(song?.album || "未提供")}</span></div><div><small>DURATION / 时长</small><span>${song?.duration ? time(song.duration) : "未提供"}</span></div><div><small>SOURCE / 来源</small><span>${NETEASE_NAME}</span></div><div><small>STATUS / 状态</small><span data-queue-state></span></div><div><small>NOW PLAYING / 网易云当前曲目</small><span data-media-now></span></div></div>${externalControls}<p class="external-note">盒子按网易云播放队列的顺序排列，随机播放时实际播放顺序不同。<span data-queue-control-note></span></p><p data-media-warning class="external-warning" role="status"></p>`;
+  documentDecryption.reset(article, preferences.reduced || scene?.decryptionFrame.phase === "clear");
   updateExternalControls();
 }
 function renderExternalDetail() {
   const source = externalMedia?.selected;
   if (!source) return;
+  if (shownQueue()) return renderQueueDetail();
   const article = $("#album-detail-content");
-  article.innerHTML = `<div class="detail-overline"><span>EXTERNAL / 当前曲目</span><button data-action="sources">${esc(source.name)} ↗</button></div><h1 title="${esc(source.title || "曲名未提供")}">${albumTitleMarkup(source.title || "曲名未提供")}</h1><p class="detail-artist">${esc(source.artist || "歌手未提供")}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span data-media-album>${esc(source.album || "未提供")}</span></div><div><small>STATUS / 播放状态</small><span data-media-playback></span></div></div><div class="external-controls" role="group" aria-label="外部播放器控制"><button data-media-action="previous">上一曲</button><button data-media-action="toggle">播放 / 暂停</button><button data-media-action="next">下一曲</button><button data-media-action="stop">停止</button></div><label class="external-timeline" for="external-seek"><span><span data-media-timeline-label>播放位置</span> <output><span data-media-position></span> / <span data-media-duration></span></output></span><input type="range" id="external-seek" min="0" max="1" step="1" value="0" disabled aria-label="外部播放器播放位置"></label><p class="external-note">只显示当前曲目，不代表完整专辑或播放队列。音量与音效由原播放器控制；灰色按钮表示该来源当前未提供相应能力。</p><p data-media-warning class="external-warning" role="status"></p>`;
+  article.innerHTML = `<div class="detail-overline"><span>EXTERNAL / 当前曲目</span><button data-action="sources">${esc(source.name)} ↗</button></div><h1 title="${esc(source.title || "曲名未提供")}">${albumTitleMarkup(source.title || "曲名未提供")}</h1><p class="detail-artist">${esc(source.artist || "歌手未提供")}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span data-media-album>${esc(source.album || "未提供")}</span></div><div><small>STATUS / 播放状态</small><span data-media-playback></span></div></div>${externalControls}<p class="external-note">只显示当前曲目，不代表完整专辑或播放队列。音量与音效由原播放器控制；灰色按钮表示该来源当前未提供相应能力。</p><p data-media-warning class="external-warning" role="status"></p>`;
   documentDecryption.reset(article, preferences.reduced || scene?.decryptionFrame.phase === "clear");
   updateExternalControls();
 }
@@ -1480,6 +1823,7 @@ document.addEventListener("click", (e) => {
   }
   if (target.dataset.select) {
     const rulerStep = Number(target.dataset.rulerStep);
+    queueFollowPaused = true;
     select(Number(target.dataset.select),
       target.dataset.rulerStep !== undefined && Number.isInteger(rulerStep)
         ? { axis: "row", direction: rulerStep } : undefined);
@@ -1533,6 +1877,27 @@ document.addEventListener("click", (e) => {
     case "disconnect-source":
       externalMedia?.disconnect();
       void syncExternal();
+      break;
+    case "netease-restart-debug":
+      if (debugRestarting) break;
+      if (target.dataset.confirm !== "true") {
+        // Closing someone's player needs a second, deliberate click.
+        target.dataset.confirm = "true";
+        target.textContent = "再点一次确认：将关闭并重新启动网易云";
+        break;
+      }
+      debugRestarting = true;
+      updateExternalControls();
+      void nativeDebugPort.restart()
+        .then(() => notify("网易云已以调试端口重新启动。请在“播放器”面板重新选择网易云。"))
+        .catch((error) => notify(String(error instanceof Error ? error.message : error)))
+        .finally(() => {
+          debugRestarting = false;
+          debugProbed = false;
+          delete target.dataset.confirm;
+          target.textContent = "以调试端口重新启动网易云";
+          void refreshExternal();
+        });
       break;
     case "close-panel":
     case "dismiss-panel":
@@ -1681,7 +2046,27 @@ document.addEventListener("change", (e) => {
     return;
   }
   if (externalMedia && el.id === "external-seek") {
-    void controlExternal("seek", Number(el.value));
+    if (externalTimeline().debug) requestSeek(Number(el.value));
+    else void controlExternal("seek", Number(el.value));
+    return;
+  }
+  if (externalMedia && el.id === "netease-queue") {
+    preferences.neteaseQueue = el.checked;
+    savePrefs();
+    externalQueue = undefined;
+    queueStamp = undefined;
+    queueStatus = el.checked ? "正在读取网易云播放队列…" : "";
+    updateExternalControls();
+    void refreshExternal();
+    return;
+  }
+  if (externalMedia && el.id === "netease-control") {
+    preferences.neteaseControl = el.checked;
+    savePrefs();
+    debugProbed = false;
+    if (!el.checked) forgetQueueJumps();
+    updateExternalControls();
+    void refreshExternal();
     return;
   }
   if (el.id === "music-sort" && ["genre", "artist", "album"].includes(el.value)) {
@@ -1824,10 +2209,53 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// The wheel scrolls the shelf. Events only add to the accumulator; frame() applies the rows
+// it releases as one multi-row step, so a fast spin costs a few selections, not one per event.
+const wheelNavigation = new WheelNavigation();
+function wheelCanNavigate() {
+  return ready && !!scene && !boot?.active && !panel && !viewer?.isOpen && !libraryRebuilding &&
+    records.length > 1 && (!externalMode || !!shownQueue());
+}
+/** Track lists, panels and a tall selection callout keep their own wheel scrolling. */
+function scrollsNatively(target: EventTarget | null) {
+  for (let node = target instanceof Element ? target : null; node && node !== stage; node = node.parentElement) {
+    if (node.matches("input, textarea, select")) return true;
+    if (node.scrollHeight > node.clientHeight + 1 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowY)) return true;
+  }
+  return false;
+}
+stage.addEventListener("wheel", (event) => {
+  // Ctrl + wheel is zoom, and a mostly sideways gesture is not a row scroll.
+  if (event.ctrlKey || event.metaKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+  if (!wheelCanNavigate() || scrollsNatively(event.target)) return;
+  event.preventDefault();
+  // A mouse wheel reports whole notches in wheelDeltaY (120 each), whatever the Windows
+  // "lines per notch" setting or the page zoom make of deltaY: one notch is one row.
+  const notches = (event as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY;
+  const notched = event.deltaMode === 0 && typeof notches === "number" && notches !== 0 && notches % 120 === 0;
+  wheelNavigation.push(notched ? (-notches / 120) * WHEEL_PIXELS_PER_ROW : event.deltaY, event.deltaMode, performance.now(), innerHeight);
+  requestFrame();
+}, { passive: false });
+function drainWheel() {
+  if (!wheelNavigation.active) return;
+  if (!wheelCanNavigate()) return wheelNavigation.reset();
+  const rows = wheelNavigation.take(performance.now(), preferences.reduced);
+  if (rows) stepAlbum(rows);
+}
+
 let lastFrame = 0,
-  frameCount = 0;
+  frameCount = 0,
+  frameRequest = 0,
+  frameTimer = 0;
+function requestFrame() {
+  window.clearTimeout(frameTimer);
+  frameTimer = 0;
+  if (!frameRequest) frameRequest = requestAnimationFrame(frame);
+}
 function frame(ms: number) {
+  frameRequest = 0;
   if (!document.hidden && scene) {
+    drainWheel();
     const opening = boot?.update(ms / 1000);
     if (!viewer?.isOpen) scene.update(ms / 1000, opening?.cinema);
     viewer?.update(ms / 1000);
@@ -1877,10 +2305,20 @@ function frame(ms: number) {
       lastFrame = ms;
     }
   } else {
+    wheelNavigation.reset();
     frameCount = 0;
     lastFrame = ms;
   }
-  requestAnimationFrame(frame);
+  // Input or a state change during this frame already asked for the next one.
+  if (frameRequest) return;
+  // While the scene rests and nothing here animates, wait for the scene's next
+  // ~60 Hz slot instead of running every display frame (FramePacing).
+  const quiet = scene && !document.hidden && !boot?.active && !viewer?.isOpen &&
+    !pendingDetailFocus && !pendingSearchTrack && !wheelNavigation.active && (presentation.phase === "archive" ||
+      (presentation.phase === "detail" && !documentDecryption.active));
+  const wait = quiet ? scene!.nextFrameAt() * 1000 - performance.now() : 0;
+  if (wait > 1) frameTimer = window.setTimeout(requestFrame, wait);
+  else frameRequest = requestAnimationFrame(frame);
 }
 async function start() {
   // This local application owns its live index. An old archive PWA must not serve stale UI.
@@ -1911,12 +2349,15 @@ async function start() {
     scene.setTheme(preferences.theme);
     scene.setQuality(renderQuality);
     scene.setReduced(preferences.reduced);
+    await scene.precompile();
     scene.onSelect = (index, cell) => {
-      if (!externalMode && !boot?.active && presentation.phase === "archive" && !panel)
+      if ((!externalMode || shownQueue()) && !boot?.active && presentation.phase === "archive" && !panel) {
+        queueFollowPaused = true;
         select(index, cell ? { cell } : undefined);
+      }
     };
     scene.onNavigate = (axis, direction) => {
-      if (!externalMode && !boot?.active && presentation.phase === "archive" && !panel)
+      if ((!externalMode || shownQueue()) && !boot?.active && presentation.phase === "archive" && !panel)
         axis === "lane" ? stepGenre(direction) : stepAlbum(direction);
     };
     $("#music-loading").remove();
@@ -1934,6 +2375,7 @@ async function start() {
     syncSelectionMotion();
     requestAnimationFrame((ms) => {
       stage.classList.add("theme-motion-ready");
+      scene!.onWake = requestFrame;
       frame(ms);
     });
   } catch (error) {

@@ -14,6 +14,11 @@ export class DocumentDecryption {
   private visibleSince: number | null = null;
   private progress = 0;
 
+  /** Covers remain on the text, holding or sweeping: updates run every frame. */
+  get active() {
+    return this.root !== null && this.progress < 1;
+  }
+
   reset(root: HTMLElement, clear: boolean) {
     this.remove();
     this.root = root;

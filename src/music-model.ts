@@ -1,15 +1,15 @@
 import * as THREE from "three";
 
-// Reuse the existing Blender shell. Its source bounds are 4.3 × 3.7 × 0.26;
-// normalise baked geometry once, keeping the extraction/camera centre unchanged.
+// The album case (art/build_music_case.py) is authored at exactly this size and centre,
+// which the camera, lighting and extraction share.
 export const MUSIC_MODEL = {
   width: 4.45,
   height: 3.35,
-  depth: 0.14,
+  depth: 0.28,
   center: { x: 0, y: 1.85, z: 0 },
 } as const;
 
-// The artwork is a surface print in front of every glass vertex (max z=.07).
+// The artwork is a surface print in front of every glass vertex (max z = depth / 2).
 // Keep its native proportions and a visible glass border on all four sides.
 export const MUSIC_COVER = {
   width: 2.98,
@@ -18,43 +18,6 @@ export const MUSIC_COVER = {
   y: MUSIC_MODEL.center.y,
   z: MUSIC_MODEL.depth / 2 + 0.012,
 } as const;
-
-// The authored front/rear panels share top, bottom and right end faces with
-// the frame. A tiny XY inset separates those faces without changing the frame,
-// glass thickness, print placement, UVs or authored weighted-normal structure.
-export const MUSIC_PANEL_INSET = 0.002;
-
-export function normalizeMusicGeometry(geometry: THREE.BufferGeometry, surfaceName?: string) {
-  const normalize = !geometry.userData.musicDimensions;
-  const inset = !geometry.userData.musicPanelInset &&
-    (surfaceName === "Frosted_Polymer" || surfaceName === "Optical_Diffuser");
-  if (!normalize && !inset) return geometry;
-  // BufferGeometry.clone() shares userData. Do not mark the cached raw GLB
-  // template as transformed when only this scene/viewer copy has changed.
-  geometry.userData = { ...geometry.userData };
-  if (normalize) {
-    geometry.translate(0, -MUSIC_MODEL.center.y, 0);
-    geometry.scale(MUSIC_MODEL.width / 4.3, MUSIC_MODEL.height / 3.7, MUSIC_MODEL.depth / 0.26);
-    geometry.translate(0, MUSIC_MODEL.center.y, 0);
-    geometry.userData.musicDimensions = true;
-  }
-  // Keep this guard independent: callers may normalize before the material's
-  // name is known, then supply it later. Neither step may compound on reuse.
-  if (inset) {
-    geometry.computeBoundingBox();
-    const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
-    const size = geometry.boundingBox!.getSize(new THREE.Vector3());
-    const sx = (size.x - MUSIC_PANEL_INSET * 2) / size.x;
-    const sy = (size.y - MUSIC_PANEL_INSET * 2) / size.y;
-    geometry.applyMatrix4(new THREE.Matrix4().makeScale(sx, sy, 1).setPosition(
-      center.x * (1 - sx), center.y * (1 - sy), 0,
-    ));
-    geometry.userData.musicPanelInset = true;
-  }
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
 
 /** All three music contexts share soft frosted glass beneath a sharp surface print. */
 export function configureMusicGlass(surface: string, material: THREE.MeshPhysicalMaterial) {
@@ -84,11 +47,30 @@ export function configureMusicGlass(surface: string, material: THREE.MeshPhysica
   material.userData.musicShell = true;
 }
 
-export function musicAssemblyPart(surface: string) {
-  if (surface === "Frosted_Polymer") return "cover";
-  if (surface === "Optical_Diffuser") return "substrate";
-  return "carrier";
+/** Glass shell surfaces: thin-face coverage strips and the shell lighting apply to these. */
+export const MUSIC_SHELL_SURFACES = ["Frosted_Polymer", "Ivory_Edges", "Optical_Diffuser"] as const;
+export const isMusicShellSurface = (surface: string) =>
+  (MUSIC_SHELL_SURFACES as readonly string[]).includes(surface);
+
+/**
+ * art/build_music_case.py tags every node: "shared" parts form each shelf instance and the
+ * lifted case, "lod1" stand-ins exist only on the shelf, "lod0" detail only on the lifted case.
+ */
+export type MusicCaseLevel = "shared" | "lod0" | "lod1";
+export function musicCaseLevel(object: THREE.Object3D): MusicCaseLevel {
+  const level = object.userData.rhineLod;
+  return level === "lod0" || level === "lod1" ? level : "shared";
 }
+
+export function musicAssemblyPart(surface: string) {
+  if (surface === "Optical_Diffuser") return "substrate";
+  if (surface === "Ivory_Edges") return "carrier";
+  // The glass cover and the merged detail pressed into its face.
+  return "cover";
+}
+
+// The printed label plate (art/build_music_case.py) and the canvas laid over it.
+export const MUSIC_LABEL = { x: -1.685, y: 3.05, z: MUSIC_MODEL.depth / 2 + 0.0022, width: 0.46, height: 0.36 } as const;
 
 /** Clarity applies to the glass substrate only; the cover never enters this path. */
 export function setMusicGlassClarity(material: THREE.MeshPhysicalMaterial, clarity: number) {

@@ -323,10 +323,7 @@ impl State {
         if let Err(error) = self.refresh_netease() {
             warnings.push(error);
         }
-        let netease_smtc = self.entries.iter().any(|entry| {
-            let app = entry.app.to_lowercase();
-            app.contains("cloudmusic") || app.contains("netease") || app.contains("网易云")
-        });
+        let netease_smtc = self.entries.iter().any(|entry| is_netease_app(&entry.app));
         if !netease_smtc {
             if let Some((id, window)) = &self.netease {
                 let no_competitor = discovery.is_ok() && self.entries.is_empty();
@@ -337,6 +334,7 @@ impl State {
                     capabilities: Capabilities { toggle: no_competitor, previous: no_competitor, next: no_competitor, ..Capabilities::default() },
                     warning: Some(if no_competitor { "仅有曲名与歌手，播放状态、封面和进度不可用。控制需要允许系统媒体键，不能保证只发送给网易云。" }
                         else { "仅有曲名与歌手。检测到其它媒体会话或无法确认系统会话，已禁用系统媒体键以免控制其它播放器。" }.into()),
+                    player: Some("netease".into()),
                 });
             }
         }
@@ -443,6 +441,11 @@ impl State {
     }
 }
 
+fn is_netease_app(app: &str) -> bool {
+    let app = app.to_lowercase();
+    app.contains("cloudmusic") || app.contains("netease") || app.contains("网易云")
+}
+
 fn read_source(entry: &mut Entry) -> Source {
     let mut source = Source {
         id: entry.id.clone(),
@@ -457,6 +460,7 @@ fn read_source(entry: &mut Entry) -> Source {
         duration: None,
         capabilities: Capabilities::default(),
         warning: None,
+        player: is_netease_app(&entry.app).then(|| "netease".into()),
     };
     let result = (|| -> Outcome<()> {
         let media = wait(
@@ -552,15 +556,17 @@ fn read_cover(media: &Properties) -> Outcome<Option<String>> {
     if size == 0 || size > MAX_COVER_BYTES {
         return Ok(None);
     }
-    let mime = stream
+    let declared = stream
         .ContentType()
         .map_err(win_error)?
         .to_string_lossy()
         .to_lowercase();
-    if !matches!(
-        mime.as_str(),
-        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-    ) {
+    if !declared_types(&declared).any(|mime| {
+        matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    }) {
         return Ok(None);
     }
     let input = stream.GetInputStreamAt(0).map_err(win_error)?;
@@ -576,13 +582,21 @@ fn read_cover(media: &Properties) -> Outcome<Option<String>> {
     }
     let mut bytes = vec![0; count as usize];
     reader.ReadBytes(&mut bytes).map_err(win_error)?;
-    if !valid_image(&mime, &bytes) {
+    let Some(mime) = declared_image_type(&declared, &bytes) else {
         return Ok(None);
-    }
+    };
     Ok(Some(format!(
         "data:{mime};base64,{}",
         STANDARD.encode(bytes)
     )))
+}
+/// Players may declare one type or a list; NetEase sends "image/jpeg,image/jpe,image/jpg".
+fn declared_types(declared: &str) -> impl Iterator<Item = &str> + '_ {
+    declared.split([',', ';']).map(str::trim)
+}
+/// Only a declared raster type whose signature the bytes actually carry is accepted.
+fn declared_image_type<'a>(declared: &'a str, bytes: &[u8]) -> Option<&'a str> {
+    declared_types(declared).find(|mime| valid_image(mime, bytes))
 }
 fn valid_image(mime: &str, bytes: &[u8]) -> bool {
     match mime {
@@ -719,6 +733,24 @@ mod tests {
         assert!(!valid_image("image/png", b"<svg onload='alert(1)'>"));
         assert!(!valid_image("image/svg+xml", b"<svg/>"));
         assert!(!valid_image("image/webp", b"RIFF"));
+    }
+    #[test]
+    fn declared_type_lists_accept_only_the_type_the_bytes_carry() {
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10];
+        assert_eq!(
+            declared_image_type("image/jpeg,image/jpe,image/jpg", &jpeg),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            declared_image_type("image/png; charset=binary", b"\x89PNG\r\n\x1a\nfixture"),
+            Some("image/png")
+        );
+        assert_eq!(declared_image_type("image/png,image/gif", &jpeg), None);
+        assert_eq!(
+            declared_image_type("image/svg+xml,image/png", b"<svg onload='alert(1)'>"),
+            None
+        );
+        assert_eq!(declared_image_type("", &jpeg), None);
     }
     #[test]
     fn toggle_uses_explicit_play_or_pause_only_for_a_known_playback_state() {

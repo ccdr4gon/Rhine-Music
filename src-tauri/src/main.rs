@@ -3,7 +3,10 @@
 use rhine_music::{library::Store, server::Service};
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -36,6 +39,53 @@ async fn media_control(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Read only after the user switches on the queue in player-skin mode.
+#[tauri::command]
+async fn netease_queue(
+    stamp: Option<String>,
+) -> Result<rhine_music::media::netease_queue::QueueReply, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::media::netease_queue::read(stamp.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// NetEase's local DevTools port; polled while its queue is shown and song switching is not
+/// turned off.
+#[tauri::command]
+async fn netease_debug_state() -> Result<rhine_music::media::netease_debug::DebugState, String> {
+    tauri::async_runtime::spawn_blocking(rhine_music::media::netease_debug::state)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn netease_debug_play(track_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::media::netease_debug::play(&track_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn netease_debug_seek(track_id: String, position: f64) -> Result<f64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::media::netease_debug::seek(&track_id, position)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Closes NetEase and starts it with the debugging port; only from the user's button.
+#[tauri::command]
+async fn netease_debug_restart() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(rhine_music::media::netease_debug::restart)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -146,8 +196,33 @@ fn main() {
             choose_music_folders,
             save_preferences,
             media_snapshot,
-            media_control
+            media_control,
+            netease_queue,
+            netease_debug_state,
+            netease_debug_play,
+            netease_debug_seek,
+            netease_debug_restart
         ])
+        .on_window_event(|window, event| {
+            // WebView2 keeps a minimized window's page visible and drawing. Hide
+            // the WebView while minimized, like a background browser tab: the
+            // scene stops drawing and releases its buffers; playback continues.
+            static MINIMIZED: AtomicBool = AtomicBool::new(false);
+            if let tauri::WindowEvent::Resized(_) = event {
+                let minimized = window.is_minimized().unwrap_or(false);
+                if MINIMIZED.swap(minimized, Ordering::Relaxed) == minimized {
+                    return;
+                }
+                if let Some(main) = window.app_handle().get_webview_window(window.label()) {
+                    let webview: &tauri::Webview = main.as_ref();
+                    let _ = if minimized {
+                        webview.hide()
+                    } else {
+                        webview.show()
+                    };
+                }
+            }
+        })
         .setup(|app| {
             let (resources, data_dir) = portable_paths(
                 &std::env::current_exe()?,

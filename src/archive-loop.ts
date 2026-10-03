@@ -77,6 +77,14 @@ export function visibleCell(index: number, center: ArchiveCell, rows = LOOP_ROWS
   };
 }
 
+/** In-place poolCell / visibleCell for the per-frame loop over every display slot. */
+export function placeCell(target: ArchiveCell, index: number, rows: number, center?: ArchiveCell) {
+  const lane = POOL_LANES[Math.floor(index / rows)], row = index % rows - (rows - LOOP_ROWS) / 2;
+  target.lane = center ? nearestOccurrence(lane, center.lane, LOOP_COLUMNS) : lane;
+  target.row = center ? nearestOccurrence(row, center.row, rows) : row;
+  return target;
+}
+
 export function cellKey(cell: ArchiveCell) {
   return `${cell.lane}:${cell.row}`;
 }

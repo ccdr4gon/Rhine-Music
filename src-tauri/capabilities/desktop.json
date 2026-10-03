@@ -5,5 +5,5 @@
   "windows": ["main"],
   "local": true,
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["core:default", "allow-choose-music-folders", "allow-save-preferences", "allow-media-connection"]
+  "permissions": ["core:default", "allow-choose-music-folders", "allow-save-preferences", "allow-media-connection", "allow-netease-queue", "allow-netease-debug"]
 }

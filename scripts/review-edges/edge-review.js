@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MUSIC_CD_ASSET } from '/src/music-cd-asset.ts';
+import { MUSIC_CASE_ASSET } from '/src/music-case-asset.ts';
 
 // Deliberately not part of the product. TS private fields compile to ordinary
 // properties; this page inspects them without modifying production interfaces.
@@ -20,8 +20,8 @@ const yieldTask = () => new Promise(resolve => { tasks.push(resolve); taskChanne
 const visibility = () => ({ visibilityState: document.visibilityState, hidden: document.hidden });
 const host = $('host');
 const query = new URLSearchParams(location.search);
-if (['checkpoint-aa4', 'current-product', 'all'].includes(query.get('comparison'))) $('comparison').value = query.get('comparison');
-const asset = new URL(query.get('asset') || `/${MUSIC_CD_ASSET}`, location.origin);
+if (['checkpoint-aa4', 'current-product', 'all', 'subpixel'].includes(query.get('comparison'))) $('comparison').value = query.get('comparison');
+const asset = new URL(query.get('asset') || `/${MUSIC_CASE_ASSET}`, location.origin);
 if (asset.origin !== location.origin || !asset.pathname.endsWith('.glb')) throw new Error('Only a same-origin GLB asset is allowed.');
 $('asset').value = asset.pathname + asset.search;
 let archive, report, running = false, cancelled = false, thumbnails = [], crops = [];
@@ -240,8 +240,9 @@ async function runCase(theme, mode, base, options, mask) {
     drawCalls: stats(records.map(f => f.renderer.calls)), triangles: stats(records.map(f => f.renderer.triangles)),
   };
   thumbnails.push({ label: `${theme} / ${mode.id}`, images }); crops.push({ label: `${theme} / ${mode.id}`, images: cropImages });
-  return { result: { theme, code: mode.keepProduction ? 'current' : 'checkpoint', mode,
-    actualPipeline: { samples: [archive.composer.renderTarget1.samples, archive.composer.renderTarget2.samples], smaa: archive.smaa.enabled,
+  return { result: { theme, code: mode.code ?? (mode.keepProduction ? 'current' : 'checkpoint'), mode,
+    // Current code multisamples only its dedicated scene pass; checkpoints used both composer buffers.
+    actualPipeline: { samples: archive.scenePass ? [archive.scenePass.samples] : [archive.composer.renderTarget1.samples, archive.composer.renderTarget2.samples], smaa: archive.smaa.enabled,
       shadows: archive.light.shadow.mapSize.x, aoSamples: archive.aoKernelSize, aoResolution: [archive.ao.width, archive.ao.height],
       bokeh: archive.bokeh.enabled, transmission: archive.renderer.transmissionResolutionScale },
     dimensions: { width: W, height: H, pixelRatio: 1 }, summary, frames: records }, mask };
@@ -256,7 +257,7 @@ function makeSheet(rows, width, height) {
 }
 function showResults() {
   $('results').innerHTML = '<table><thead><tr><th>模式</th><th>全帧 D2</th><th>边缘 D2</th><th>相对 baseline</th><th>边缘梯度</th><th>GPU ms</th><th>提交＋读回 ms</th><th>calls</th></tr></thead><tbody>' + report.cases.map(item => {
-    const s = item.summary, baseline = report.cases.find(c => c.theme === item.theme && c.mode.id === 'baseline')?.summary;
+    const s = item.summary, baseline = report.cases.find(c => c.theme === item.theme && ['baseline','portable-checkpoint'].includes(c.mode.id))?.summary;
     return `<tr><td>${item.theme} / ${item.mode.id}</td><td>${s.flickerMeanAbs.toExponential(3)}</td><td>${s.edgeFlickerMeanAbs.toExponential(3)}</td><td>${baseline?.edgeFlickerMeanAbs ? (s.edgeFlickerMeanAbs / baseline.edgeFlickerMeanAbs).toFixed(3) : '—'}</td><td>${s.firstFrameGradient.toFixed(5)}</td><td>${s.gpuRenderMs?.mean.toFixed(2) ?? '不可用'}</td><td>${s.submitAndReadbackMs.mean.toFixed(2)}</td><td>${s.drawCalls.mean}</td></tr>`;
   }).join('') + '</tbody></table>';
   fullSheet = makeSheet(thumbnails, 320, 180); cropSheet = makeSheet(crops, 320, 240);
@@ -288,12 +289,15 @@ $('run').onclick = async () => {
     for (const theme of themes) {
       $('status').textContent = `准备 ${theme} 姿态…`;
       let mask;
-      const selectedModes = options.comparison === 'current-product' ? [{ id: 'current-product', keepProduction: true }]
+      const selectedModes = options.comparison === 'subpixel' ? [
+        { id: 'portable-checkpoint', keepProduction: true, code: 'checkpoint' },
+        { id: 'current-product', keepProduction: true, code: 'current' },
+      ] : options.comparison === 'current-product' ? [{ id: 'current-product', keepProduction: true }]
         : options.comparison === 'all' ? [...MODES, { id: 'current-product', keepProduction: true }] : MODES;
       let base;
       let previousCode;
       for (const mode of selectedModes) {
-        const code = mode.keepProduction ? 'current' : 'checkpoint';
+        const code = mode.code ?? (mode.keepProduction ? 'current' : 'checkpoint');
         if (code !== previousCode) {
           await useContext(code);
           base = await preparePose(theme, options.pose);
@@ -317,7 +321,7 @@ async function useContext(code) {
     host.replaceChildren(archive.renderer.domElement);
     return;
   }
-  const prefix = code === 'checkpoint' ? '/.tools/edge-baseline/src/' : '/src/';
+  const prefix = code === 'checkpoint' ? (query.get('comparison') === 'subpixel' ? '/.tools/subpixel-baseline/src/' : '/.tools/edge-baseline/src/') : '/src/';
   const [sceneModule, dataModule, demoModule, qualityModule] = await Promise.all([
     import(/* @vite-ignore */ `${prefix}scene.ts`), import(/* @vite-ignore */ `${prefix}data.ts`),
     import(/* @vite-ignore */ `${prefix}demo-library.ts`), import(/* @vite-ignore */ `${prefix}render-quality.ts`),
@@ -345,6 +349,6 @@ async function useContext(code) {
 try {
   await useContext($('comparison').value === 'current-product' ? 'current' : 'checkpoint');
   const base = await preparePose('day', 'detail'); moveFrame(base, 0, 'camera', 0.1);
-  configureAA($('comparison').value === 'current-product' ? { keepProduction: true } : MODES[0]); draw(); readPixels();
+  configureAA(['current-product','subpixel'].includes($('comparison').value) ? { keepProduction: true } : MODES[0]); draw(); readPixels();
   $('status').textContent = '已加载。点击 Run 开始确定性比较。'; $('run').disabled = false;
 } catch (reason) { error(reason); }

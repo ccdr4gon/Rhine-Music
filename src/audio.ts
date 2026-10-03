@@ -386,6 +386,20 @@ export class TerminalAudio {
     if (!this.prefs.music) this.stopMusic();
     if (!this.prefs.sound && !this.prefs.music) this.hide();
     else if (this.unlocked) void this.activate();
+    else this.prepare();
+  }
+  /**
+   * Opening the audio device takes tens of milliseconds on Windows. Doing it
+   * before the first click or key keeps that input's frame on time; nothing
+   * sounds until the gesture unlocks and resumes the context, as before.
+   */
+  private prepare() {
+    if (this.context || this.disposed || document.hidden) return;
+    try {
+      this.createContext();
+    } catch {
+      /* Created again on the first gesture, as before. */
+    }
   }
   private createContext() {
     const c = (this.context = new AudioContext()),
@@ -537,6 +551,7 @@ export class TerminalAudio {
   play(type: Sound = "tick", pan = 0) {
     const c = this.context;
     if (
+      !this.unlocked ||
       !this.prefs.sound ||
       !c ||
       c.state !== "running" ||
@@ -598,7 +613,7 @@ export class TerminalAudio {
   }
   stats() {
     return {
-      state: this.context?.state ?? "locked",
+      state: this.unlocked ? this.context?.state ?? "locked" : "locked",
       scene: this.scene,
       tracks: this.tracks.length,
       voices: this.voices.filter(

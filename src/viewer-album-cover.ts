@@ -1,14 +1,15 @@
 import * as THREE from "three";
-import { COVER_SIZE, COVER_INSET, containCover } from "./cover-atlas";
+import { COVER_SIZE, coverArtScale } from "./cover-atlas";
 import type { MusicAlbum } from "./music-types";
 import { createAlbumPrintMaterial } from "./music-model.ts";
+import { CoverMipTexture, coverMipmaps, filterCoverShader } from "./cover-filtering.ts";
 
 /** A viewer owns its own print and texture, independent of the array's selection. */
 export class ViewerAlbumCover {
   readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
   readonly ready: Promise<void>;
   private readonly canvas = document.createElement("canvas");
-  private readonly texture: THREE.CanvasTexture;
+  private readonly texture: CoverMipTexture;
   private image?: HTMLImageElement;
   private disposed = false;
 
@@ -19,16 +20,25 @@ export class ViewerAlbumCover {
     this.canvas.width = 1024;
     this.canvas.height = 1024;
     this.paintPlaceholder();
-    this.texture = new THREE.CanvasTexture(this.canvas);
-    this.texture.colorSpace = THREE.SRGBColorSpace;
-    this.texture.anisotropy = Math.min(8, anisotropy);
+    this.texture = new CoverMipTexture(1, 1, this.canvas.width, anisotropy);
+    this.updateTexture(coverArtScale());
+    const print = createAlbumPrintMaterial(this.texture);
+    const compile = print.onBeforeCompile;
+    print.onBeforeCompile = function (this: THREE.MeshLambertMaterial, shader, renderer) {
+      compile.call(this, shader, renderer);
+      filterCoverShader(shader, this.map as CoverMipTexture, false);
+    };
+    print.onBeforeRender = function (this: THREE.MeshLambertMaterial, renderer) {
+      (this.map as CoverMipTexture).flush(renderer);
+    };
+    print.customProgramCacheKey = () => "album-filtered-viewer-print-v2";
     this.mesh = new THREE.Mesh(
       new THREE.PlaneGeometry(COVER_SIZE.width, COVER_SIZE.height).translate(
         COVER_SIZE.x,
         COVER_SIZE.y,
         COVER_SIZE.z,
       ),
-      createAlbumPrintMaterial(this.texture),
+      print,
     );
     this.mesh.name = "Album cover print";
     this.mesh.receiveShadow = true;
@@ -40,15 +50,19 @@ export class ViewerAlbumCover {
     this.ready = this.load();
   }
 
+  private updateTexture(scale: [number, number]) {
+    const { width, height } = this.canvas;
+    this.texture.setTile(0, coverMipmaps(this.canvas.getContext("2d")!.getImageData(0, 0, width, height).data, width));
+    this.texture.coverScale.value.set(...scale);
+  }
+
   private paintPlaceholder() {
     const context = this.canvas.getContext("2d")!;
     const { width, height } = this.canvas;
-    const margin = width * COVER_INSET,
-      size = height - margin * 2,
-      left = (width - size) / 2;
+    // Art fills the texture; the quad takes coverArtScale (see cover-atlas.ts).
     context.clearRect(0, 0, width, height);
     context.fillStyle = "#c9c9c4";
-    context.fillRect(left, margin, size, size);
+    context.fillRect(0, 0, width, height);
     context.strokeStyle = "#f8f7f1";
     context.lineWidth = height / 180;
     for (const radius of [0.2, 0.04]) {
@@ -84,22 +98,16 @@ export class ViewerAlbumCover {
       await image.decode();
       if (this.disposed || this.mesh.userData.coverDisposed) return;
       const context = this.canvas.getContext("2d")!;
+      context.imageSmoothingQuality = "high";
       const { width, height } = this.canvas;
-      const margin = width * COVER_INSET;
-      const box = containCover(
-        image.naturalWidth,
-        image.naturalHeight,
-        width - margin * 2,
-        height - margin * 2,
-      );
       context.clearRect(0, 0, width, height);
-      context.drawImage(image, box.x + margin, box.y + margin, box.width, box.height);
+      context.drawImage(image, 0, 0, width, height);
       this.mesh.userData.coverStatus = "loaded";
       this.mesh.userData.coverImageSize = [
         image.naturalWidth,
         image.naturalHeight,
       ];
-      this.texture.needsUpdate = true;
+      this.updateTexture(coverArtScale({ width: image.naturalWidth, height: image.naturalHeight }));
     } catch {
       if (!this.disposed) this.mesh.userData.coverStatus = "missing";
       // Keep this album's explicit missing-cover print; never reuse another album.

@@ -41,6 +41,10 @@ pub struct Source {
     pub capabilities: Capabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// "netease" when the source is NetEase Cloud Music, whose saved play queue the user
+    /// may choose to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -51,6 +55,8 @@ pub struct Snapshot {
     pub warning: Option<String>,
 }
 
+pub mod netease_debug;
+pub mod netease_queue;
 #[cfg(target_os = "windows")]
 mod windows_media;
 

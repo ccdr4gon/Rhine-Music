@@ -15,6 +15,8 @@ export interface ExternalMediaSource {
   duration?: number;
   capabilities: Record<MediaAction, boolean>;
   warning?: string;
+  /** "netease" when the source is NetEase Cloud Music (either connection kind). */
+  player?: "netease";
 }
 export interface MediaSnapshot { sources: ExternalMediaSource[]; warning?: string }
 export interface MediaPort {

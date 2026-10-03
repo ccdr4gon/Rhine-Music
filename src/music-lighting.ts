@@ -23,6 +23,11 @@ export class MusicSelectionLighting {
   ) };
   private readonly edgeFalloff = { value: new THREE.Vector2(1.7, 24) };
 
+  /** The light column's position, a shader uniform on its own spring. */
+  get columnPosition(): THREE.Vector3 {
+    return this.column.value;
+  }
+
   constructor(private readonly scene: THREE.Scene) {
     this.spot.name = "Selected album soft key";
     // Existing soft contact shadows are sufficient; the local key adds no

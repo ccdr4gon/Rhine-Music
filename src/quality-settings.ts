@@ -38,7 +38,7 @@ export function qualityMarkup(quality: RenderQuality) {
       "控制高密度屏幕的原生像素倍率",
       [1, 1.5, 2, 3].map((v) => [v, `${v}×`]),
     )}
-    ${select(quality, "antialias", "抗锯齿", "基础使用多重采样，不可用时以 SMAA 补偿；增强叠加 SMAA", [
+    ${select(quality, "antialias", "抗锯齿", "基础按显卡支持使用最高 8× 多重采样，不可用时以 SMAA 补偿；增强叠加 SMAA", [
       ["off", "基础"],
       ["smaa", "增强（SMAA）"],
     ])}

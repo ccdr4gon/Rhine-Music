@@ -2,7 +2,9 @@ import * as THREE from "three";
 import { glassRevealGLSL, frostedTransmissionGLSL, FROSTED_ROUGHNESS } from "./glass-reveal.ts";
 import { internalOpticsFragment } from "./internal-optics.ts";
 import { setMusicGlassClarity } from "./music-model.ts";
+import { CASE_DETAIL, caseDetailShader, caseDetailTheme, caseDetailUniforms } from "./music-case-detail.ts";
 import { ThemeTransition } from "./theme-transition.ts";
+import { configureThinFaceMaterial } from "./thin-face-material";
 
 import type { MusicSelectionLighting } from "./music-lighting";
 
@@ -34,6 +36,7 @@ export class CardAppearance {
       const mat = palette.high.clone();
       const amount = { value: 0 };
       const clarity = { value: 0 };
+      const detail = Boolean(mesh.userData.caseDetail);
       mesh.material = mat;
       if (mat.userData.opticalOrder)
         mesh.renderOrder = mat.userData.opticalOrder;
@@ -87,11 +90,16 @@ export class CardAppearance {
             "#include <color_fragment>",
             "#include <color_fragment>\nfloat coverage = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\nif (archiveQuality <= coverage) discard;",
           );
+        } else if (detail) {
+          // The music case's merged detail: per-surface finish, and the same coverage
+          // pattern dissolving the shelf stand-ins out where the lifted detail comes in.
+          caseDetailShader(shader, true);
         }
         this.musicLighting?.shade(shader, name);
       };
       mat.customProgramCacheKey = () =>
-        `archive-surface-clarity-${name}-${Boolean(palette.low)}-${Boolean(mesh.userData.keepFrosted)}-${Boolean(mesh.userData.musicShell)}`;
+        `archive-surface-clarity-${name}-${Boolean(palette.low)}-${Boolean(mesh.userData.keepFrosted)}-${Boolean(mesh.userData.musicShell)}-${detail}`;
+      if (mesh.userData.thinFaceCoverage) configureThinFaceMaterial(mat);
     }
   }
 
@@ -151,8 +159,12 @@ export class CardAppearance {
       }
       mesh.userData.appearance.value = value;
       const { high, low } = palette;
-      if (!low) continue;
       const mat = mesh.material as Surface;
+      if (!low) {
+        // Lifted-only surfaces have no shelf counterpart; they still follow the theme.
+        mat.color.copy(high.color);
+        continue;
+      }
       mat.color.copy(low.color).lerp(high.color, value);
       if (
         mat.attenuationColor &&
@@ -205,6 +217,9 @@ export class CardAppearance {
         } else if (name === "Index_Inlay") targets.color(mat.color, theme === "night" ? "#d7e9ff" : "#b9d2df");
       }
     }
+    // The music case's detail surfaces share one colour table (lifted mesh and shelf batch).
+    if (this.palettes.has(CASE_DETAIL))
+      caseDetailTheme(theme).forEach((color, i) => targets.color(caseDetailUniforms.caseColors.value[i], color));
     if (!transition) targets.finish();
   }
 
