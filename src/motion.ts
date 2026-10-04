@@ -65,6 +65,19 @@ export function musicSelectionWave(distance: number, age: number) {
   );
 }
 
+/**
+ * The play / stop gesture: the selected case makes a little hop (`height` world units, over
+ * `time` seconds, smooth at both ends) and, `wave` seconds after it leaves the ground, sends
+ * the selection wave (musicSelectionWave) out from its place.
+ */
+export const PLAY_GESTURE = { height: 0.36, time: 0.5, wave: 0.12 } as const;
+/** How high the gesture's hop is `age` seconds after the click. */
+export function playHop(age: number) {
+  if (!(age > 0 && age < PLAY_GESTURE.time)) return 0;
+  const lift = Math.sin((Math.PI * age) / PLAY_GESTURE.time);
+  return PLAY_GESTURE.height * lift * lift;
+}
+
 // Retained for the comparison experiments; the user chose the signed baseline.
 export function selectionWave(distance: number, age: number) {
   return Math.max(0, baselineSelectionWave(distance, age));

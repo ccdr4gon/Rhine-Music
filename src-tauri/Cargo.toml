@@ -34,6 +34,8 @@ rfd = "0.17"
 webbrowser = "1"
 uuid = { version = "1", features = ["v4"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# SQLite is compiled in ("bundled"); NetEase's local database is only ever opened read-only.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 base64 = "=0.22.1"

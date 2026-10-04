@@ -4,6 +4,7 @@
 // when the shelf has already moved on.
 import { coverMipmaps } from "./cover-mipmaps.ts";
 import { paintCoverArt } from "./cover-paint.ts";
+import { coverTint } from "./cover-tint.ts";
 import type { CoverJob, CoverReply } from "./cover-tiles.ts";
 
 type Decoded = { bitmap: ImageBitmap; width: number; height: number };
@@ -45,14 +46,14 @@ function decode(url: string) {
 async function paint(job: CoverJob): Promise<CoverReply> {
   const canvas = new OffscreenCanvas(job.size, job.size);
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
-  const image = job.url ? await decode(job.url) : undefined;
+  const image = (job.url ? await decode(job.url) : undefined) ?? (job.fallbackUrl ? await decode(job.fallbackUrl) : undefined);
   const scale = paintCoverArt(context, job.size, {
     image: image && { source: image.bitmap, width: image.width, height: image.height },
     title: job.title,
     external: job.external,
   });
   const levels = coverMipmaps(context.getImageData(0, 0, job.size, job.size).data, job.size);
-  return { id: job.id, levels, scale };
+  return { id: job.id, levels, scale, tint: image ? coverTint(levels) : undefined };
 }
 
 async function pump() {

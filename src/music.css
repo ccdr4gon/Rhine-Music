@@ -305,6 +305,32 @@
 .open-album:hover {
   color: var(--accent);
 }
+/* The song scene's entry: a quieter second line under "open album". */
+.open-songs {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  padding: 10px 0 0;
+}
+.open-songs:hover {
+  color: var(--accent);
+}
+.open-songs kbd,
+.card-caption button kbd {
+  font: 9px inherit;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 1px 3px;
+  margin-left: 8px;
+}
+/* A lone live track has no playlist to show. */
+.music-app[data-external="true"]:not([data-queue="true"]) [data-action="songs"] {
+  display: none;
+}
 .music-navigation {
   position: absolute;
   bottom: 60px;

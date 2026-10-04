@@ -82,8 +82,10 @@ export class MusicBoot {
     if (this.revealing) this.completeReveal(false);
     if (!this.running) {
       this.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      // The window's own title bar (window-frame.ts) stays usable during the intro.
       this.siblings = [...this.parent.children]
-        .filter((node): node is HTMLElement => node instanceof HTMLElement && node !== this.root)
+        .filter((node): node is HTMLElement => node instanceof HTMLElement && node !== this.root &&
+          !node.classList.contains("window-bar"))
         .map((node) => ({ node, inert: node.inert,
           visibility: node.style.getPropertyValue("visibility"),
           priority: node.style.getPropertyPriority("visibility") }));

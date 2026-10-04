@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { glassRevealGLSL, frostedTransmissionGLSL, FROSTED_ROUGHNESS } from "./glass-reveal.ts";
 import { internalOpticsFragment } from "./internal-optics.ts";
 import { setMusicGlassClarity } from "./music-model.ts";
-import { CASE_DETAIL, caseDetailShader, caseDetailTheme, caseDetailUniforms } from "./music-case-detail.ts";
+import { CASE_DETAIL, caseDetailShader, caseDetailTheme, caseDetailUniforms, caseTintTheme } from "./music-case-detail.ts";
 import { ThemeTransition } from "./theme-transition.ts";
 import { configureThinFaceMaterial } from "./thin-face-material";
 
@@ -37,6 +37,12 @@ export class CardAppearance {
       const amount = { value: 0 };
       const clarity = { value: 0 };
       const detail = Boolean(mesh.userData.caseDetail);
+      // Song scene: how much of the large card this case is (see setSongCard).
+      const card = { value: 0 };
+      mesh.userData.songCard = card;
+      // The cover colour of this case's index square (see setTint); none (weight 0) until one is set.
+      const tint = { value: new THREE.Vector4(0, 0, 0, 0) };
+      if (detail) mesh.userData.caseTint = tint;
       mesh.material = mat;
       if (mat.userData.opticalOrder)
         mesh.renderOrder = mat.userData.opticalOrder;
@@ -93,12 +99,12 @@ export class CardAppearance {
         } else if (detail) {
           // The music case's merged detail: per-surface finish, and the same coverage
           // pattern dissolving the shelf stand-ins out where the lifted detail comes in.
-          caseDetailShader(shader, true);
+          caseDetailShader(shader, true, tint);
         }
-        this.musicLighting?.shade(shader, name);
+        this.musicLighting?.shade(shader, name, card);
       };
       mat.customProgramCacheKey = () =>
-        `archive-surface-clarity-${name}-${Boolean(palette.low)}-${Boolean(mesh.userData.keepFrosted)}-${Boolean(mesh.userData.musicShell)}-${detail}`;
+        `archive-surface-clarity-${name}-${Boolean(palette.low)}-${Boolean(mesh.userData.keepFrosted)}-${Boolean(mesh.userData.musicShell)}-${detail ? "tinted-detail" : false}`;
       if (mesh.userData.thinFaceCoverage) configureThinFaceMaterial(mat);
     }
   }
@@ -145,6 +151,27 @@ export class CardAppearance {
         clarity,
       );
     });
+  }
+
+  /**
+   * Song scene: how much of the large card the case in `group` is, 0..1. The large card keeps
+   * the selection's rim; a case on its way to or from the chain takes the chain's shade as
+   * it sinks. The lifted case's print carries the same value on its own material.
+   */
+  setSongCard(group: THREE.Group, value: number) {
+    for (const child of group.children) {
+      const card = child.userData.songCard as THREE.IUniform<number> | undefined;
+      if (card) card.value = value;
+      else if (child.userData.albumCover) {
+        const print = ((child as THREE.Mesh).material as THREE.Material).userData.musicCard as THREE.IUniform<number> | undefined;
+        if (print) print.value = value;
+      }
+    }
+  }
+
+  /** The cover colour (linear RGB, weight) for the index square of the case in `group`. */
+  setTint(group: THREE.Group, tint: THREE.Vector4) {
+    for (const child of group.children) (child.userData.caseTint as THREE.IUniform<THREE.Vector4> | undefined)?.value.copy(tint);
   }
 
   apply(group: THREE.Group, value: number) {
@@ -218,8 +245,11 @@ export class CardAppearance {
       }
     }
     // The music case's detail surfaces share one colour table (lifted mesh and shelf batch).
-    if (this.palettes.has(CASE_DETAIL))
+    if (this.palettes.has(CASE_DETAIL)) {
       caseDetailTheme(theme).forEach((color, i) => targets.color(caseDetailUniforms.caseColors.value[i], color));
+      const tint = caseDetailUniforms.caseTintTheme.value;
+      (["x", "y", "z"] as const).forEach((axis, i) => targets.number(tint, axis, caseTintTheme(theme)[i]));
+    }
     if (!transition) targets.finish();
   }
 

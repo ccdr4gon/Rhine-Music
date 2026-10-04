@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SRGBColorSpace, LinearMipmapNearestFilter, Group, Mesh, MeshLambertMaterial, PlaneGeometry, Texture } from 'three';
+import { SRGBColorSpace, LinearMipmapNearestFilter, Group, Mesh, MeshLambertMaterial, PlaneGeometry, Texture, Vector4 } from 'three';
 import { coverMipmaps, CoverMipTexture, filterCoverShader } from '../src/cover-filtering.ts';
 import { CoverAtlas, coverArtScale } from '../src/cover-atlas.ts';
-import { CoverTiles } from '../src/cover-tiles.ts';
+import { readFileSync } from 'node:fs';
+import { CoverTiles, sizedCoverUrl } from '../src/cover-tiles.ts';
 import { applyTextureQuality } from '../src/quality-renderer.ts';
 
 const solid = (size, rgba) => Uint8Array.from({ length: size * size * 4 }, (_, i) => rgba[i % 4]);
@@ -220,11 +221,12 @@ function fakePainter() {
     // Like CoverTiles: a cancelled request settles with null, never stays pending.
     cancel(id) { cancelled.push(id); jobs.get(id)?.resolve(null); jobs.delete(id); },
     dispose() {},
-    finish(id, scale = [0.5, 0.75]) {
+    // `tint` is the colour the painter read from real art; a print without art has none.
+    finish(id, scale = [0.5, 0.75], tint) {
       const { request, resolve } = jobs.get(id);
       jobs.delete(id);
       const levels = coverMipmaps(solid(request.size, [255, 0, 0, 255]), request.size);
-      resolve({ levels, scale });
+      resolve({ levels, scale, tint });
       return new Promise(r => setTimeout(r, 0));
     },
   };
@@ -387,4 +389,341 @@ test('a superseded selection settles, so a library refresh awaiting it continues
   atlas.reset();
   assert.equal(await Promise.race([afterReset.then(() => 'settled'), new Promise(r => setTimeout(() => r('pending'), 50))]), 'settled');
   atlas.dispose();
+});
+
+// Index-square colours. Each case's square takes its cover's colour: linear RGB and a weight,
+// and a weight of zero leaves the square its own amber. The values below are exact in 32 bits.
+const AMBER = [0, 0, 0, 0];
+const tintAt = (atlas, instance) => [...atlas.caseTint.array.slice(instance * 4, instance * 4 + 4)];
+// Requests still waiting for an album: its shelf tile, or (sharp) a lifted print's 1024 px chain.
+const waiting = (painter, title, sharp = false) => [...painter.jobs]
+  .filter(([, job]) => job.request.title === title && (job.request.size === 1024) === sharp).map(([id]) => id);
+
+test('before any cover is lifted, no index square has a colour', () => {
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, fakePainter());
+  assert.deepEqual([atlas.caseTint.itemSize, atlas.caseTint.count], [4, 16], 'linear RGB and a weight for each shelf case');
+  assert.ok(atlas.caseTint.array.every(value => value === 0), 'the shelf keeps its amber');
+  assert.deepEqual(atlas.selectedTint.toArray(), AMBER, 'so does the lifted case (a weight of one with no colour is a black square)');
+  atlas.dispose();
+});
+
+test('an index square takes its cover\'s colour once the tile is painted, on every slot sharing it; a print without art keeps the amber', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(32, 4096, 4, undefined, painter);
+  const a = record('a');
+  for (let slot = 0; slot < 20; slot++) atlas.setSlot(slot, a);
+  atlas.setSlot(20, record('bare'));
+  showSlots(atlas, 22);
+  for (let slot = 0; slot < 22; slot++) assert.deepEqual(tintAt(atlas, slot), AMBER, 'amber while painting');
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.25, 0.5, 0.75]);
+  showSlots(atlas, 22);
+  for (let slot = 0; slot < 20; slot++) assert.deepEqual(tintAt(atlas, slot), [0.25, 0.5, 0.75, 1]);
+  assert.deepEqual(tintAt(atlas, 20), AMBER, 'another album\'s paint does not colour this one');
+  // The art could not be loaded: the painter printed the missing-cover card and read no colour.
+  await painter.finish(waiting(painter, 'bare')[0]);
+  showSlots(atlas, 22);
+  const scale = atlas.array.geometry.getAttribute('coverScale');
+  assert.deepEqual([scale.getX(20), scale.getY(20)], [0.5, 0.75], 'its print is shown');
+  assert.deepEqual(tintAt(atlas, 20), AMBER, 'and its square stays amber');
+  atlas.setSlot(21, a);
+  showSlots(atlas, 22);
+  assert.deepEqual(tintAt(atlas, 21), [0.25, 0.5, 0.75, 1], 'a known album is coloured at once');
+  atlas.dispose();
+});
+
+test('index square colours follow the shelf\'s draw order with the prints and upload only when something changes', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(8, 4096, 4, undefined, painter);
+  atlas.setSlot(2, record('a'));
+  atlas.setSlot(5, record('b'));
+  atlas.setSlot(6, record('c'));
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.25, 0.5, 0.75]);
+  await painter.finish(waiting(painter, 'b')[0], undefined, [0.5, 0.125, 0.0625]);
+  const tint = atlas.caseTint, rect = atlas.array.geometry.getAttribute('coverTile');
+  // A culled shelf draws slot 5, slot 6, then slot 2: the instances carry those slots' colours.
+  atlas.order(Int32Array.of(5, 6, 2), 3);
+  assert.deepEqual([tintAt(atlas, 0), tintAt(atlas, 1), tintAt(atlas, 2)], [[0.5, 0.125, 0.0625, 1], AMBER, [0.25, 0.5, 0.75, 1]],
+    'b, then c (still being painted), then a');
+  assert.deepEqual([rect.getX(0), rect.getX(1), rect.getX(2)], [1 / 16, 2 / 16, 0], 'the same instances as the prints');
+  assert.deepEqual(tint.updateRanges, [{ start: 0, count: 12 }], 'only the drawn instances upload, four values each');
+  const revision = atlas.revision, version = tint.version;
+  atlas.order(Int32Array.of(5, 6, 2), 3);
+  assert.deepEqual([atlas.revision, tint.version], [revision, version], 'a still shelf uploads nothing, so frames may rest');
+  atlas.order(Int32Array.of(2, 5, 6), 3);
+  assert.deepEqual([tintAt(atlas, 0), tintAt(atlas, 1), tintAt(atlas, 2)], [[0.25, 0.5, 0.75, 1], [0.5, 0.125, 0.0625, 1], AMBER]);
+  assert.equal(tint.version, version + 1, 'a new order is uploaded once');
+  const reordered = atlas.revision;
+  await painter.finish(waiting(painter, 'c')[0], undefined, [0.125, 0.25, 0.375]);
+  atlas.order(Int32Array.of(2, 5, 6), 3);
+  assert.deepEqual(tintAt(atlas, 2), [0.125, 0.25, 0.375, 1]);
+  assert.notEqual(atlas.revision, reordered, 'a colour arriving is a change to draw');
+  assert.equal(tint.version, version + 2);
+  const settled = atlas.revision;
+  tint.needsUpdate = true;
+  assert.equal(atlas.revision, settled + 1, 'the colours\' own upload counts, like the prints\'');
+  atlas.dispose();
+});
+
+test('a reused tile never shows the previous album\'s colour', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  // Sixteen albums fill the one row this pool may hold, each with its own colour.
+  for (let slot = 0; slot < 16; slot++) atlas.setSlot(slot, record(`r${slot}`));
+  for (let slot = 0; slot < 16; slot++) await painter.finish(waiting(painter, `r${slot}`)[0], undefined, [slot / 16, 0.5, 0.75]);
+  const rect = atlas.array.geometry.getAttribute('coverTile');
+  showSlots(atlas, 16);
+  for (let slot = 0; slot < 16; slot++) assert.deepEqual(tintAt(atlas, slot), [slot / 16, 0.5, 0.75, 1]);
+  const freed = [rect.getX(3), rect.getY(3)];
+  atlas.setSlot(3, record('fresh'));
+  showSlots(atlas, 16);
+  assert.deepEqual([rect.getX(3), rect.getY(3)], freed, 'the released tile is the one reused');
+  assert.deepEqual(tintAt(atlas, 3), AMBER, 'amber until its own cover is painted');
+  await painter.finish(waiting(painter, 'fresh')[0]);
+  showSlots(atlas, 16);
+  assert.deepEqual(tintAt(atlas, 3), AMBER, 'painted without art: still not the evicted album\'s colour');
+  // The evicted album returns on another slot: painted again, coloured by that paint alone.
+  atlas.setSlot(5, record('r3'));
+  showSlots(atlas, 16);
+  assert.deepEqual(tintAt(atlas, 5), AMBER, 'neither its earlier colour nor the one this slot showed');
+  await painter.finish(waiting(painter, 'r3')[0], undefined, [0.5, 0.125, 0.0625]);
+  showSlots(atlas, 16);
+  assert.deepEqual(tintAt(atlas, 5), [0.5, 0.125, 0.0625, 1]);
+  assert.deepEqual([tintAt(atlas, 3), tintAt(atlas, 4)], [AMBER, [4 / 16, 0.5, 0.75, 1]], 'the other slots keep theirs');
+  atlas.dispose();
+});
+
+test('growing the atlas keeps each painted square\'s colour', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(64, 4096, 4, undefined, painter);
+  atlas.reset(3);
+  for (let slot = 0; slot < 16; slot++) atlas.setSlot(slot, record(`a${slot}`));
+  for (let slot = 0; slot < 16; slot++) await painter.finish(waiting(painter, `a${slot}`)[0], undefined, [slot / 16, 0.5, 0.25]);
+  atlas.setSlot(16, record('a16'));
+  assert.equal(atlas.array.material.map.rows, 2, 'a seventeenth cover grows the atlas');
+  showSlots(atlas, 17);
+  for (let slot = 0; slot < 16; slot++) assert.deepEqual(tintAt(atlas, slot), [slot / 16, 0.5, 0.25, 1]);
+  assert.deepEqual(tintAt(atlas, 16), AMBER, 'the new cover is still being painted');
+  atlas.dispose();
+});
+
+test('the lifted case takes its shelf tile\'s colour at once and keeps it; with no painted tile it stays amber until a print arrives', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const lifted = () => atlas.selectedTint.toArray();
+  const a = record('a'), b = record('b'), c = record('c');
+  atlas.setSlot(0, a);
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.25, 0.5, 0.75]);
+  const first = atlas.select(a);
+  assert.deepEqual(lifted(), [0.25, 0.5, 0.75, 1], 'a painted tile lends its colour at once');
+  // The 1024 px paint of the same art reads slightly differently: the shelf tile's colour stays.
+  await painter.finish(waiting(painter, 'a', true)[0], undefined, [0.25 + 1 / 128, 0.5, 0.75]);
+  await first;
+  assert.deepEqual(lifted(), [0.25, 0.5, 0.75, 1], 'one colour on the shelf and lifted');
+  // b is on no slot yet.
+  const second = atlas.select(b);
+  assert.deepEqual(lifted(), AMBER, 'no tile: amber, never the previous album\'s colour');
+  await painter.finish(waiting(painter, 'b', true)[0], undefined, [0.5, 0.125, 0.0625]);
+  await second;
+  assert.deepEqual(lifted(), [0.5, 0.125, 0.0625, 1], 'then the sharp print\'s colour');
+  // c's tile is still being painted when c is lifted, and arrives before the sharp print.
+  atlas.setSlot(1, c);
+  const third = atlas.select(c);
+  assert.deepEqual(lifted(), AMBER, 'a tile still being painted lends nothing');
+  await painter.finish(waiting(painter, 'c')[0], undefined, [0.75, 0.5, 0.25]);
+  assert.deepEqual(lifted(), [0.75, 0.5, 0.25, 1], 'the tile, painted first, colours the waiting case');
+  await painter.finish(waiting(painter, 'c', true)[0], undefined, [0.75, 0.5, 0.25 + 1 / 128]);
+  await third;
+  assert.deepEqual(lifted(), [0.75, 0.5, 0.25, 1], 'and the sharp print does not change it');
+  atlas.dispose();
+});
+
+test('a sharp print that arrives before its tile gives the tile its colour; a tile without art leaves the lifted case the sharp print\'s', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const lifted = () => atlas.selectedTint.toArray();
+  const a = record('a'), bare = record('bare');
+  atlas.setSlot(0, a);
+  atlas.setSlot(2, bare);
+  const first = atlas.select(a);
+  await painter.finish(waiting(painter, 'a', true)[0], undefined, [0.125, 0.25, 0.375]);
+  await first;
+  assert.deepEqual(lifted(), [0.125, 0.25, 0.375, 1], 'the sharp print colours the lifted case');
+  // A second case showing the album comes into the pool while the tile is still being painted.
+  atlas.setSlot(1, a);
+  showSlots(atlas, 3);
+  assert.deepEqual([tintAt(atlas, 0), tintAt(atlas, 1)], [AMBER, AMBER], 'shelf cases stay amber while their own print is hidden');
+  // The 256 px paint of the same art reads slightly differently.
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.125 + 1 / 128, 0.25, 0.375]);
+  showSlots(atlas, 3);
+  for (const slot of [0, 1]) assert.deepEqual(tintAt(atlas, slot), lifted(), 'the shelf takes the colour the lifted case already shows');
+  assert.deepEqual(lifted(), [0.125, 0.25, 0.375, 1], 'which stays as it was');
+  // The tile's load failed (it shows the missing-cover card); the sharp print's did not.
+  await painter.finish(waiting(painter, 'bare')[0]);
+  const second = atlas.select(bare);
+  assert.deepEqual(lifted(), AMBER, 'a tile without art has no colour to lend');
+  await painter.finish(waiting(painter, 'bare', true)[0], undefined, [0.375, 0.625, 0.875]);
+  await second;
+  assert.deepEqual(lifted(), [0.375, 0.625, 0.875, 1], 'the sharp print found the art: its colour');
+  showSlots(atlas, 3);
+  assert.deepEqual(tintAt(atlas, 2), AMBER, 'the shelf case still shows the missing-cover card');
+  atlas.dispose();
+});
+
+test('a print painted without art carries no colour, whatever the other size found', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const lifted = () => atlas.selectedTint.toArray();
+  const a = record('a'), b = record('b');
+  // a: the sharp print finds the art first, then the tile's own load fails.
+  atlas.setSlot(0, a);
+  const first = atlas.select(a);
+  await painter.finish(waiting(painter, 'a', true)[0], undefined, [0.125, 0.25, 0.375]);
+  await first;
+  await painter.finish(waiting(painter, 'a')[0]);
+  showSlots(atlas, 2);
+  assert.deepEqual(tintAt(atlas, 0), AMBER, 'the shelf case shows the missing-cover card: amber');
+  assert.deepEqual(lifted(), [0.125, 0.25, 0.375, 1], 'the lifted print shows the art: its colour');
+  // b: the tile has the art, then the sharp print's load fails.
+  atlas.setSlot(1, b);
+  await painter.finish(waiting(painter, 'b')[0], undefined, [0.75, 0.5, 0.25]);
+  const second = atlas.select(b);
+  assert.deepEqual(lifted(), [0.75, 0.5, 0.25, 1], 'the interim print is the tile\'s art');
+  await painter.finish(waiting(painter, 'b', true)[0]);
+  await second;
+  assert.deepEqual(lifted(), AMBER, 'the lifted print is now the missing-cover card: amber');
+  showSlots(atlas, 2);
+  assert.deepEqual(tintAt(atlas, 1), [0.75, 0.5, 0.25, 1], 'the shelf case keeps its art and its colour');
+  atlas.dispose();
+});
+
+test('a sharp print that arrives before any slot shows its album still leaves the shelf and the lifted case one colour', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const lifted = () => atlas.selectedTint.toArray();
+  const a = record('a');
+  // Start-up order: the library is reset and its selection awaited before the first frame sets a slot.
+  atlas.reset(3);
+  const selection = atlas.select(a);
+  await painter.finish(waiting(painter, 'a', true)[0], undefined, [0.125, 0.25, 0.375]);
+  await selection;
+  assert.deepEqual(lifted(), [0.125, 0.25, 0.375, 1]);
+  atlas.setSlot(0, a);
+  showSlots(atlas, 1);
+  assert.deepEqual(tintAt(atlas, 0), AMBER, 'amber while its own print is painted');
+  // The 256 px paint of the same art reads slightly differently.
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.125 + 1 / 128, 0.25, 0.375]);
+  showSlots(atlas, 1);
+  assert.equal(tintAt(atlas, 0)[3], 1, 'the painted case has its colour');
+  assert.deepEqual(tintAt(atlas, 0), lifted(), 'the same album has one colour on the shelf and lifted');
+  atlas.dispose();
+});
+
+test('a returning copy keeps the colour of the album it left with', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const a = record('a'), b = record('b'), c = record('c');
+  atlas.setSlot(0, a);
+  atlas.setSlot(2, c);
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.25, 0.5, 0.75]);
+  await painter.finish(waiting(painter, 'c')[0], undefined, [0.75, 0.5, 0.25]);
+  // As the selection moves on, the scene hands the copy's own colour uniform to the snapshot.
+  const copies = [];
+  const leave = () => {
+    const copy = new Mesh(new PlaneGeometry()), tint = new Vector4(9, 9, 9, 9);
+    atlas.snapshot(copy, tint);
+    copies.push(copy);
+    return tint;
+  };
+  const first = atlas.select(a);
+  const leftA = leave();
+  assert.deepEqual(leftA.toArray(), [0.25, 0.5, 0.75, 1], 'the copy takes the lifted colour at once');
+  for (const id of waiting(painter, 'a', true)) await painter.finish(id, undefined, [0.25 + 1 / 128, 0.5, 0.75]);
+  await first;
+  assert.deepEqual(leftA.toArray(), [0.25, 0.5, 0.75, 1], 'its sharp print keeps the shelf tile\'s colour');
+  // b has no tile: its copy leaves amber, and c is lifted before b's sharp print arrives.
+  const second = atlas.select(b);
+  const leftB = leave();
+  assert.deepEqual(leftB.toArray(), AMBER, 'amber while its print is still hidden');
+  const third = atlas.select(c);
+  await second;
+  assert.deepEqual(atlas.selectedTint.toArray(), [0.75, 0.5, 0.25, 1]);
+  assert.deepEqual(leftB.toArray(), AMBER, 'the next album\'s colour is not the copy\'s');
+  const late = waiting(painter, 'b', true);
+  assert.equal(late.length, 1, 'the copy still waits for its own sharp print');
+  await painter.finish(late[0], undefined, [0.5, 0.125, 0.0625]);
+  assert.deepEqual(leftB.toArray(), [0.5, 0.125, 0.0625, 1], 'filled when that print arrives, with its own album\'s colour');
+  assert.deepEqual(atlas.selectedTint.toArray(), [0.75, 0.5, 0.25, 1], 'the lifted case is not touched');
+  await painter.finish(waiting(painter, 'c', true)[0], undefined, [0.75, 0.5, 0.25]);
+  await third;
+  assert.deepEqual([leftA.toArray(), leftB.toArray()], [[0.25, 0.5, 0.75, 1], [0.5, 0.125, 0.0625, 1]], 'copies keep theirs as the selection moves on');
+  for (const copy of copies) { copy.material.map.dispose(); copy.material.dispose(); copy.geometry.dispose(); }
+  atlas.dispose();
+});
+
+test('a reset returns every index square, drawn or lifted, to amber', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const a = record('a');
+  atlas.setSlot(0, a);
+  atlas.setSlot(1, record('b'));
+  atlas.setSlot(2, a);
+  for (const id of [...painter.jobs.keys()]) await painter.finish(id, undefined, [0.25, 0.5, 0.75]);
+  showSlots(atlas, 3);
+  const pending = atlas.select(a);
+  const tint = atlas.caseTint;
+  assert.deepEqual([tintAt(atlas, 0), tintAt(atlas, 1), tintAt(atlas, 2), atlas.selectedTint.toArray()], Array(4).fill([0.25, 0.5, 0.75, 1]));
+  const version = tint.version;
+  atlas.reset(3);
+  await pending;
+  assert.ok(tint.array.every(value => value === 0), 'no drawn case keeps a colour');
+  assert.ok(tint.version > version, 'and the cleared colours are uploaded');
+  assert.deepEqual(atlas.selectedTint.toArray(), AMBER, 'nor does the lifted case');
+  // The slots forgot their colours too: laying the same order out again brings none back.
+  showSlots(atlas, 3);
+  assert.ok(tint.array.every(value => value === 0), 'the slots forgot them as well');
+  // The next library may show the same album: painted again, coloured by that paint.
+  atlas.setSlot(0, a);
+  showSlots(atlas, 3);
+  assert.deepEqual(tintAt(atlas, 0), AMBER);
+  await painter.finish(waiting(painter, 'a')[0], undefined, [0.5, 0.125, 0.0625]);
+  showSlots(atlas, 3);
+  assert.deepEqual(tintAt(atlas, 0), [0.5, 0.125, 0.0625, 1]);
+  atlas.dispose();
+});
+
+test('shelf tiles ask NetEase\'s image server for a tile-sized cover and fall back to the full one', async () => {
+  const full = 'https://p1.music.126.net/abc/123.jpg?param=1024y1024';
+  assert.equal(sizedCoverUrl(full, 256), 'https://p1.music.126.net/abc/123.jpg?param=256y256');
+  assert.equal(sizedCoverUrl(full, 128), 'https://p1.music.126.net/abc/123.jpg?param=256y256');
+  assert.equal(sizedCoverUrl(full, 1024), full, 'the lifted print keeps the large cover');
+  // Anything that is not exactly that server's sized address is left alone.
+  for (const other of ['/covers/a.jpg', 'https://p1.music.126.net/abc/123.jpg', 'https://example.com/a.jpg?param=1024y1024',
+    'http://p1.music.126.net/abc/123.jpg?param=1024y1024', 'https://p1.music.126.net.evil.example/a.jpg?param=1024y1024',
+    'https://p1.music.126.net/abc/123.jpg?param=1024y1024&x=1', 'https://p1.music.126.net/abc/123.jpg?param=1024y1024#x'])
+    assert.equal(sizedCoverUrl(other, 256), other);
+  assert.equal(sizedCoverUrl(undefined, 256), undefined);
+  // The atlas asks for the tile-sized cover and names the full one as the fallback; the lifted print asks for the full one.
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  atlas.setSlot(0, record('n', full));
+  atlas.setSlot(1, record('local'));
+  const requests = [...painter.jobs.values()].map(job => job.request);
+  const tile = requests.find(request => request.url?.includes('126.net'));
+  assert.equal(tile.url, 'https://p1.music.126.net/abc/123.jpg?param=256y256');
+  assert.equal(tile.fallbackUrl, full);
+  assert.ok(tile.size <= 256);
+  const local = requests.find(request => request.url === '/covers/local.jpg');
+  assert.equal(local.fallbackUrl, undefined, 'a cover that is not resized has no second address');
+  const pending = atlas.select(record('n', full));
+  const lifted = [...painter.jobs.values()].map(job => job.request).find(request => request.size > 256);
+  assert.equal(lifted.url, full);
+  assert.equal(lifted.fallbackUrl, undefined);
+  for (const id of [...painter.jobs.keys()]) await painter.finish(id);
+  await pending;
+  atlas.dispose();
+  // The painter tries the fallback only when the first address gives no image.
+  const tiles = readFileSync(new URL('../src/cover-tiles.ts', import.meta.url), 'utf8');
+  assert.match(tiles, /\(request\.url \? await loadImage\(request\.url\) : undefined\)\s*\?\? \(request\.fallbackUrl \? await loadImage\(request\.fallbackUrl\) : undefined\)/);
+  const worker = readFileSync(new URL('../src/cover-worker.ts', import.meta.url), 'utf8');
+  assert.match(worker, /\(job\.url \? await decode\(job\.url\) : undefined\) \?\? \(job\.fallbackUrl \? await decode\(job\.fallbackUrl\) : undefined\)/);
 });

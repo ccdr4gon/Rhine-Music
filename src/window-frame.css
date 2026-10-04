@@ -1,0 +1,83 @@
+/* The desktop window's own title bar (window-frame.ts): no title, a strip along the top edge
+   that drags the window, and three buttons at the right in the size of Windows' own. It lies
+   above everything on the page, the intro's overlay (z-index 900) included. */
+.window-bar {
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  display: flex;
+  justify-content: flex-end;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.window-bar[hidden] {
+  display: none;
+}
+.window-controls {
+  display: flex;
+  height: 100%;
+}
+.window-controls button {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink, #232722);
+  cursor: default;
+  transition: background-color 120ms, color 120ms;
+}
+.window-controls svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.window-controls button:hover {
+  background: color-mix(in srgb, var(--ink, #232722) 10%, transparent);
+}
+.window-controls button:active {
+  background: color-mix(in srgb, var(--ink, #232722) 17%, transparent);
+}
+.window-controls button[data-window="close"]:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+.window-controls button[data-window="close"]:active {
+  background: #b0271a;
+  color: #fff;
+}
+.window-controls button:focus-visible {
+  outline: 1px solid var(--accent, #b56834);
+  outline-offset: -1px;
+}
+/* Where the header, a panel, the intro's skip button or the model viewer's header would
+   reach into the strip, they start below it. */
+@media (max-width: 1100px) {
+  .music-app[data-window-frame="custom"] .music-header {
+    margin-top: 10px;
+  }
+}
+@media (max-width: 700px) {
+  .music-app[data-window-frame="custom"] .music-header {
+    margin-top: 13px;
+  }
+  .music-app[data-window-frame="custom"] .music-panel-scrim {
+    padding-top: 40px;
+  }
+  .music-app[data-window-frame="custom"] .music-boot-skip,
+  .music-app[data-window-frame="custom"] .viewer-header {
+    top: 40px;
+  }
+}
+.music-app[data-window-frame="custom"][data-layout="portrait"] .music-header {
+  margin-top: 14px;
+}

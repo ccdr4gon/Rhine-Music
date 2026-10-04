@@ -460,3 +460,134 @@ test('production transition cancellation cannot complete an obsolete exit', asyn
   assert.equal(reducedCalls, 1, 'Reduced motion completes synchronously');
   assert.equal(root.hidden, true);
 });
+
+test('swapping the opened menu hides its text, retargets the scene and waits for it without leaving', () => {
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  let changed = 0;
+  assert.equal(f.motion.swapMenu(() => { changed++; f.ready.presentation = false; f.events.push('scene:retarget'); }), true);
+  assert.equal(f.motion.phase, 'switch-hiding');
+  assert.equal(changed, 0, 'The scene keeps its framing until the text has left');
+  f.motion.update();
+  assert.deepEqual(f.events, ['menu:hide']);
+  f.finishMenu();
+  assert.deepEqual(f.events, ['menu:hide', 'scene:retarget', 'menu:prepare']);
+  assert.equal(f.motion.phase, 'switching');
+  for (let frame = 0; frame < 60; frame++) f.motion.update();
+  assert.equal(f.motion.phase, 'switching', 'Wait for the new framing');
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.at(-1), 'menu:show');
+  assert.equal(f.motion.openingOrDetail, true);
+  assert.ok(!f.events.some((event) => ['mode:archive', 'camera:return', 'camera:enter', 'browse:hide', 'browse:show'].includes(event)));
+});
+
+test('a menu swap is refused while the album is opening or its text is leaving', () => {
+  const f = fixture();
+  let changed = 0;
+  assert.equal(f.motion.swapMenu(() => { changed++; }), false, 'Not from the archive');
+  f.motion.open();
+  assert.equal(f.motion.swapMenu(() => { changed++; }), false, 'Not while opening');
+  f.finishBrowse();
+  f.ready.presentation = true;
+  f.motion.update();
+  f.motion.select({ index: 3 }, true);
+  assert.equal(f.motion.swapMenu(() => { changed++; }), false, 'Not during an album switch');
+  assert.equal(changed, 0);
+  assert.equal(f.events.filter((event) => event === 'menu:hide').length, 1);
+});
+
+test('Escape during a menu swap returns to the archive without retargeting the scene', () => {
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  let changed = 0;
+  f.motion.swapMenu(() => { changed++; });
+  f.motion.back();
+  assert.equal(f.menuExits.length, 1, 'Reuse the text exit already in progress');
+  f.finishMenu();
+  assert.equal(changed, 0);
+  assert.equal(f.motion.phase, 'returning');
+  assert.deepEqual(f.events, ['menu:hide', 'mode:archive', 'camera:return']);
+});
+
+test('a selection made during a menu swap is committed after the swap, in the new menu', () => {
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  f.motion.swapMenu(() => f.events.push('scene:retarget'));
+  f.motion.select({ index: 5 }, true);
+  assert.equal(f.menuExits.length, 1);
+  f.finishMenu();
+  assert.deepEqual(f.events, ['menu:hide', 'scene:retarget', { switchDetail: { index: 5 } }, 'menu:prepare']);
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.at(-1), 'menu:show');
+});
+
+test('a menu that stays in place may finish its exit at once', () => {
+  // The song scene keeps its panel while the playlist moves: hideMenu calls back synchronously.
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  f.ports.hideMenu = (done) => { f.events.push('menu:stay'); done(); };
+  f.motion.select({ index: 2 }, true);
+  assert.deepEqual(f.events, ['menu:stay', { switchDetail: { index: 2 } }, 'menu:prepare']);
+  assert.equal(f.motion.phase, 'switching');
+  // A second request before the scene is ready replaces nothing visible and is not lost.
+  f.motion.select({ index: 4 }, true);
+  f.motion.update();
+  assert.deepEqual(f.detailSelections(), [{ index: 2 }, { index: 4 }]);
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.at(-1), 'menu:show');
+});
+
+test('a menu swap is accepted while the scene is still arriving, and carries a pending selection', () => {
+  // Esc in the song scene during an in-place switch must still return to the detail it was
+  // opened from, not fall through to the shelf.
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  f.motion.select({ index: 6 }, true);
+  f.finishMenu();
+  assert.equal(f.motion.phase, 'switching');
+  f.ready.presentation = false;
+  let changed = 0;
+  assert.equal(f.motion.swapMenu(() => { changed++; f.events.push('scene:retarget'); }), true);
+  assert.equal(f.motion.phase, 'switch-hiding');
+  // A further selection arrives while the text of the old menu is leaving.
+  f.motion.select({ index: 7 }, true);
+  f.finishMenu();
+  assert.equal(changed, 1);
+  assert.deepEqual(f.events.slice(-3), ['scene:retarget', { switchDetail: { index: 7 } }, 'menu:prepare']);
+  assert.equal(f.motion.phase, 'switching');
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.at(-1), 'menu:show');
+  assert.ok(!f.events.some((event) => ['mode:archive', 'camera:return', 'browse:show'].includes(event)));
+});
+
+test('a menu swap right after another one reverses it without visiting the shelf', () => {
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  const order = [];
+  f.motion.swapMenu(() => order.push('to song'));
+  f.finishMenu();
+  assert.equal(f.motion.phase, 'switching');
+  f.ready.presentation = false;
+  assert.equal(f.motion.swapMenu(() => order.push('to detail')), true);
+  f.finishMenu();
+  assert.deepEqual(order, ['to song', 'to detail']);
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.filter((event) => event === 'menu:show').length, 1);
+  assert.ok(!f.events.includes('camera:return'));
+});

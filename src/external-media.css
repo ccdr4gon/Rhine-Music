@@ -16,7 +16,7 @@
 .external-timeline output { font-variant-numeric: tabular-nums; }
 .music-app[data-external="true"]:not([data-queue="true"]) .music-navigation { display: none; }
 /* The queue is one column: its column stepper would do nothing. */
-.music-app[data-queue="true"] .genre-stepper { visibility: hidden; }
+.music-app[data-queue="true"]:not([data-lanes="true"]) .genre-stepper { visibility: hidden; }
 .music-app[data-external="true"] .music-keyhint { pointer-events: none; }
 .music-app[data-external="true"] .music-empty p { max-width: 440px; }
 .music-app .external-header-prev, .music-app .external-header-next { font-size: 18px; }

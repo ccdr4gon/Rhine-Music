@@ -35,7 +35,16 @@ export const nativeMediaPort: MediaPort = {
   },
 };
 
-/** Selection belongs to the user. A missing session never transfers its controls. */
+/** The player that is connected by default: its display name and how to recognise its sources. */
+export interface PreferredPlayer { name: string; match(source: ExternalMediaSource): boolean }
+
+/**
+ * Selection belongs to the user. A missing session never transfers its controls to another
+ * player. With a preferred player, that player is the default link: it is connected when the
+ * user has selected nothing, and connected again when it was the connected player and comes
+ * back as a new session. It never replaces another player the user selected, never returns
+ * after the user disconnected, and never carries the global media-key consent over.
+ */
 export class ExternalMediaConnection {
   sources: ExternalMediaSource[] = [];
   selectedId: string | null = null;
@@ -45,17 +54,32 @@ export class ExternalMediaConnection {
   error = "";
   busy = false;
   private refreshTask?: Promise<void>;
-  constructor(private readonly port: MediaPort) {}
+  /** The user disconnected: nothing is connected by default until they select a source again. */
+  private optedOut = false;
+  /** The connected source, present or lost, is the preferred player. */
+  private preferredSelected = false;
+  constructor(private readonly port: MediaPort, readonly preferred?: PreferredPlayer) {}
 
   get selected(): ExternalMediaSource | undefined {
     return this.disconnected ? undefined : this.sources.find(source => source.id === this.selectedId);
   }
+  /** The default link is in force: the preferred player is, or will be, the connected one. */
+  get followsPreferred(): boolean {
+    return !!this.preferred && !this.optedOut && (this.selectedId === null || this.preferredSelected);
+  }
+  /** ... and it is not there now: it will be connected by itself as soon as it is found. */
+  get awaitsPreferred(): boolean {
+    return this.followsPreferred && (this.selectedId === null || this.disconnected);
+  }
   select(id: string): boolean {
-    if (!this.sources.some(source => source.id === id)) return false;
+    const source = this.sources.find(source => source.id === id);
+    if (!source) return false;
     this.selectedId = id;
     this.disconnected = false;
     this.allowGlobalMediaKeys = false;
     this.error = "";
+    this.optedOut = false;
+    this.preferredSelected = !!this.preferred?.match(source);
     return true;
   }
   disconnect(): void {
@@ -63,6 +87,8 @@ export class ExternalMediaConnection {
     this.disconnected = false;
     this.allowGlobalMediaKeys = false;
     this.error = "";
+    this.optedOut = true;
+    this.preferredSelected = false;
   }
   setGlobalMediaKeys(allowed: boolean): void {
     this.allowGlobalMediaKeys = allowed && this.selected?.kind === "netease";
@@ -81,6 +107,7 @@ export class ExternalMediaConnection {
         this.disconnected = true;
         this.allowGlobalMediaKeys = false;
       }
+      this.connectPreferred();
     } catch (error) {
       this.sources = [];
       this.warning = String(error instanceof Error ? error.message : error);
@@ -89,6 +116,17 @@ export class ExternalMediaConnection {
       // A prior confirmed disappearance remains locked until explicit selection.
       this.allowGlobalMediaKeys = false;
     }
+  }
+  /** The default link. A new connection: the global media-key consent is asked for again. */
+  private connectPreferred(): void {
+    if (!this.awaitsPreferred) return;
+    const source = this.sources.find(source => this.preferred!.match(source));
+    if (!source) return;
+    this.selectedId = source.id;
+    this.disconnected = false;
+    this.allowGlobalMediaKeys = false;
+    this.error = "";
+    this.preferredSelected = true;
   }
   can(action: MediaAction): boolean {
     const source = this.selected;
@@ -150,14 +188,17 @@ export function mediaTime(value?: number): string {
 export function mediaConnectionLabel(connection: ExternalMediaConnection): string {
   const source = connection.selected;
   if (source) return `${source.name} · ${mediaPlaybackLabel(source)}`;
-  if (connection.disconnected) return "来源已断开，请重新选择播放器";
-  return connection.selectedId ? "暂时无法读取播放器，正在重试" : "选择播放器后显示当前曲目";
+  const preferred = connection.awaitsPreferred ? connection.preferred!.name : "";
+  if (connection.disconnected) return preferred ? `${preferred}已断开，再次出现时会自动重新连接` : "来源已断开，请重新选择播放器";
+  if (connection.selectedId) return "暂时无法读取播放器，正在重试";
+  return preferred ? `未发现${preferred}；它出现后会自动连接，也可以选择其他播放器` : "选择播放器后显示当前曲目";
 }
 
 export function mediaSourcesMarkup(connection: ExternalMediaConnection): string {
   return connection.sources.length ? connection.sources.map(source => {
     const selected = connection.selected?.id === source.id;
-    return `<button class="external-source" data-media-source="${esc(source.id)}" aria-pressed="${selected}"><span><strong>${esc(source.name)}</strong><small>${esc(source.title || "曲名未提供")}${source.artist ? ` · ${esc(source.artist)}` : ""}</small></span><em>${selected ? "已连接" : "连接"}</em></button>`;
+    const preferred = connection.preferred?.match(source) ? " · 默认" : "";
+    return `<button class="external-source" data-media-source="${esc(source.id)}" aria-pressed="${selected}"><span><strong>${esc(source.name)}</strong><small>${esc(source.title || "曲名未提供")}${source.artist ? ` · ${esc(source.artist)}` : ""}</small></span><em>${selected ? "已连接" : "连接"}${preferred}</em></button>`;
   }).join("") : connection.selectedId && !connection.disconnected
     ? '<p class="external-unavailable">播放器资料暂时不可用，正在重试。恢复前已暂停控制。</p>'
     : '<p class="external-unavailable">没有发现播放器。请在外部播放器中开始播放，再刷新来源。</p>';

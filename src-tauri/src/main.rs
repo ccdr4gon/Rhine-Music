@@ -41,13 +41,28 @@ async fn media_control(
     .map_err(|error| error.to_string())?
 }
 
-/// Read only after the user switches on the queue in player-skin mode.
+/// Read only after the user switches on the queue in player-skin mode. `source` asks for the
+/// playlist the queue came from as well: set only while playlist columns are switched on.
 #[tauri::command]
 async fn netease_queue(
     stamp: Option<String>,
+    source: Option<bool>,
 ) -> Result<rhine_music::media::netease_queue::QueueReply, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        rhine_music::media::netease_queue::read(stamp.as_deref())
+        rhine_music::media::netease_queue::read(stamp.as_deref(), source.unwrap_or(false))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The playlists the user created in NetEase, from its local database. Asked for only while
+/// playlist columns are switched on in player-skin mode (which needs the queue shown).
+#[tauri::command]
+async fn netease_playlists(
+    stamp: Option<String>,
+) -> Result<rhine_music::media::netease_playlists::PlaylistsReply, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::media::netease_playlists::read(stamp.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -198,6 +213,7 @@ fn main() {
             media_snapshot,
             media_control,
             netease_queue,
+            netease_playlists,
             netease_debug_state,
             netease_debug_play,
             netease_debug_seek,
@@ -267,6 +283,10 @@ fn main() {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(entry.parse()?))
                 .data_directory(webview_data)
                 .title("Rhine Music")
+                // The page draws its own title bar (src/window-frame.ts): no native one. The
+                // window keeps its resize borders, its shadow and Windows 11's rounded corners.
+                .decorations(false)
+                .shadow(true)
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(640.0, 480.0)
                 .center()

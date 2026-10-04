@@ -1,6 +1,44 @@
 import * as THREE from "three";
 import { damp, smooth, type Spring } from "./motion.ts";
 
+/**
+ * The lens of each music view. An aperture is the bokeh pass's: the blur radius is
+ * 0.4 x aperture x the picture's WIDTH in pixels for every unit of defocus beyond the
+ * in-focus range, up to the pass's limit.
+ * - The archive lens is what the opening film and the original archive use: 0.0003 on
+ *   the shelf to 0.0008 on an opened case, defocus measured along the lens.
+ * - The settled music shelf measures the defocus on the shelf itself, from the selected
+ *   case: a row is a row's spacing (0.62) away, a neighbouring lane counts `lane` of its
+ *   distance. Along the lens the rows are almost equally far (the camera looks along them
+ *   at a shallow angle), so no aperture would set the selection apart.
+ * - The song scene measures along the lens again: the chain of covers stands behind the
+ *   large card.
+ * `range` is what stays sharp either side of the focus: the selected case's own thickness
+ * on the shelf, the large card's turn to the lens (plus the depth's rounding) in the song
+ * scene, nothing on the opened album, as before.
+ */
+export const MUSIC_LENS = {
+  archive: { shelf: 0.0003, detail: 0.0008 },
+  shelf: { aperture: 0.0018, range: 0.25, lane: 0.2 },
+  song: { aperture: 0.0014, range: 0.8 },
+} as const;
+// Exact at both ends, as the lens it replaces was.
+const mix = (from: number, to: number, share: number) => (1 - share) * from + share * to;
+/**
+ * The lens for a frame. `shelf` is how much of the picture is the settled music shelf (0
+ * during the opening film and once a case is opened), `detail` how far a case is opened,
+ * `song` how much of the view is the song scene. `lean` is the share of the defocus that
+ * is measured on the shelf instead of along the lens.
+ */
+export function musicLens(shelf: number, detail: number, song: number) {
+  const archive = mix(MUSIC_LENS.archive.shelf, MUSIC_LENS.archive.detail, detail);
+  return {
+    aperture: mix(mix(archive, MUSIC_LENS.shelf.aperture, shelf), MUSIC_LENS.song.aperture, song),
+    range: mix(MUSIC_LENS.shelf.range * shelf, MUSIC_LENS.song.range, song),
+    lean: shelf * (1 - song),
+  };
+}
+
 /** Keep the selected corner continuous where the film changes to extraction. */
 export function musicExtractionAnchor(shot: number) {
   const extraction = smooth((shot - 27.3) / 1.25);

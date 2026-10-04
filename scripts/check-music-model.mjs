@@ -4,9 +4,11 @@ import fs from "node:fs/promises";
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MUSIC_MODEL, MUSIC_COVER, MUSIC_LABEL, configureMusicGlass, createAlbumPrintMaterial, isMusicShellSurface, musicCaseLevel } from "../src/music-model.ts";
-import { CASE_DETAIL, createCaseDetailMaterial, mergeCaseDetail } from "../src/music-case-detail.ts";
+import { CASE_DETAIL, caseDetailShader, caseDetailUniforms, createCaseDetailMaterial, mergeCaseDetail } from "../src/music-case-detail.ts";
 import { MUSIC_CASE_ASSET } from "../src/music-case-asset.ts";
 import { CardAppearance } from "../src/appearance.ts";
+import { COVER_TINT_CHROMA_MAX, COVER_TINT_THEME, coverTintForTheme } from "../src/cover-tint.ts";
+import { ThemeTransition } from "../src/theme-transition.ts";
 
 // Compare actual triangles rather than bounding boxes: intersecting closed
 // volumes are not necessarily coplanar, while a tiny shared end face can flicker.
@@ -186,12 +188,93 @@ printedCover.userData.albumCover = true;
 appearanceModel.add(printedCover);
 const printBefore = JSON.stringify(print.toJSON());
 // The detail shader: per-surface finish and the coverage dissolve, compiled from the prepared clone.
-const shader = { uniforms: {}, vertexShader: "#include <common>\n#include <begin_vertex>",
-  fragmentShader: "#include <common>\n#include <color_fragment>\n#include <roughnessmap_fragment>\n#include <metalnessmap_fragment>" };
+const stubShader = () => ({ uniforms: {}, vertexShader: "#include <common>\n#include <begin_vertex>",
+  fragmentShader: "#include <common>\n#include <color_fragment>\n#include <roughnessmap_fragment>\n#include <metalnessmap_fragment>" });
+const shader = stubShader();
 detailMesh.material.onBeforeCompile(shader, {});
 assert.match(shader.fragmentShader, /caseColors\[caseIndex\]/);
 assert.match(shader.fragmentShader, /archiveQuality <= coverage/, "lifted detail dissolves in with the lift");
 assert.ok(shader.uniforms.archiveQuality, "the dissolve follows the case's appearance");
+
+// The index square takes the cover's colour: the lifted case reads it from a uniform of its
+// own, the shelf batch from an instanced attribute. Both start from the table colour, and
+// only a tint with weight, on the index inlay, replaces it: without cover art the amber stays.
+const inlay = mergeCaseDetail(sources.filter(mesh => mesh.material.name.replace(/\.\d+$/, "") === "Index_Inlay"))
+  .lifted.getAttribute("caseSurface").getX(0);
+const liftedTint = detailMesh.userData.caseTint;
+assert.equal(shader.uniforms.caseTint, liftedTint, "the lifted case's shader reads the uniform setTint writes");
+assert.deepEqual(liftedTint.value.toArray(), [0, 0, 0, 0], "no cover colour until one is set: weight 0, the amber (weight 1 would be a black square)");
+assert.match(shader.fragmentShader, /uniform vec4 caseTint;/);
+assert.doesNotMatch(shader.fragmentShader, /vCaseTint/);
+assert.doesNotMatch(shader.vertexShader, /caseTint/i, "a single case needs neither the attribute nor its varying");
+const shelfShader = stubShader();
+caseDetailShader(shelfShader, false);
+assert.match(shelfShader.vertexShader, /attribute vec4 caseTint;/, "every shelf instance carries its own cover colour");
+assert.match(shelfShader.vertexShader, /varying vec4 vCaseTint;/);
+assert.match(shelfShader.vertexShader, /vCaseTint = caseTint;/);
+assert.match(shelfShader.fragmentShader, /varying vec4 vCaseTint;/);
+assert.equal(shelfShader.uniforms.caseTint, undefined, "the shelf batch has no single colour");
+assert.doesNotMatch(shelfShader.fragmentShader, /uniform vec4 caseTint;/);
+assert.doesNotMatch(shelfShader.fragmentShader, /archiveQuality/, "and no dissolve: its material declares no archiveQuality");
+const tintedColour = new RegExp([
+  String.raw`vec3 caseColor = caseColors\[caseIndex\];`,
+  String.raw`vec4 caseInk = (caseTint|vCaseTint);`,
+  String.raw`if \(caseIndex == (\d+) && caseInk\.a > 0\.0\)`,
+  String.raw`caseColor = mix\(caseColor, caseTintThemed\(caseInk\.rgb, caseTintTheme\), caseInk\.a\);`,
+  String.raw`diffuseColor\.rgb \*= caseColor;`,
+].join(String.raw`\s*`));
+for (const [name, compiled, ink] of [["lifted", shader, "caseTint"], ["shelf", shelfShader, "vCaseTint"]]) {
+  assert.equal(compiled.uniforms.caseTintTheme, caseDetailUniforms.caseTintTheme, `${name}: every case follows the same theme numbers`);
+  assert.match(compiled.fragmentShader, /uniform vec3 caseTintTheme;/);
+  assert.ok(compiled.fragmentShader.includes("vec3 caseColor = caseColors[caseIndex];"), `${name}: every surface starts from the table colour`);
+  const colour = compiled.fragmentShader.match(tintedColour);
+  assert.ok(colour, `${name}: only a tint with weight stands between the table colour and the surface`);
+  assert.equal(colour[1], ink, `${name}: the tint comes from ${ink}`);
+  assert.equal(Number(colour[2]), inlay, `${name}: and only the index inlay takes it`);
+  assert.equal(compiled.fragmentShader.split("caseTintThemed(").length - 1, 2, `${name}: the theme mapping is defined once and used once`);
+}
+
+// caseTintThemed evaluated here from the shader's own text, in 32-bit floats as the GPU runs it:
+// every statement is matched and its matrices and limits are read out of it, nothing is retyped.
+const glslNumber = String.raw`-?\d+(?:\.\d*)?(?:e-?\d+)?`;
+const glslMat3 = String.raw`mat3\(((?:${glslNumber}, ){8}${glslNumber})\)`;
+const themedGLSL = new RegExp([
+  String.raw`vec3 caseTintThemed\(vec3 ink, vec3 theme\) \{`,
+  String.raw`vec3 lms = pow\(max\(${glslMat3} \* ink, 0\.0\), vec3\(1\.0 \/ 3\.0\)\);`,
+  String.raw`vec3 lab = ${glslMat3} \* lms;`,
+  String.raw`lab\.x = theme\.x \+ theme\.y \* lab\.x;`,
+  String.raw`lab\.yz \*= min\(theme\.z, max\(1\.0, (${glslNumber}) \/ max\(length\(lab\.yz\), (${glslNumber})\)\)\);`,
+  String.raw`lms = ${glslMat3} \* lab;`,
+  String.raw`return clamp\(${glslMat3} \* \(lms \* lms \* lms\), 0\.0, 1\.0\);`,
+  String.raw`\}`,
+].join(String.raw`\s*`));
+function themedFromGLSL(fragment) {
+  const parsed = fragment.match(themedGLSL);
+  assert.ok(parsed, "caseTintThemed keeps the statements this check evaluates (change the two together)");
+  const f = Math.fround;
+  // mat3 lists its columns: entry 3 * column + row.
+  const matrix = (text) => {
+    const m = text.split(", ").map(Number);
+    return (v) => [0, 1, 2].map(row => f(m[row] * v[0] + m[3 + row] * v[1] + m[6 + row] * v[2]));
+  };
+  const [toLms, toLab, fromLab, toRgb] = [parsed[1], parsed[2], parsed[5], parsed[6]].map(matrix);
+  const chromaMax = Number(parsed[3]), shortest = Number(parsed[4]);
+  const oklab = (rgb) => toLab(toLms(rgb.map(f)).map(v => f(Math.cbrt(Math.max(v, 0)))));
+  const unclamped = (ink, theme) => {
+    const lab = oklab(ink), [offset, slope, chroma] = theme.map(f);
+    lab[0] = f(offset + slope * lab[0]);
+    const scale = f(Math.min(chroma, Math.max(1, chromaMax / Math.max(Math.hypot(lab[1], lab[2]), shortest))));
+    lab[1] = f(lab[1] * scale);
+    lab[2] = f(lab[2] * scale);
+    return toRgb(fromLab(lab).map(v => f(v * v * v)));
+  };
+  const shown = (ink, theme) => unclamped(ink, theme).map(v => Math.min(1, Math.max(0, v)));
+  return { source: parsed[0], chromaMax, oklab, unclamped, shown };
+}
+const themed = themedFromGLSL(shader.fragmentShader);
+assert.equal(themedFromGLSL(shelfShader.fragmentShader).source, themed.source, "shelf and lifted cases map a tint alike");
+assert.ok(Math.abs(themed.chromaMax - COVER_TINT_CHROMA_MAX) < 1e-4, "the shader stops scaling chroma at the tint module's limit");
+
 // Exercise the actual main-scene/viewer appearance path. Its final clarity
 // update must retain frosting after selection quality and theme changes.
 for (const theme of ["day", "night", "dusk"]) {
@@ -207,4 +290,65 @@ for (const theme of ["day", "night", "dusk"]) {
     assert.equal(JSON.stringify(print.toJSON()), printBefore, "Frosting, selection quality and themes do not mutate the artwork material");
   }
 }
-console.log(`Music case passed: ${bytes.length} byte GLB authored at ${MUSIC_MODEL.width} × ${MUSIC_MODEL.height} × ${MUSIC_MODEL.depth}, shelf instance ${shelfTriangles} / lifted ${liftedTriangles} triangles, no coplanar overlaps at either level, print window clear and in front, merged detail (one lifted mesh, one shelf batch), label on its plate, V0.1.1b frosted glass and independent artwork across appearance states.`);
+
+// Themes: the amber of a case without cover art keeps its hand-picked colours, and a cover's
+// colour follows through three numbers. What the shader then shows is coverTintForTheme.
+const themeNumbers = () => caseDetailUniforms.caseTintTheme.value.toArray();
+const amber = { day: "dcb47f", night: "d2a066", dusk: "b99a76" };
+const inks = ["#dcb47f", "#43668d", "#d98a9c", "#5f8fd0", "#b06a2c", "#9a4f7a", "#2e9e5b", "#8e55b2", "#3b5cb8", "#bd4a45", "#c0392b", "#e6d450", "#797979", "#c8c8c8"]
+  .map(hex => [hex, new THREE.Color(hex).toArray()]);
+for (const theme of ["night", "dusk", "day"]) {
+  appearance.setTheme(theme);
+  assert.deepEqual(themeNumbers(), [...COVER_TINT_THEME[theme]], `${theme}: the shader's theme numbers are the tint module's`);
+  assert.equal(caseDetailUniforms.caseColors.value[inlay].getHexString(), amber[theme], `${theme}: a case without cover art keeps its hand-picked amber`);
+  for (const [hex, ink] of inks) {
+    // Day leaves a tint as it is. Night and dusk: these stay displayable, so the shader's
+    // clamp and coverTintForTheme's chroma reduction both rest and the two must agree.
+    const expected = theme === "day" ? ink : coverTintForTheme(ink, theme);
+    if (theme !== "day") assert.ok(themed.unclamped(ink, themeNumbers()).every(value => value >= 0 && value <= 1), `${hex} can be shown under ${theme} as mapped`);
+    themed.shown(ink, themeNumbers()).forEach((value, channel) => assert.ok(Math.abs(value - expected[channel]) < 1e-5,
+      `${hex} under ${theme}: the shader shows ${value} in channel ${channel}, expected ${expected[channel]}`));
+  }
+}
+// Past what the screen can show (a vivid tint, warmed at night) the shader clamps channels where
+// coverTintForTheme reduces chroma: the two stay closer than a noticeable difference in OKLab.
+appearance.setTheme("night");
+for (const hex of ["#ae6700", "#11a7b5"]) {
+  const ink = new THREE.Color(hex).toArray();
+  assert.ok(themed.unclamped(ink, themeNumbers()).some(value => value < 0 || value > 1), `${hex} leaves the displayable range at night`);
+  const shown = themed.oklab(themed.shown(ink, themeNumbers())), reduced = themed.oklab(coverTintForTheme(ink, "night"));
+  assert.ok(Math.hypot(shown[0] - reduced[0], shown[1] - reduced[1], shown[2] - reduced[2]) < 0.02, `${hex} at night: the clamped colour stays close to the reduced one`);
+}
+// A theme change blends the three numbers on the scene's transition clock, like the table colours.
+appearance.setTheme("day");
+const transition = new ThemeTransition(1000); // seconds: the times passed below decide the progress
+appearance.setTheme("night", transition);
+assert.deepEqual(themeNumbers(), [...COVER_TINT_THEME.day], "nothing moves before the clock does");
+transition.update(performance.now() / 1000 + 500);
+themeNumbers().forEach((value, i) => {
+  const [from, to] = [COVER_TINT_THEME.day[i], COVER_TINT_THEME.night[i]];
+  assert.ok(Math.min(from, to) < value && value < Math.max(from, to), "halfway to night each number lies between the two themes");
+});
+assert.equal(transition.update(performance.now() / 1000 + 2000), true);
+assert.deepEqual(themeNumbers(), [...COVER_TINT_THEME.night], "and arrives on night's numbers");
+
+// Each case owns its colour: a returning copy (clone and prepare, as the scene makes it) gets a
+// uniform of its own, so the lifted case takes the next album's colour without recolouring it.
+appearance.setTint(appearanceModel, new THREE.Vector4(0.2, 0.4, 0.6, 1));
+assert.deepEqual(shader.uniforms.caseTint.value.toArray(), [0.2, 0.4, 0.6, 1], "setTint reaches the compiled uniform");
+const returning = appearanceModel.clone(true);
+appearance.prepare(returning);
+const returningDetail = returning.children.find(child => child.userData.caseDetail);
+const returningTint = returningDetail.userData.caseTint;
+assert.ok(returningTint.value.isVector4 && returningTint !== liftedTint && returningTint.value !== liftedTint.value, "a copy has a colour uniform of its own");
+assert.deepEqual(returningTint.value.toArray(), [0, 0, 0, 0], "and starts on the amber until it is given its print's colour");
+const returningShader = stubShader();
+returningDetail.material.onBeforeCompile(returningShader, {});
+assert.equal(returningShader.uniforms.caseTint, returningTint, "which is the one its shader reads");
+appearance.setTint(returning, new THREE.Vector4(0.7, 0.1, 0.3, 1));
+assert.deepEqual(returningShader.uniforms.caseTint.value.toArray(), [0.7, 0.1, 0.3, 1]);
+assert.deepEqual(shader.uniforms.caseTint.value.toArray(), [0.2, 0.4, 0.6, 1], "colouring the copy leaves the lifted case alone");
+appearance.setTint(appearanceModel, new THREE.Vector4(0, 0, 0, 0));
+assert.deepEqual(shader.uniforms.caseTint.value.toArray(), [0, 0, 0, 0], "the lifted case is back on the amber");
+assert.deepEqual(returningShader.uniforms.caseTint.value.toArray(), [0.7, 0.1, 0.3, 1], "while the copy keeps the colour it left with");
+console.log(`Music case passed: ${bytes.length} byte GLB authored at ${MUSIC_MODEL.width} × ${MUSIC_MODEL.height} × ${MUSIC_MODEL.depth}, shelf instance ${shelfTriangles} / lifted ${liftedTriangles} triangles, no coplanar overlaps at either level, print window clear and in front, merged detail (one lifted mesh, one shelf batch), label on its plate, V0.1.1b frosted glass and independent artwork across appearance states, cover-coloured index square (a uniform per lifted case, an attribute on the shelf, amber without cover art, theme mapping equal to coverTintForTheme).`);

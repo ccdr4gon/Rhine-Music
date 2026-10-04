@@ -15,7 +15,9 @@ import { SharedDepthBokehPass } from "./depth-of-field";
 import { archiveColumns, columnFiles, fileAtSlot, fileLocation, musicLibrary, records, slotStride } from "./data";
 import { CoverAtlas } from "./cover-atlas";
 import { MusicSelectionLighting } from "./music-lighting";
-import { MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor } from "./music-camera";
+import { LANE_LABEL, laneLabelPlace, laneLabelRange, laneLabelSpan, type LaneName } from "./lane-labels";
+import { LanePlateOverlayPass, LanePlates } from "./lane-plates";
+import { MUSIC_LENS, MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicLens, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor } from "./music-camera";
 import { MUSIC_CASE_ASSET } from "./music-case-asset";
 import { MUSIC_LABEL, MUSIC_MODEL, configureMusicGlass, isMusicShellSurface, musicAssemblyPart } from "./music-model";
 import { CASE_DETAIL, CASE_HARDWARE, caseDetailShader, createCaseDetailMaterial, mergeCaseDetail } from "./music-case-detail";
@@ -27,6 +29,7 @@ import {
   fileAtCell,
   placeCell,
   poolCell,
+  wrap,
   LOOP_COLUMNS,
   LOOP_ROWS,
   MUSIC_LOOP_ROWS,
@@ -36,7 +39,8 @@ import {
   type ArchiveNavigation,
 } from "./archive-loop";
 import { labelMarkSvg } from "./brand";
-import { archiveFraming, swipeDirection } from "./viewport-layout";
+import { archiveFraming, isPortraitViewport, songFraming, swipeDirection } from "./viewport-layout";
+import { SONG_CARD_TOP, SONG_CHAIN_CARDS, SONG_CHAIN_CENTRE, SONG_CHAIN_FIRST, SONG_SHELF_DROP, SONG_VIEW, songChainCards, songChainFirst, songChainIndex, songChainPose, songSlotRise, songChainWeight, songLaneOffset, songLaneWeight, songLiftHold, songShelfDrop } from "./song-pose";
 import { assetUrl as publicAsset } from "./asset-url";
 import { ThemeTransition } from "./theme-transition";
 import {
@@ -51,6 +55,8 @@ import {
   idleWave,
   cinematicField,
   INSPECTION_LIFT,
+  PLAY_GESTURE,
+  playHop,
   returnStep,
 } from "./motion";
 
@@ -145,15 +151,33 @@ export class ArchiveScene {
   // A detail-to-detail selection owns its lift independently of placement.
   // Keep that ownership through an interrupted return to avoid a height jump.
   private musicNavigationLift = false;
+  // The song scene (song-pose.ts): 0 on the shelf and in the album detail, 1 once the
+  // lifted case is the large card and its row has formed the chain of covers.
+  private song = new MusicPlacementMotion();
+  private songTarget = 0;
+  private songProgress = 0;
+  private songDrop = SONG_SHELF_DROP;
+  private songCards = SONG_CHAIN_CARDS;
+  private songFirst = SONG_CHAIN_FIRST;
+  private songBasis?: { origin: THREE.Vector3; right: THREE.Vector3; up: THREE.Vector3; forward: THREE.Vector3; quaternion: THREE.Quaternion };
+  private readonly songCard = { position: new THREE.Vector3(), quaternion: new THREE.Quaternion(), local: new THREE.Quaternion(), euler: new THREE.Euler() };
+  // The lifted case's own turn, before the song scene poses it.
+  private modelYaw = 0;
   private outgoing: {
     group: THREE.Group;
     slot: number;
     cell: ArchiveCell;
     lift: { value: number; velocity: number };
     returnY: number | null;
+    // The copy's own turn; its group may also carry the song scene's pose.
+    yaw: number;
     clarity: number;
   }[] = [];
-  private pulses: { row: number; lane: number; time: number }[] = [];
+  // Waves spreading over the shelf from a cell; `play` marks the play gesture's (playGesture).
+  private pulses: { row: number; lane: number; time: number; play?: boolean }[] = [];
+  // When the last play gesture's hop started, and how far it lifts the large card on screen.
+  private playStarted = -Infinity;
+  private songHopPixels = 0;
   private pendingPulse: ArchiveCell | null = null;
   private selectedSlot = 76;
   private detail = 0;
@@ -170,6 +194,11 @@ export class ArchiveScene {
   private stars?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
   private covers?: CoverAtlas;
   private selectionLighting?: MusicSelectionLighting;
+  // Names beside the shelf's columns (one per library column), written in the scene.
+  private laneNames: readonly LaneName[] | null = null;
+  private lanePlates?: LanePlates;
+  private lanePlateOverlay!: LanePlateOverlayPass;
+  private readonly laneEdge = { start: new THREE.Vector3(), end: new THREE.Vector3() };
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
   private themeTransition?: ThemeTransition;
@@ -190,7 +219,7 @@ export class ArchiveScene {
   private restoringBuffers = false;
   private readonly aoProjection = { projection: new THREE.Matrix4(), inverse: new THREE.Matrix4() };
   private layoutKind = "";
-  onSelect?: (index: number, cell?: ArchiveCell) => void;
+  onSelect?: (index: number, cell?: ArchiveCell, lifted?: boolean) => void;
   onHover?: (index: number | null) => void;
   onNavigate?: (axis: "row" | "lane", direction: number) => void;
   constructor(
@@ -283,6 +312,23 @@ export class ArchiveScene {
       maxblur: 0.011,
     }, () => this.ao);
     this.composer.addPass(this.bokeh);
+    // The columns' names are text only: a rectangle that is transparent but for its glyphs.
+    // The lens would blur them, and the lens's depth and ambient occlusion draw every mesh
+    // as a solid, so while either pass is on the names are drawn after them, against the
+    // scene's depth: the packed depth the lens read (exact only while the shelf focus is on,
+    // which is whenever names are shown), or else the depth ambient occlusion rendered.
+    // With both off the names are transparent meshes of the scene.
+    this.lanePlateOverlay = new LanePlateOverlayPass(() => this.lanePlates, this.camera, () => {
+      const uniforms = this.bokeh.uniforms as Record<string, THREE.IUniform>;
+      if (this.bokeh.enabled && this.bokeh.exactDepth && uniforms.tDepth.value)
+        return { texture: uniforms.tDepth.value, packed: true, width: this.bokeh.depthWidth, height: this.bokeh.depthHeight,
+          near: uniforms.nearClip.value, far: uniforms.farClip.value };
+      const target = this.ao.enabled ? this.ao.normalRenderTarget : undefined;
+      return target?.depthTexture
+        ? { texture: target.depthTexture, packed: false, width: target.width, height: target.height, near: this.camera.near, far: this.camera.far }
+        : undefined;
+    });
+    this.composer.addPass(this.lanePlateOverlay);
     this.smaa.enabled = false;
     this.composer.addPass(this.smaa);
     this.composer.addPass(new OutputPass());
@@ -513,6 +559,8 @@ export class ArchiveScene {
     }
     if (musicLibrary) this.addCaseDetail(meshes, count);
     this.covers = new CoverAtlas(count, this.renderer.capabilities.maxTextureSize, this.renderer.capabilities.getMaxAnisotropy(), this.selectionLighting);
+    // The shelf's index squares take their covers' colours, packed in draw order with the prints.
+    this.instances.find((inst) => inst.userData.surface === CASE_HARDWARE)?.geometry.setAttribute("caseTint", this.covers.caseTint);
     this.scene.add(this.covers.array);
     // Every instanced part and its print share the per-slot transform: one
     // matrix buffer, written and uploaded once per frame instead of per mesh.
@@ -593,7 +641,7 @@ export class ArchiveScene {
       caseDetailShader(shader, false);
       this.selectionLighting?.shade(shader, CASE_HARDWARE);
     };
-    material.customProgramCacheKey = () => "music-case-hardware";
+    material.customProgramCacheKey = () => "music-case-hardware-tinted";
     const inst = new THREE.InstancedMesh(shelf, material, count);
     inst.layers.set(FLUSH_DETAIL_LAYER);
     inst.userData.surface = CASE_HARDWARE;
@@ -668,6 +716,8 @@ export class ArchiveScene {
     this.musicPresentation.request("hidden");
     this.musicCamera = new MusicCameraMotion();
     this.musicPlacement = new MusicPlacementMotion();
+    this.song = new MusicPlacementMotion();
+    this.songTarget = this.songProgress = 0;
     this.musicNavigationLift = false;
     this.targetDetail = this.detail = 0;
     for (const old of this.outgoing) { this.scene.remove(old.group); this.appearance.dispose(old.group); }
@@ -693,6 +743,15 @@ export class ArchiveScene {
     this.laneFocus = { value: location.lane, velocity: 0 };
     this.columnCamera = { value: (location.lane - 2) * COLUMN_SPACING, velocity: 0 };
     await this.covers.select(records[index]);
+  }
+
+  /**
+   * Name the shelf's columns: `names[column]` for every library column, written in the
+   * scene. `null` removes the names.
+   */
+  setLaneLabels(names: readonly LaneName[] | null) {
+    this.pacing.invalidate();
+    this.laneNames = names?.length ? names : null;
   }
 
   enableSelectionLighting() {
@@ -739,6 +798,7 @@ export class ArchiveScene {
     if (this.stars) targets.number(this.stars.material, "opacity", theme === "night" ? .6 : 0);
     this.appearance.setTheme(theme, targets);
     this.selectionLighting?.setTheme(theme, this.light, targets);
+    this.lanePlates?.setTheme(theme, targets);
     this.themeTransition = animate && !this.reduced && musicLibrary ? targets : undefined;
     if (!this.themeTransition) targets.finish();
     this.syncThemeStars();
@@ -884,8 +944,12 @@ export class ArchiveScene {
     if (musicLibrary && mode === "hidden") {
       this.musicCamera = new MusicCameraMotion();
       this.musicPlacement = new MusicPlacementMotion();
+      this.song = new MusicPlacementMotion();
+      this.songProgress = 0;
       this.musicNavigationLift = false;
     }
+    // The song scene exists only around an opened album.
+    if (mode !== "detail") this.songTarget = 0;
     if (mode === "detail") this.decryption.enter(this.scanBlend > .9 && this.decryption.clarity > .999);
     else this.decryption.leave();
     if (mode === "hidden") this.decryption.select();
@@ -912,9 +976,25 @@ export class ArchiveScene {
       if (this.rotation !== 0) this.returnY = this.model.position.y;
     } else this.returnY = null;
   }
+  /** Turn the opened album into the song scene, or back into the album detail. */
+  setSongStage(active: boolean) {
+    const target = musicLibrary && active && this.musicPresentation.holdsDetail ? 1 : 0;
+    if (target === this.songTarget) return;
+    this.pacing.invalidate();
+    this.songTarget = target;
+    // Readiness waits for the new framing without replaying the placement.
+    if (this.musicPresentation.placed) this.musicPresentation.selectionChanged();
+    this.dragging = this.canInspect = false;
+    this.targetRotation = 0;
+  }
   setReduced(value: boolean) {
     this.pacing.invalidate();
     this.reduced = value;
+    if (value) {
+      // A play gesture in progress stops with the rest of the motion.
+      this.playStarted = -Infinity;
+      this.pulses = this.pulses.filter((pulse) => !pulse.play);
+    }
     if (value && this.themeTransition) {
       this.themeTransition.finish();
       this.themeTransition = undefined;
@@ -950,6 +1030,8 @@ export class ArchiveScene {
     this.musicPresentation = new MusicPresentation();
     this.musicCamera = new MusicCameraMotion();
     this.musicPlacement = new MusicPlacementMotion();
+    this.song = new MusicPlacementMotion();
+    this.songProgress = 0;
     this.musicNavigationLift = false;
     this.clock = this.last = this.lastInteraction = nowSeconds;
     this.setMode("archive");
@@ -1074,6 +1156,23 @@ export class ArchiveScene {
       this.pendingPulse.row -= shift.row;
     }
   }
+  /**
+   * The play / stop gesture (PLAY_GESTURE): the selected case hops and the selection wave
+   * spreads from its place, over the shelf (also under an opened case) and along the song
+   * scene's chain. Reduced motion has neither.
+   */
+  playGesture() {
+    if (!musicLibrary || !this.loaded || this.reduced || !records.length) return;
+    const now = performance.now() / 1000;
+    this.pacing.invalidate();
+    this.playStarted = now;
+    this.pulses.push({ ...this.selectedCell, time: now + PLAY_GESTURE.wave, play: true });
+    this.pulses = this.pulses.slice(-6);
+  }
+  /** CSS pixels the play gesture lifts the song scene's large card this frame. */
+  get songCardHop() {
+    return this.songHopPixels;
+  }
   /** Retarget the detail rail without replaying the archive/inspection move. */
   switchMusicAlbum(index: number, navigation?: ArchiveNavigation) {
     if (!musicLibrary || !this.loaded || !records[index] || !this.musicPresentation.placed) return;
@@ -1097,14 +1196,20 @@ export class ArchiveScene {
       : { lane: canonical.lane, row: canonical.row };
     const changed = !sameCell(cell, this.selectedCell);
     if (musicLibrary && changed) this.musicPresentation.selectionChanged();
-    if (musicLibrary && this.looping && changed && this.loaded && this.lift.value < MUSIC_RETURN_MIN_LIFT) {
+    // A play gesture's hop still running belongs to the case it started on: the case that
+    // leaves keeps its height and lowers from there, the new selection does not hop.
+    const hop = musicLibrary && changed ? playHop(performance.now() / 1000 - this.playStarted) : 0;
+    if (musicLibrary && changed) this.playStarted = -Infinity;
+    if (musicLibrary && this.looping && changed && this.loaded && this.lift.value + hop < MUSIC_RETURN_MIN_LIFT) {
       this.lift.value = 0;
       this.lift.velocity = 0;
-    } else if (this.looping && changed && this.loaded && this.lift.value > 0.0001) {
+    } else if (this.looping && changed && this.loaded && this.lift.value + hop > 0.0001) {
       const group = this.model.clone(true);
       this.appearance.prepare(group);
       const cover = group.children.find((child) => child.userData.albumCover) as THREE.Mesh | undefined;
-      if (cover) this.covers?.snapshot(cover);
+      // The copy keeps the print and the index-square colour of the album it leaves with.
+      const tint = (group.children.find((child) => child.userData.caseTint)?.userData.caseTint as THREE.IUniform<THREE.Vector4> | undefined)?.value;
+      if (cover) this.covers?.snapshot(cover, tint);
       const label = group.children.find((child) => child.userData.printedLabel) as THREE.Mesh | undefined;
       if (label && musicLibrary && this.labelMesh) {
         // The returning copy keeps the label texture already on the GPU, and the lifted
@@ -1138,8 +1243,9 @@ export class ArchiveScene {
         group,
         slot: this.selectedSlot,
         cell: { ...this.selectedCell },
-        lift: { ...this.lift },
-        returnY: group.rotation.y !== 0 ? group.position.y : null,
+        lift: { value: this.lift.value + hop, velocity: this.lift.velocity },
+        returnY: this.modelYaw !== 0 ? group.position.y : null,
+        yaw: this.modelYaw,
         clarity: this.decryption.clarity,
       });
       while (musicLibrary && this.outgoing.length > MUSIC_RETURN_COPIES) {
@@ -1162,7 +1268,7 @@ export class ArchiveScene {
     if (returning >= 0) {
       const o = this.outgoing[returning];
       this.lift = { ...o.lift };
-      this.rotation = o.group.rotation.y;
+      this.rotation = o.yaw;
       this.returnY = o.returnY;
       this.decryption.select(o.clarity);
       this.scene.remove(o.group);
@@ -1179,6 +1285,29 @@ export class ArchiveScene {
     this.targetRotation = 0;
     this.drawLabel(index);
     if (musicLibrary) void this.covers?.select(records[index]);
+  }
+  /**
+   * The case under the cursor: a shelf case, the lifted one, or a copy on its way back to
+   * its place. A copy is its own case; until it is retired its shelf instance is hidden,
+   * and a ray that passed through it would pick whatever stands behind.
+   */
+  private pickCase(): { file: number; cell: ArchiveCell; lifted: boolean } | null {
+    this.raycaster.setFromCamera(this.cursor, this.camera);
+    this.instances[0].boundingSphere = null;
+    const hit = this.raycaster.intersectObjects(
+      [this.instances[0], this.model, ...this.outgoing.map((o) => o.group)],
+      true,
+    )[0];
+    if (!hit) return null;
+    if (hit.instanceId !== undefined) {
+      const cell = this.cells[this.slotOfInstance(hit.instanceId)];
+      return { file: fileAtCell(cell), cell: { ...cell }, lifted: false };
+    }
+    for (let object: THREE.Object3D | null = hit.object; object; object = object.parent) {
+      const copy = this.outgoing.find((o) => o.group === object);
+      if (copy) return { file: fileAtCell(copy.cell), cell: { ...copy.cell }, lifted: false };
+    }
+    return { file: fileAtSlot(this.selectedSlot), cell: { ...this.selectedCell }, lifted: true };
   }
   private emitPulse(cell: ArchiveCell) {
     this.pulses.push({ ...cell, time: this.clock });
@@ -1359,25 +1488,14 @@ export class ArchiveScene {
         return;
       }
       if (e.pointerType !== "mouse") return;
-      if (this.reveal < 0.8 || this.detail > 0.2 || !this.loaded || !records.length) return;
+      if (this.reveal < 0.8 || !this.canPick || !this.loaded || !records.length) return;
       this.cursor.set(
         ((e.clientX - r.left) / r.width) * 2 - 1,
         (-(e.clientY - r.top) / r.height) * 2 + 1,
       );
-      this.raycaster.setFromCamera(this.cursor, this.camera);
-      this.instances[0].boundingSphere = null;
-      const hit = this.raycaster.intersectObjects(
-        [this.instances[0], this.model],
-        true,
-      )[0];
+      const hit = this.pickCase();
       canvas.style.cursor = hit ? "pointer" : "default";
-      this.onHover?.(
-        hit
-          ? hit.instanceId !== undefined
-            ? fileAtCell(this.cells[this.slotOfInstance(hit.instanceId)])
-            : fileAtSlot(this.selectedSlot)
-          : null,
-      );
+      this.onHover?.(hit ? hit.file : null);
     });
     canvas.addEventListener("pointerup", (e) => {
       pointers.delete(e.pointerId);
@@ -1391,7 +1509,7 @@ export class ArchiveScene {
       }
       if (
         Math.hypot(e.clientX - startX, e.clientY - startY) > 6 ||
-        this.detail > 0.2 ||
+        !this.canPick ||
         this.reveal < 0.8 ||
         !this.loaded
         || !records.length
@@ -1402,21 +1520,8 @@ export class ArchiveScene {
         ((e.clientX - r.left) / r.width) * 2 - 1,
         (-(e.clientY - r.top) / r.height) * 2 + 1,
       );
-      this.raycaster.setFromCamera(this.cursor, this.camera);
-      this.instances[0].boundingSphere = null;
-      const hit = this.raycaster.intersectObjects(
-        [this.instances[0], this.model],
-        true,
-      )[0];
-      if (hit)
-        this.onSelect?.(
-          hit.instanceId !== undefined
-            ? fileAtCell(this.cells[this.slotOfInstance(hit.instanceId)])
-            : fileAtSlot(this.selectedSlot),
-          hit.instanceId !== undefined
-            ? { ...this.cells[this.slotOfInstance(hit.instanceId)] }
-            : { ...this.selectedCell },
-        );
+      const hit = this.pickCase();
+      if (hit) this.onSelect?.(hit.file, hit.cell, hit.lifted);
     });
     canvas.addEventListener("pointercancel", (e) => {
       pointers.delete(e.pointerId);
@@ -1456,7 +1561,8 @@ export class ArchiveScene {
     const aligningSelection = musicLibrary && this.musicNavigationLift && this.returnY !== null;
     this.rotation = this.reduced
       ? inspecting ? this.targetRotation : 0
-      : inspecting && !aligningSelection
+      // The song scene has no turned card: a turn left from the detail returns at once.
+      : inspecting && !aligningSelection && !this.songTarget
         ? THREE.MathUtils.lerp(this.rotation, this.targetRotation, blend)
         : returnStep(this.rotation, dt, this.reduced);
     if (musicLibrary && !cinematic) {
@@ -1466,6 +1572,21 @@ export class ArchiveScene {
     const presentationProgress = musicLibrary && !cinematic
       ? THREE.MathUtils.clamp(this.musicPlacement.update(this.targetDetail, dt, this.reduced), 0, 1)
       : 0;
+    const songProgress = this.songProgress = musicLibrary && !cinematic
+      ? THREE.MathUtils.clamp(this.song.update(this.songTarget, dt, this.reduced), 0, 1)
+      : 0;
+    const songView = songProgress > 0
+      ? songFraming(this.container.clientWidth, this.container.clientHeight, SONG_VIEW.span)
+      : undefined;
+    // The sunken shelf lies below the picture: tall windows show more of the world below the card.
+    this.songDrop = songView ? songShelfDrop((1 - songView.y) * songView.span) : SONG_SHELF_DROP;
+    // ... and the chain runs on until it has left the picture on the left.
+    const songWidth = songView ? this.container.clientWidth / this.container.clientHeight * songView.span : 0;
+    this.songCards = songView
+      ? songChainCards(songView.x * songWidth, (0.5 - songView.x) * songWidth, SONG_VIEW.distance)
+      : SONG_CHAIN_CARDS;
+    // ... and on the other side until it has left the picture at the bottom.
+    this.songFirst = songView ? songChainFirst((1 - songView.y) * songView.span) : SONG_CHAIN_FIRST;
     const musicIntro = Boolean(musicLibrary && cinematic?.musicIntro);
     // Music stops before the film's second extraction/inspection shot. The
     // last 400 ms hold the exact interactive pose instead of cutting to it.
@@ -1561,7 +1682,8 @@ export class ArchiveScene {
       if (value === undefined) strengths.set(lane, (value = columnStrength(lane, this.laneFocus.value)));
       return value;
     };
-    const field = (row: number, lane: number) => {
+    // `played`: with the play gesture's waves. The selected case has its hop instead.
+    const field = (row: number, lane: number, played = true) => {
       if (musicIntro) {
         // Recenter the authored wave on whichever album the library selected.
         // The same looping cells, resting shoulders and lane weights are used
@@ -1595,20 +1717,26 @@ export class ArchiveScene {
           ) * this.idleGain;
       // No pulses means a zero ripple: identical without the loop.
       if (!cinematic && !this.reduced && this.pulses.length) {
-        let ripple = 0;
+        let ripple = 0, playRipple = 0;
         for (const p of this.pulses) {
+          if (p.play && !played) continue;
           const distance = Math.hypot(row - p.row, (lane - p.lane) * 2.2);
           const age = time - p.time;
-          ripple +=
+          const wave =
             (musicLibrary ? musicSelectionWave(distance, age) : this.selectionPulse(distance, age)) *
             (this.deferSelectionPulse ? rippleEnvelope(distance, age) : 1);
+          if (p.play) playRipple += wave;
+          else ripple += wave;
         }
-        height += THREE.MathUtils.clamp(ripple, musicLibrary ? -0.24 : -0.6, musicLibrary ? 0.24 : 0.6) * this.pulseGain;
+        const limit = musicLibrary ? 0.24 : 0.6;
+        // A selection's wave leaves an opened case's shelf alone; the play gesture's is meant
+        // to be seen under it too.
+        height += THREE.MathUtils.clamp(ripple, -limit, limit) * this.pulseGain + THREE.MathUtils.clamp(playRipple, -limit, limit);
       }
       const distance = row - this.shoulder.value;
       return height + settlingWave(distance, 26.56) * strength(lane);
     };
-    const selectedBase = chosen.y + field(selectedRow, selectedLane);
+    const selectedBase = chosen.y + field(selectedRow, selectedLane, false);
     if (!cinematic) {
       if (this.returnY !== null && this.rotation !== 0) {
         this.lift.value = this.returnY - selectedBase;
@@ -1668,6 +1796,7 @@ export class ArchiveScene {
     this.decryption.update(dt, detail > .78 && this.lift.value > 3.3, this.reduced,
       cinematic ? shot + 5 : undefined);
     this.appearance.apply(this.model, ease(this.lift.value / 0.4));
+    if (this.covers) this.appearance.setTint(this.model, this.covers.selectedTint);
     this.appearance.setClarity(this.model, this.decryption.clarity);
     // Reference 26.92–27.76: the array travels horizontally into a white field.
     const entry = cinematic ? ease((shot - 21.9) / 0.86) : this.reveal;
@@ -1679,14 +1808,14 @@ export class ArchiveScene {
       const o = this.outgoing[i];
       const p = this.cellPosition(o.cell);
       const baseY = p.y + field(o.cell.row, o.cell.lane);
-      o.group.rotation.y = detailNavigation && this.reduced ? 0 : returnStep(o.group.rotation.y, dt, this.reduced);
+      o.yaw = detailNavigation && this.reduced ? 0 : returnStep(o.yaw, dt, this.reduced);
       if (detailNavigation && this.reduced) {
         o.returnY = null;
         o.lift = { value: 0, velocity: 0 };
       } else if (o.returnY !== null) {
         o.lift.value = o.returnY - baseY;
         o.lift.velocity = 0;
-        if (o.group.rotation.y === 0) o.returnY = null;
+        if (o.yaw === 0) o.returnY = null;
       } else damp(o.lift, 0, this.reduced ? 35 : detailNavigation ? MUSIC_ALBUM_SWITCH_RATE : 4.5, dt);
       o.group.position.set(
         p.x - trackX,
@@ -1698,12 +1827,20 @@ export class ArchiveScene {
       o.clarity = this.reduced ? 0 : o.clarity * Math.exp(-dt * 9);
       this.appearance.setClarity(o.group, o.clarity);
       const { row, lane } = o.cell;
-      o.group.rotation.x =
+      o.group.rotation.set(
         (field(row + 0.5, lane) - field(row - 0.5, lane)) *
-        0.024 *
-        (1 - detail) *
-        (1 - quality);
-      if (o.lift.value < 0.0001 && Math.abs(o.group.rotation.y) < 0.0001) {
+          0.024 *
+          (1 - detail) *
+          (1 - quality),
+        o.yaw,
+        0,
+      );
+      o.group.scale.setScalar(1);
+      const copyHold = songLiftHold(o.lift.value, MUSIC_INSPECTION_LIFT);
+      if (songProgress > 0) this.poseSongCase(o.group, baseY, songProgress, copyHold);
+      // The song scene's light: a copy stops being the large card as it sinks into the chain.
+      this.appearance.setSongCard(o.group, 1 - copyHold);
+      if (o.lift.value < 0.0001 && Math.abs(o.yaw) < 0.0001) {
         this.scene.remove(o.group);
         this.appearance.dispose(o.group);
         this.outgoing.splice(i, 1);
@@ -1756,10 +1893,12 @@ export class ArchiveScene {
         p.z + entryZ + this.rail.value,
       );
       this.dummy.rotation.set(slope * 0.024 * (1 - detail), 0, 0);
-      const hidden = isOwned(lane, row) || (fixedPool && i >= unused);
+      this.dummy.scale.setScalar(1);
+      // In the song scene only the chain is left to draw; the sunken shelf is out of sight.
+      const chained = songProgress > 0 ? this.poseSongCase(this.dummy, this.dummy.position.y, songProgress) : true;
+      const hidden = isOwned(lane, row) || (fixedPool && i >= unused) || (songProgress === 1 && !chained);
       this.slotHidden[i] = hidden ? 1 : 0;
       if (!hidden) {
-        this.dummy.scale.setScalar(1);
         this.dummy.updateMatrix();
         this.dummy.matrix.toArray(this.slotMatrices, i * 16);
       }
@@ -1768,19 +1907,31 @@ export class ArchiveScene {
     // The visible ones are packed into the instance buffer once the camera has settled.
     this.model.position.set(
       chosen.x - trackX,
-      chosen.y + field(selectedRow, selectedLane) + this.lift.value,
+      chosen.y + field(selectedRow, selectedLane, false) + this.lift.value,
       chosen.z + entryZ + this.rail.value,
     );
     // Extraction only changes elevation. Reframing belongs to the camera.
     this.model.rotation.set(
-      (field(selectedRow + 0.5, selectedLane) -
-        field(selectedRow - 0.5, selectedLane)) *
+      (field(selectedRow + 0.5, selectedLane, false) -
+        field(selectedRow - 0.5, selectedLane, false)) *
         0.024 *
         (1 - detail) *
         (1 - ease(this.lift.value / 0.4)),
       cinematic ? 0 : this.rotation,
       0,
     );
+    this.modelYaw = this.model.rotation.y;
+    this.model.scale.setScalar(1);
+    const liftHold = songLiftHold(this.lift.value, MUSIC_INSPECTION_LIFT);
+    if (songProgress > 0) this.poseSongCase(this.model, selectedBase, songProgress, liftHold);
+    // The play gesture's hop, in every view: the shelf's selection, the opened case, the large card.
+    const hop = musicLibrary && !cinematic && !this.reduced ? playHop(time - this.playStarted) : 0;
+    this.model.position.y += hop;
+    this.songHopPixels = songView ? hop * this.container.clientHeight / songView.span * songProgress : 0;
+    // ... and the lifted case becomes it as it leaves the chain. On the way out of the song
+    // scene it lowers to the shelf as the selection it is: it never takes the chain's shade.
+    this.appearance.setSongCard(this.model, this.songTarget ? 1 - liftHold : 1);
+    this.floor.position.y = -4.63 - this.songDrop * songProgress;
     // Measured from frame 787: X edge (382,-204), adjacent row (78,38).
     // The label vertical edge constrains height; the file base is occluded.
     // Do not calibrate field of view from the visible fragment of a file.
@@ -1832,9 +1983,10 @@ export class ArchiveScene {
     } else if (musicLibrary) {
       // The archive rests at 25° above the cover; inspection stays at 20°.
       // Both angles use the extraction progress, with no separate pan phase.
-      const detailYaw = THREE.MathUtils.degToRad(8);
+      const detailYaw = THREE.MathUtils.degToRad(THREE.MathUtils.lerp(8, SONG_VIEW.yaw, songProgress));
       const inspectionYaw = THREE.MathUtils.lerp(yaw, detailYaw, detail);
-      const inspectionElevation = THREE.MathUtils.lerp(elevation, MUSIC_DETAIL_ELEVATION, detail);
+      const inspectionElevation = THREE.MathUtils.lerp(elevation,
+        THREE.MathUtils.lerp(MUSIC_DETAIL_ELEVATION, THREE.MathUtils.degToRad(SONG_VIEW.elevation), songProgress), detail);
       viewDirection.set(
         -Math.sin(inspectionYaw) * Math.cos(inspectionElevation),
         Math.sin(inspectionElevation),
@@ -1922,6 +2074,7 @@ export class ArchiveScene {
     }
     const framing = archiveFraming(this.container.clientWidth, this.container.clientHeight, span, detail,
       this.container.closest<HTMLElement>("[data-layout]")?.dataset.layout === "compact");
+    let viewSpan = framing.span;
     if (musicIntro) {
       // Keep the film's corner tracking early, then release it smoothly to
       // the existing browsing composition, including the portrait endpoint.
@@ -1957,9 +2110,18 @@ export class ArchiveScene {
       const detailAim = musicLibrary
         ? new THREE.Vector3(0, -4.6 + settlingWave(0, 26.56) + MUSIC_INSPECTION_LIFT + MUSIC_MODEL.center.y, -2.17)
         : this.model.position.clone().add(new THREE.Vector3(0, 1.85, 0));
-      const detailX = musicLibrary ? framing.portrait ? 0.5 : 0.25 : framing.detailX;
-      detailAim.addScaledVector(right, (0.5 - detailX) * width / pixelScale);
-      detailAim.addScaledVector(up, (framing.detailY - 0.5) * height / pixelScale);
+      let detailX = musicLibrary ? framing.portrait ? 0.5 : 0.25 : framing.detailX;
+      let detailY = framing.detailY, detailScale = pixelScale;
+      if (songView) {
+        // The song scene shows more of the world and moves the case to its card position.
+        const song = songView;
+        viewSpan = THREE.MathUtils.lerp(framing.span, song.span, songProgress);
+        detailX = THREE.MathUtils.lerp(detailX, song.x, songProgress);
+        detailY = THREE.MathUtils.lerp(detailY, song.y, songProgress);
+        detailScale = height / viewSpan;
+      }
+      detailAim.addScaledVector(right, (0.5 - detailX) * width / detailScale);
+      detailAim.addScaledVector(up, (detailY - 0.5) * height / detailScale);
       cameraAim.lerp(detailAim, detail);
     }
     const cameraPosition = cameraAim
@@ -1971,15 +2133,15 @@ export class ArchiveScene {
     }
     if (musicLibrary && !cinematic) {
       this.musicCamera.update(this.camera, this.cameraAim, cameraPosition, cameraAim,
-        framing.span, dt, this.reduced);
+        viewSpan, dt, this.reduced);
       const detailTarget = this.musicPresentation.holdsDetail ? 1 : 0;
       const liftTarget = this.musicPresentation.holdsDetail ? MUSIC_INSPECTION_LIFT : previewLift * this.targetReveal;
       const tracksSettled = musicArchiveTracksSettled(
         { rail: this.rail, column: this.columnCamera, shoulder: this.shoulder, lane: this.laneFocus },
         { rail: -2.17 - chosen.z, column: chosen.x, shoulder: selectedRow, lane: selectedLane });
       this.musicPresentation.update(dt,
-        this.musicCamera.isSettled(this.camera, this.cameraAim, cameraPosition, cameraAim, framing.span),
-        this.musicPlacement.settled && tracksSettled && Math.abs(this.detail - detailTarget) < 0.001 && Math.abs(this.lift.value - liftTarget) < 0.008 &&
+        this.musicCamera.isSettled(this.camera, this.cameraAim, cameraPosition, cameraAim, viewSpan),
+        this.musicPlacement.settled && this.song.settled && tracksSettled && Math.abs(this.detail - detailTarget) < 0.001 && Math.abs(this.lift.value - liftTarget) < 0.008 &&
           Math.abs(this.rotation) < 0.001 && Math.abs(this.lift.velocity) < 0.025,
         this.reduced);
       this.targetDetail = Number(this.musicPresentation.holdsDetail);
@@ -2016,6 +2178,9 @@ export class ArchiveScene {
     this.camera.updateProjectionMatrix();
     this.camera.updateMatrixWorld();
     this.compactInstances();
+    // The columns' names belong to the browsing view, like the shelf emphasis.
+    this.placeLaneLabels(field, center, trackX, entryZ,
+      musicLibrary && !cinematic || musicIntro ? (musicIntro ? introSettle : 1) * (1 - detail) * (1 - songProgress) : 0);
     let neighborTop = -Infinity;
     const boxTop = musicLibrary ? MUSIC_MODEL.center.y + MUSIC_MODEL.height / 2 : 3.76;
     const boxBottom = musicLibrary ? MUSIC_MODEL.center.y - MUSIC_MODEL.height / 2 : 0;
@@ -2035,6 +2200,7 @@ export class ArchiveScene {
       !cinematic &&
       (!musicLibrary || this.musicPresentation.phase === "presented") &&
       Boolean(this.targetDetail) &&
+      !this.songTarget && songProgress === 0 &&
       detail > 0.9 &&
       this.pulseGain < 0.01 &&
       this.clearance > (musicLibrary ? 0.05 : 0.3);
@@ -2046,25 +2212,52 @@ export class ArchiveScene {
           : this.targetDetail
             ? "lifting"
             : "preview";
-    const focalPoint = this.model.position
-      .clone()
-      .add(new THREE.Vector3(0, 2, 0))
-      .applyMatrix4(this.camera.matrixWorldInverse);
-    const bokehUniforms = this.bokeh.uniforms as Record<
-      string,
-      { value: number }
-    >;
+    // The lens emphasises the selection in the music views (see MUSIC_LENS). On the settled
+    // shelf the defocus is measured on the shelf from the selected case, so the rows around
+    // it soften one by one; in the song scene the chain of covers stands behind the large
+    // card and is out of focus, more with every place. The selected case stays sharp from
+    // edge to edge in both. The opening film, the opened album and the original archive
+    // keep the lens they had.
+    const lens = musicLibrary
+      ? musicLens((musicIntro ? introSettle : 1) * (1 - detail), detail, songProgress)
+      : { aperture: THREE.MathUtils.lerp(MUSIC_LENS.archive.shelf, MUSIC_LENS.archive.detail, detail), range: 0, lean: 0 };
+    // The shelf focus follows the light column (the selection on a spring), so a new
+    // selection pulls the focus over instead of cutting to it; the song scene focuses on the
+    // large card's fixed place, where a newly selected case arrives only after its rise.
+    const focalPoint = this.model.position.clone();
+    if (lens.lean > 0 && this.selectionLighting) focalPoint.lerp(this.selectionLighting.columnPosition, lens.lean);
+    focalPoint.y += 2;
+    if (songProgress > 0) focalPoint.lerp((this.songBasis ??= this.createSongBasis()).origin, songProgress);
+    focalPoint.applyMatrix4(this.camera.matrixWorldInverse);
+    const bokehUniforms = this.bokeh.uniforms as Record<string, THREE.IUniform>;
     bokehUniforms.focus.value = -focalPoint.z;
-    bokehUniforms.aperture.value =
-      (THREE.MathUtils.lerp(0.0003, 0.0008, detail) *
-        this.quality.depthOfField) /
-      100;
-    this.selectionLighting?.update(this.model, this.camera, dt, musicLibrary && records.length > 0 && this.model.visible, this.reduced, Boolean(cinematic));
+    bokehUniforms.aperture.value = (lens.aperture * this.quality.depthOfField) / 100;
+    bokehUniforms.focalRange.value = lens.range;
+    bokehUniforms.focalLean.value = lens.lean;
+    this.bokeh.exactDepth = lens.lean > 0;
+    if (lens.lean > 0) {
+      const slope = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+      (bokehUniforms.focalSlope.value as THREE.Vector2).set(slope * this.camera.aspect, slope);
+      (bokehUniforms.focalPoint.value as THREE.Vector3).copy(focalPoint);
+      // Rows run along world Z, lanes along world X.
+      (bokehUniforms.focalRow.value as THREE.Vector3).set(0, 0, 1).transformDirection(this.camera.matrixWorldInverse);
+      (bokehUniforms.focalLane.value as THREE.Vector3).set(1, 0, 0).transformDirection(this.camera.matrixWorldInverse)
+        .multiplyScalar(MUSIC_LENS.shelf.lane);
+    }
+    // The shelf emphasis belongs to the browsing view: it forms as the opening
+    // settles on its album and leaves as a case is opened.
+    this.selectionLighting?.update(this.model, this.camera, dt, musicLibrary && records.length > 0 && this.model.visible, this.reduced, Boolean(cinematic),
+      (musicIntro ? introSettle : 1) * (1 - detail),
+      // The shelf slides under the light: the emphasis thins with the speed rows pass it.
+      -this.columnCamera.velocity, this.rail.velocity,
+      // The song scene has its own: the large card keeps the rim, the chain lies in shade.
+      songProgress);
     const cameraStill = this.describeFrame();
     // Only the slow idle drift moves: about 0.2 px per 60 Hz frame.
     const phase = this.decryption.frame.phase;
     const resting = idle && cameraStill && !this.pulses.length && !this.outgoing.length &&
-      !this.pendingPulse && !themeChanging && (phase === "waiting" || phase === "clear");
+      !this.pendingPulse && !themeChanging && (phase === "waiting" || phase === "clear") &&
+      time - this.playStarted >= PLAY_GESTURE.time;
     const draw = Boolean(cinematic) || themeChanging || this.pacing.needsDraw();
     if (draw) {
       this.renderer.info.reset();
@@ -2092,6 +2285,126 @@ export class ArchiveScene {
    * buffer, so off-screen cases cost no vertex work at all. Cover prints follow the
    * same order; picking maps instance ids back through instanceSlots.
    */
+  /**
+   * Stand the columns' names on the edge of their columns (laneLabelPlace): `field` is the
+   * shelf's height field, `centre` the (fractional) lane and row the shelf is centred on,
+   * `shown` how much of the browsing view is on screen.
+   */
+  private placeLaneLabels(field: (row: number, lane: number) => number, centre: ArchiveCell, trackX: number, entryZ: number, shown: number) {
+    const names = this.laneNames;
+    const visible = names && shown > 0.001 && archiveColumns.length > 0;
+    const plates = visible ? this.lanePlates ??= this.createLanePlates() : undefined;
+    this.lanePlates?.begin();
+    if (plates && names) {
+      const { first, last } = laneLabelRange(centre.lane);
+      const { start, end } = this.laneEdge;
+      // Portrait: the title and navigation lie over the columns nearer the lens.
+      const textBelow = isPortraitViewport(this.container.clientWidth, this.container.clientHeight);
+      const depth = (row: number) => -2.17 + row * ROW_SPACING + entryZ;
+      // A case's top edge is its centre plus half its height above its slot.
+      const caseTop = MUSIC_MODEL.center.y + MUSIC_MODEL.height / 2;
+      const top = (lane: number, row: number) => -4.6 + field(centre.row + row, lane) + caseTop + LANE_LABEL.rise;
+      // The column in front (nearer the lens) can be the taller one: the selected column's
+      // shoulder rises above its neighbours. A name then stands as high as the line of sight
+      // over that column's far edge, instead of behind it. Returns how far that lifted it.
+      const camera = this.camera.position, gap = COLUMN_SPACING - MUSIC_MODEL.width - LANE_LABEL.stand;
+      const stand = (point: THREE.Vector3, lane: number, x: number, row: number) => {
+        point.set(x, top(lane, row), depth(row));
+        const reach = gap / Math.max(1e-6, point.x - camera.x);
+        const over = top(lane - 1, row + reach * (camera.z - point.z) / ROW_SPACING) - reach * (camera.y - point.y) + LANE_LABEL.clear;
+        const lift = Math.max(0, over - point.y);
+        point.y += lift;
+        return lift;
+      };
+      for (let lane = first; lane <= last; lane++) {
+        const column = wrap(lane, archiveColumns.length), name = names[column];
+        if (!name) continue;
+        const offset = lane - centre.lane, place = laneLabelPlace(offset, textBelow);
+        // A single column repeats in every lane: its name is given once, where the selection
+        // is, and fades from one lane to the next while the shelf slides sideways.
+        const lone = archiveColumns.length === 1 ? Math.max(0, 1 - 2 * Math.abs(offset)) : 1;
+        const share = place.share * shown * lone;
+        if (share <= 0.001) continue;
+        // The column the shelf is centred on is written in full; its neighbours lighter.
+        const selected = 1 - Math.min(1, Math.abs(offset));
+        const x = (lane - 2) * COLUMN_SPACING - trackX - MUSIC_MODEL.width / 2 - LANE_LABEL.stand;
+        const plate = plates.claim(lane, column, name);
+        const span = laneLabelSpan(place, plate.width / ROW_SPACING);
+        // Each end stands where it is seen: on its own column's edge, or on the line of sight
+        // over the taller column in front, so a lifted name follows the edge it shows above.
+        stand(start, lane, x, span.from);
+        stand(end, lane, x, span.to);
+        // With the lens or ambient occlusion on, the names are drawn after them; else in the scene.
+        plate.pose(start, end, share, 0.92 + 0.08 * selected, this.bokeh.enabled || this.ao.enabled);
+      }
+    }
+    this.lanePlates?.end();
+  }
+  private createLanePlates() {
+    const plates = new LanePlates(this.renderer.capabilities.getMaxAnisotropy(), this.theme);
+    this.scene.add(plates.group);
+    return plates;
+  }
+  /** Cases of the shelf and of the chain can be picked; an opened album's shelf cannot. */
+  private get canPick() {
+    return this.detail <= 0.2 || (this.songTarget === 1 && this.songProgress === 1);
+  }
+  /**
+   * Song scene: carry a case from its shelf pose, already set on `object`, towards its place
+   * in the chain of covers, or down with the rest of the shelf. `baseY` is its slot's height;
+   * `hold` is how much of that displacement a lifted case still carries (it sheds it as it
+   * rises). Returns whether the case is part of the chain that reaches into the picture.
+   */
+  private poseSongCase(object: THREE.Object3D, baseY: number, progress: number, hold = 1) {
+    const { x, z } = object.position;
+    const u = songChainIndex(z + 2.17);
+    const weight = songChainWeight(u, this.songFirst) * songLaneWeight(songLaneOffset(x));
+    const chain = weight * progress;
+    if (chain <= 0) {
+      object.position.y += songSlotRise(baseY, baseY, this.songDrop, 0, progress) * hold;
+      return false;
+    }
+    const basis = this.songBasis ??= this.createSongBasis();
+    const pose = songChainPose(u), card = this.songCard;
+    card.quaternion.copy(basis.quaternion).multiply(card.local.setFromEuler(card.euler.set(
+      THREE.MathUtils.degToRad(pose.pitch), THREE.MathUtils.degToRad(pose.yaw), THREE.MathUtils.degToRad(pose.roll), "ZYX")));
+    // The pose places the middle of the top edge; a case's origin is the middle of its base.
+    card.position.set(0, -SONG_CARD_TOP * pose.scale, 0).applyQuaternion(card.quaternion)
+      .add(basis.origin).addScaledVector(basis.right, pose.x).addScaledVector(basis.up, pose.y)
+      .addScaledVector(basis.forward, pose.z);
+    const share = chain * hold;
+    object.position.set(
+      x + (card.position.x - x) * share,
+      object.position.y + songSlotRise(baseY, card.position.y, this.songDrop, weight, progress) * hold,
+      z + (card.position.z - z) * share,
+    );
+    // The chain takes its place from the song camera, not from the shelf's height: the play
+    // gesture's wave runs along it, from the lifted case's own slot out, by rows.
+    const ripple = this.chainRipple(Math.abs(u - SONG_CHAIN_CENTRE));
+    if (ripple) object.position.addScaledVector(basis.up, ripple * share);
+    object.quaternion.slerp(card.quaternion, share);
+    object.scale.setScalar(1 + (pose.scale - 1) * share);
+    return u <= this.songCards + 0.5;
+  }
+  /** The play gesture's wave on the chain, `rows` from the lifted case's own slot. */
+  private chainRipple(rows: number) {
+    if (this.reduced) return 0;
+    let played = 0;
+    for (const p of this.pulses) if (p.play) played += musicSelectionWave(rows, this.clock - p.time);
+    return THREE.MathUtils.clamp(played, -0.24, 0.24);
+  }
+  /** The song camera's axes and the large card's centre: where the chain is laid out. */
+  private createSongBasis() {
+    const yaw = THREE.MathUtils.degToRad(SONG_VIEW.yaw), elevation = THREE.MathUtils.degToRad(SONG_VIEW.elevation);
+    const forward = new THREE.Vector3(-Math.sin(yaw) * Math.cos(elevation), Math.sin(elevation), Math.cos(yaw) * Math.cos(elevation));
+    const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), forward).normalize();
+    const up = new THREE.Vector3().crossVectors(forward, right).normalize();
+    return {
+      origin: new THREE.Vector3(0, -4.6 + settlingWave(0, 26.56) + MUSIC_INSPECTION_LIFT + MUSIC_MODEL.center.y, -2.17),
+      right, up, forward,
+      quaternion: new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, forward)),
+    };
+  }
   private compactInstances() {
     if (!this.instanceMatrices) return;
     this.cullMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
@@ -2148,8 +2461,16 @@ export class ArchiveScene {
     const bokeh = this.bokeh.uniforms as Record<string, { value: number }>;
     p.value(bokeh.focus.value);
     p.value(bokeh.aperture.value);
+    p.value(bokeh.focalRange.value);
+    p.value(bokeh.focalLean.value);
     if (this.selectionLighting) p.values(this.selectionLighting.columnPosition.toArray());
-    if (this.covers) p.value(this.covers.revision);
+    p.value(this.selectionLighting?.focus ?? 0);
+    p.value(this.selectionLighting?.songFocus ?? 0);
+    this.lanePlates?.describe((value) => p.value(value));
+    if (this.covers) {
+      p.value(this.covers.revision);
+      p.values(this.covers.selectedTint.toArray());
+    }
     return cameraStill;
   }
   projectCard(x: number, y: number) {
@@ -2258,6 +2579,18 @@ export class ArchiveScene {
       musicPlacement: { progress: this.musicPlacement.value, velocity: this.musicPlacement.velocity,
         settled: this.musicPlacement.settled },
       musicNavigationLift: this.musicNavigationLift,
+      song: { progress: this.songProgress, target: this.songTarget, settled: this.song.settled },
+      playGesture: {
+        started: this.playStarted,
+        hop: playHop(this.clock - this.playStarted),
+        waves: this.pulses.filter((pulse) => pulse.play).length,
+        songCardHop: this.songHopPixels,
+      },
+      laneLabels: {
+        named: this.laneNames?.length ?? 0,
+        plates: this.lanePlates?.shown() ?? [],
+        sharpened: this.lanePlateOverlay.drawn,
+      },
       musicPresentationReady: this.musicPresentationReady,
       musicArchiveReady: this.musicArchiveReady,
       idleGain: this.idleGain,
@@ -2271,7 +2604,7 @@ export class ArchiveScene {
         cell: { ...o.cell },
         lift: o.lift.value,
         quality: ease(o.lift.value / 0.4),
-        rotation: o.group.rotation.y,
+        rotation: o.yaw,
         worldY: o.group.position.y,
         phase: o.returnY !== null ? "aligning" : "lowering",
       })),

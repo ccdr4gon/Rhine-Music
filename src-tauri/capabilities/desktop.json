@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
-  "description": "The player window can select folders, save preferences and connect to Windows media sources.",
+  "description": "The player window can select folders, save preferences, connect to Windows media sources, and draw its own title bar (minimize, maximize, close, drag).",
   "windows": ["main"],
   "local": true,
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["core:default", "allow-choose-music-folders", "allow-save-preferences", "allow-media-connection", "allow-netease-queue", "allow-netease-debug"]
+  "permissions": ["core:default", "core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-internal-toggle-maximize", "core:window:allow-close", "core:window:allow-start-dragging", "core:window:allow-is-maximized", "allow-choose-music-folders", "allow-save-preferences", "allow-media-connection", "allow-netease-queue", "allow-netease-debug"]
 }

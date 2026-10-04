@@ -1,9 +1,24 @@
 import { coverMipmaps, type CoverMip } from "./cover-mipmaps.ts";
 import { paintCoverArt } from "./cover-paint.ts";
+import { coverTint, type CoverTint } from "./cover-tint.ts";
 
-export type CoverRequest = { size: number; url?: string; title?: string; external?: boolean; priority?: boolean };
+/** `fallbackUrl` is tried when `url` cannot be loaded (a smaller rendition the server may not have). */
+export type CoverRequest = { size: number; url?: string; fallbackUrl?: string; title?: string; external?: boolean; priority?: boolean };
+
+/**
+ * NetEase's public image server sizes a cover on request (the address ends in ?param=WxH).
+ * A shelf tile asks for a tile-sized image instead of the 1024 px one the lifted print
+ * uses: with one column per playlist the shelf shows hundreds of different covers at once.
+ * Any other address, and any size above a tile's, is left as it is.
+ */
+export function sizedCoverUrl(url: string | undefined, size: number) {
+  if (!url || size > 256) return url;
+  const sized = /^(https:\/\/p\d+\.music\.126\.net\/[^?#]+)\?param=\d+y\d+$/i.exec(url);
+  return sized ? `${sized[1]}?param=256y256` : url;
+}
 export type CoverJob = CoverRequest & { id: number };
-export type CoverTile = { levels: CoverMip[]; scale: [number, number] };
+/** `tint` is the colour the case's index square takes from real art; a placeholder print has none. */
+export type CoverTile = { levels: CoverMip[]; scale: [number, number]; tint?: CoverTint };
 export type CoverReply = ({ id: number } & CoverTile) | { id: number; error: string };
 
 /** Resolve against the page so the worker fetches exactly what an <img> would. */
@@ -35,9 +50,11 @@ export async function paintCoverTile(request: CoverRequest): Promise<CoverTile> 
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = request.size;
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
-  const image = request.url ? await loadImage(request.url) : undefined;
+  const image = (request.url ? await loadImage(request.url) : undefined)
+    ?? (request.fallbackUrl ? await loadImage(request.fallbackUrl) : undefined);
   const scale = paintCoverArt(context, request.size, { image, title: request.title, external: request.external });
-  return { levels: coverMipmaps(context.getImageData(0, 0, request.size, request.size).data, request.size), scale };
+  const levels = coverMipmaps(context.getImageData(0, 0, request.size, request.size).data, request.size);
+  return { levels, scale, tint: image ? coverTint(levels) : undefined };
 }
 
 /**
@@ -65,7 +82,7 @@ export class CoverTiles {
   }
 
   render(request: CoverRequest): { id: number; tile: Promise<CoverTile | null> } {
-    const job: CoverJob = { ...request, url: absolute(request.url), id: this.nextId++ };
+    const job: CoverJob = { ...request, url: absolute(request.url), fallbackUrl: absolute(request.fallbackUrl), id: this.nextId++ };
     const tile = new Promise<CoverTile | null>((resolve) => {
       this.pending.set(job.id, { job, resolve });
       if (this.worker) this.worker.postMessage(job);

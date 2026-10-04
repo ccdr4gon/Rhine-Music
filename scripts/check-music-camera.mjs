@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor } from '../src/music-camera.ts';
+import { MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor,
+  MUSIC_LENS, musicLens } from '../src/music-camera.ts';
 import { damp } from '../src/motion.ts';
+import { BokehShader } from 'three/addons/shaders/BokehShader.js';
+import { focalShader } from '../src/depth-of-field.ts';
+import { COLUMN_SPACING, ROW_SPACING } from '../src/archive-loop.ts';
+import { MUSIC_MODEL } from '../src/music-model.ts';
+import { SONG_CHAIN_CENTRE, SONG_VIEW, songChainPose } from '../src/song-pose.ts';
 
 function setup() {
   const camera = new THREE.PerspectiveCamera();
@@ -206,6 +212,78 @@ for (const hz of [30, 120]) {
     tracks[key].velocity = .1;
     assert.equal(musicArchiveTracksSettled(tracks, targets), false, `${key} velocity must settle too`);
     tracks[key].velocity = speed;
+  }
+}
+// The lens of each view (MUSIC_LENS): the shelf and the song scene use the depth of field to set the selection apart.
+const radians = Math.PI / 180;
+{
+  const film = musicLens(0, 0, 0), opened = musicLens(0, 1, 0), shelf = musicLens(1, 0, 0), song = musicLens(0, 1, 1);
+  assert.deepEqual(film, { aperture: MUSIC_LENS.archive.shelf, range: 0, lean: 0 }, 'The opening film keeps the archive lens');
+  assert.deepEqual(opened, { aperture: MUSIC_LENS.archive.detail, range: 0, lean: 0 }, 'The opened album keeps its lens, with no in-focus slab');
+  assert.equal(MUSIC_LENS.archive.shelf, 0.0003);
+  assert.equal(MUSIC_LENS.archive.detail, 0.0008);
+  assert.deepEqual(shelf, { aperture: MUSIC_LENS.shelf.aperture, range: MUSIC_LENS.shelf.range, lean: 1 }, 'The settled shelf measures the defocus on the shelf');
+  assert.deepEqual(song, { aperture: MUSIC_LENS.song.aperture, range: MUSIC_LENS.song.range, lean: 0 }, 'The song scene measures it along the lens');
+  assert.deepEqual(musicLens(1, 0, 1), { aperture: MUSIC_LENS.song.aperture, range: MUSIC_LENS.song.range, lean: 0 }, 'The song scene decides once it is shown');
+  // Every way between the views is even: no value leaves the range of its two ends.
+  const between = (value, from, to) => value >= Math.min(from, to) - 1e-12 && value <= Math.max(from, to) + 1e-12;
+  for (let t = 0; t <= 1.0001; t += 0.05) {
+    const settling = musicLens(t, 0, 0), opening = musicLens(1 - t, t, 0), entering = musicLens(0, 1, t), direct = musicLens(1 - t, t, t);
+    assert.ok(between(settling.aperture, film.aperture, shelf.aperture) && between(settling.lean, 0, 1) && between(settling.range, 0, shelf.range), 'the opening settles into the shelf lens');
+    assert.ok(between(opening.aperture, opened.aperture, shelf.aperture) && between(opening.range, 0, shelf.range), 'opening an album');
+    assert.ok(between(entering.aperture, opened.aperture, song.aperture) && entering.lean === 0 && between(entering.range, 0, song.range), 'detail to song scene');
+    assert.ok(between(direct.aperture, Math.min(opened.aperture, shelf.aperture), Math.max(shelf.aperture, song.aperture)) && between(direct.lean, 0, 1) && between(direct.range, 0, song.range), 'shelf straight to the song scene');
+  }
+}
+{
+  // Blur radius in pixels, as the shader computes it: its outermost tap is 0.4 of the blur
+  // vector, which is in units of the picture's WIDTH; `defocus` is what the focus term measures.
+  const blur = (defocus, aperture, range, width = 1920, maxblur = 0.011) => 0.4 * width * Math.min(maxblur, Math.max(0, Math.abs(defocus) - range) * aperture);
+  const limit = 0.4 * 1920 * 0.011;
+  // Song scene: along the lens. The large card is turned to it by the view's yaw; the packed depth is rounded by up to 0.3 there.
+  const half = MUSIC_MODEL.width / 2;
+  assert.ok(half * Math.sin(SONG_VIEW.yaw * radians) + 0.3 < MUSIC_LENS.song.range, 'The large card and the depth rounding fit inside the song scene\'s in-focus slab');
+  const chain = (u) => blur(songChainPose(u).z, MUSIC_LENS.song.aperture, MUSIC_LENS.song.range);
+  assert.ok(chain(SONG_CHAIN_CENTRE + 1) > 1 && chain(SONG_CHAIN_CENTRE - 1) > 0.5, `The chain's places next to the selection are already soft (${chain(SONG_CHAIN_CENTRE + 1).toFixed(1)} / ${chain(SONG_CHAIN_CENTRE - 1).toFixed(1)} px)`);
+  for (let u = 0; u < 13; u++) assert.ok(chain(u + 1) > chain(u), `and each place further along is softer (${u})`);
+  assert.ok(chain(13) > 4 && chain(13) < limit, `up to a clear blur that is still below the lens's limit (${chain(13).toFixed(1)} px)`);
+  assert.equal(blur(0.31, MUSIC_LENS.song.aperture, MUSIC_LENS.song.range), 0, 'while the large card\'s own edges are not blurred at all');
+  // Shelf: on the shelf itself. The selected case is 0.28 thick along the rows and stays sharp
+  // from edge to edge whatever the camera's angle; its row neighbours soften one by one.
+  const row = (rows, lanes = 0) => blur(Math.hypot(rows * ROW_SPACING, lanes * COLUMN_SPACING * MUSIC_LENS.shelf.lane), MUSIC_LENS.shelf.aperture, MUSIC_LENS.shelf.range);
+  assert.ok(MUSIC_MODEL.depth / 2 < MUSIC_LENS.shelf.range && MUSIC_LENS.shelf.range < ROW_SPACING, 'The slab holds the selected case and none of its neighbours');
+  assert.equal(row(0), 0);
+  assert.ok(row(1) > 0.3 && row(1) < 1, `The next row is just soft (${row(1).toFixed(2)} px)`);
+  for (let rows = 0; rows < 12; rows++) assert.ok(row(rows + 1) > row(rows) || row(rows) === limit, `each row is softer than the one before (${rows})`);
+  assert.ok(row(4) > 2.5 && row(8) > 6, `a few rows away the blur is clear (${row(4).toFixed(1)} px at 4, ${row(8).toFixed(1)} px at 8)`);
+  assert.ok(row(0, 1) > row(1) && row(0, 1) < row(3), `a neighbouring lane counts as about two rows (${row(0, 1).toFixed(2)} px)`);
+  // Against the archive lens along the lens axis: neighbouring rows are 0.29 units of lens depth apart there
+  // (the camera looks along them at 59 degrees, 25 degrees down), so four rows were under a pixel.
+  const along = (rows) => blur(rows * ROW_SPACING * Math.cos(59 * radians) * Math.cos(25 * radians), MUSIC_LENS.archive.shelf, 0);
+  assert.ok(along(4) < 0.4 && row(4) > 6 * along(4), `the lens-axis focus could not set the selection apart (${along(4).toFixed(2)} px at 4 rows)`);
+}
+{
+  // The stock shader gets its uniforms and one block after its focus term; an unknown shader is refused.
+  const patched = focalShader(BokehShader.fragmentShader);
+  for (const uniform of ['float focalRange', 'float focalLean', 'vec2 focalSlope', 'vec3 focalPoint', 'vec3 focalRow', 'vec3 focalLane'])
+    assert.equal(patched.split(`uniform ${uniform};`).length, 2, uniform);
+  const focus = patched.indexOf('float factor = ( focus + viewZ );'), lean = patched.indexOf('if ( focalLean > 0.0 )'),
+    slab = patched.indexOf('factor = sign( factor ) * max( abs( factor ) - focalRange, 0.0 );'), radius = patched.indexOf('clamp( factor * aperture');
+  assert.ok(focus > 0 && focus < lean && lean < slab && slab < radius, 'The shelf focus and the slab are applied before the blur radius is computed');
+  assert.ok(patched.includes('vec3( ( vUv * 2.0 - 1.0 ) * focalSlope * -viewZ, viewZ ) - focalPoint'), 'The pixel is placed in view space from its depth');
+  assert.throws(() => focalShader('void main() {}'), /bokeh shader/);
+  // The shelf term in numbers: a point `rows` rows and `lanes` lanes from the focus, seen by a camera turned
+  // 59 degrees from the row axis and 25 degrees down, measures the same on the shelf whatever the camera.
+  const camera = new THREE.PerspectiveCamera(6, 16 / 9, 5, 300);
+  camera.position.set(Math.sin(59 * radians) * Math.cos(25 * radians), Math.sin(25 * radians), Math.cos(59 * radians) * Math.cos(25 * radians)).multiplyScalar(140);
+  camera.lookAt(0, 0, 0); camera.updateMatrixWorld(true); camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  const rowAxis = new THREE.Vector3(0, 0, 1).transformDirection(camera.matrixWorldInverse);
+  const laneAxis = new THREE.Vector3(1, 0, 0).transformDirection(camera.matrixWorldInverse).multiplyScalar(MUSIC_LENS.shelf.lane);
+  const focusView = new THREE.Vector3(0, 2, 0).applyMatrix4(camera.matrixWorldInverse);
+  for (const [rows, lanes, height] of [[0, 0, 1.2], [1, 0, 0], [-3, 0, 0.9], [0, 1, 0], [5, -2, 0]]) {
+    const from = new THREE.Vector3(lanes * COLUMN_SPACING, 2 + height, rows * ROW_SPACING).applyMatrix4(camera.matrixWorldInverse).sub(focusView);
+    const measured = Math.hypot(from.dot(rowAxis), from.dot(laneAxis));
+    assert.ok(Math.abs(measured - Math.hypot(rows * ROW_SPACING, lanes * COLUMN_SPACING * MUSIC_LENS.shelf.lane)) < 1e-9, `rows ${rows}, lanes ${lanes}: the height above the shelf does not count`);
   }
 }
 console.log('Music camera passed: continuous motion, frame-rate independence, original-film oblique pause/frontal ending, shared entry/return gates, elevated detail, interruption, replay and reduced motion.');

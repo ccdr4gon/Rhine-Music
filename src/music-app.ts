@@ -11,10 +11,14 @@ import "./music-transport-title.css";
 import "./music-theme.css";
 import "./music-theme-switch.css";
 import "./external-media.css";
+import "./song-scene.css";
 import {
-  nativeQueuePort, nativeDebugPort, queueLibrary, playingQueueTrack, queueTrackKey, queueSettingMarkup,
-  queueControlStatus, isNeteaseSource, PlaybackClock, type QueueTrack, type DebugState,
+  nativeQueuePort, nativeDebugPort, nativePlaylistPort, queueLibrary, queueLanes, laneLibrary, laneGenre, laneTrackKey,
+  playingQueueTrack, queueTrackKey, queueSettingMarkup, playlistSummary,
+  queueControlStatus, isNeteaseSource, PlaybackClock, type QueueTrack, type QueueSource, type QueueLane, type NeteasePlaylist, type DebugState,
 } from "./external-queue";
+import { type LaneName } from "./lane-labels";
+import { installWindowFrame } from "./window-frame";
 import { WheelNavigation, WHEEL_PIXELS_PER_ROW } from "./wheel-navigation";
 import {
   ExternalMediaConnection, nativeMediaPort, mediaLibrary, mediaVisualKey,
@@ -60,12 +64,20 @@ import { setupMusicRuler } from "./music-ruler";
 import { MusicPresentation, type AlbumSelection } from "./music-presentation";
 import { MusicTrackFocus } from "./music-track-focus";
 import { MusicBoot } from "./music-boot";
-import { viewportLayout } from "./viewport-layout";
+import { songCardRect, viewportLayout } from "./viewport-layout";
+import { SongListView, albumSongModel, queueSongModel, songSceneMarkup } from "./song-list";
+import { SONG_VIEW } from "./song-pose";
+import { MUSIC_MODEL } from "./music-model";
 
 type Theme = "day" | "night";
 type Panel = "library" | "search" | "settings" | "sources" | null;
 const externalMode = new URLSearchParams(location.search).get("mode") === "external";
-const externalMedia = externalMode ? new ExternalMediaConnection(nativeMediaPort) : undefined;
+// Windows may only know NetEase as "cloudmusic.exe".
+const NETEASE_NAME = "网易云音乐";
+// NetEase is the default link: connected when it is found, until the user chooses otherwise.
+const externalMedia = externalMode
+  ? new ExternalMediaConnection(nativeMediaPort, { name: NETEASE_NAME, match: isNeteaseSource })
+  : undefined;
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
   document.querySelector<T>(selector)!;
 const svg = (path: string) =>
@@ -73,7 +85,6 @@ const svg = (path: string) =>
 const icons = {
   play: svg('<path d="m9 5 11 7-11 7Z" fill="currentColor" stroke="none"/>'),
   pause: svg('<path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor" stroke="none"/>'),
-  stop: svg('<rect x="6" y="6" width="12" height="12" rx="1"/>'),
   search: svg(
     '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/>',
   ),
@@ -112,6 +123,9 @@ const preferences = {
     neteaseQueue: false,
     // Selecting a queue song makes NetEase play it; only acts while its debugging port answers.
     neteaseControl: true,
+    // One shelf column per NetEase playlist, read from its local database once the queue is
+    // shown. On unless switched off (the owner's choice, 2026-10-04).
+    playlistColumns: true,
   },
   ...read<
     Partial<{
@@ -128,6 +142,7 @@ const preferences = {
       renderQuality: RenderQuality;
       neteaseQueue: boolean;
       neteaseControl: boolean;
+      playlistColumns: boolean;
     }>
   >("rhine-music-preferences", {}),
 };
@@ -140,6 +155,10 @@ if (!["day", "night"].includes(preferences.theme)) {
 }
 if (!Object.hasOwn(qualityPresets, preferences.quality))
   preferences.quality = "original";
+// Keys of earlier builds, saved with every other preference: the playlist-name styles (gone),
+// and playlist columns when they were off by default (now under playlistColumns, so that the
+// old default does not outlive the new one).
+for (const key of ["laneLabels", "laneNameStyle", "neteasePlaylists"]) delete (preferences as Record<string, unknown>)[key];
 if (!["genre", "artist", "album"].includes(preferences.sortMode))
   preferences.sortMode = "genre";
 const sortLabels: Record<MusicSortMode, { name: string; column: string; code: string }> = {
@@ -166,6 +185,13 @@ let albums: MusicAlbum[] = [],
 let mode: "archive" | "detail" = "archive",
   activeTab: "tracks" | "about" = "tracks",
   panel: Panel = null;
+// An opened album shows its detail page or the song scene (a large card, the row as a
+// chain of covers, the playlist as text); the scene remembers where it was opened from.
+let menu: "detail" | "song" = "detail",
+  songOrigin: "archive" | "detail" = "archive",
+  menuSwapping = false,
+  songStay = false,
+  pendingSongFocus = false;
 let scene: ArchiveScene | undefined,
   ready = false,
   apiAvailable = true,
@@ -190,7 +216,8 @@ if (!externalMode) document.addEventListener("keydown", () => void effects.unloc
 });
 let toastTimer: ReturnType<typeof setTimeout>,
   pollTimer: ReturnType<typeof setTimeout> | undefined;
-let columnMemory = new Map<string, string>();
+// The case each column was left on, by column: names can repeat (two playlists of one name).
+let columnMemory = new Map<number, string>();
 let playerState: MusicPlayerState | undefined;
 // Connection mode never creates an Audio element or a local playback queue.
 const player = externalMode ? undefined : new MusicPlayer({
@@ -208,6 +235,7 @@ stage.className = "music-app";
 stage.dataset.mode = "archive";
 stage.dataset.theme = preferences.theme;
 stage.dataset.external = String(externalMode);
+stage.dataset.menu = menu;
 stage.innerHTML = `
   <div id="three-scene" class="three-scene"></div>
   <div class="music-vignette" aria-hidden="true"></div>
@@ -217,7 +245,7 @@ stage.innerHTML = `
       ${externalMode ? '<button data-action="sources" class="external-connect" aria-label="选择外部播放器">↗<span>播放器</span></button><button data-action="local-mode" class="external-connect" aria-label="返回本地音乐库">←<span>本地音乐</span></button>' : `<button data-action="library" aria-label="音乐库">${icons.folder}<span>音乐库</span></button><button data-action="search" aria-label="搜索">${icons.search}<span>搜索</span></button>${isDesktop ? '<button data-action="external-mode" class="external-connect" aria-label="连接外部播放器">↗<span>连接播放器</span></button>' : ""}`}
       <div class="theme-switch" aria-label="主题">${(["day", "night"] as Theme[]).map((t) => `<button data-theme="${t}" aria-label="${themeNames[t]}主题" aria-pressed="${preferences.theme === t}"><i class="theme-dot ${t}"></i><span>${themeNames[t]}</span></button>`).join("")}</div>
       <button data-action="settings" class="icon-button" aria-label="播放与画质设置">${icons.settings}</button>
-      <div class="minimal-transport" role="group" aria-label="音乐播放"><span id="transport-track" class="transport-track" aria-hidden="true"><span id="transport-track-label"></span></span>${externalMode ? '<button data-media-action="previous" class="external-header-prev" aria-label="外部播放器上一曲" disabled>‹</button>' : ""}<button data-action="play-pause" id="play-pause" aria-label="播放" aria-pressed="false"><span class="transport-glyph transport-play" aria-hidden="true">${icons.play}</span><span class="transport-glyph transport-pause" aria-hidden="true">${icons.pause}</span></button>${externalMode ? '<button data-media-action="next" class="external-header-next" aria-label="外部播放器下一曲" disabled>›</button>' : ""}<button data-action="stop" id="stop-playback" aria-label="停止">${icons.stop}</button></div>
+      <div class="minimal-transport" role="group" aria-label="音乐播放"><span id="transport-track" class="transport-track" aria-hidden="true"><span id="transport-track-label"></span></span>${externalMode ? '<button data-media-action="previous" class="external-header-prev" aria-label="外部播放器上一曲" disabled>‹</button>' : ""}<button data-action="play-pause" id="play-pause" aria-label="播放" aria-pressed="false"><span class="transport-glyph transport-play" aria-hidden="true">${icons.play}</span><span class="transport-glyph transport-pause" aria-hidden="true">${icons.pause}</span></button>${externalMode ? '<button data-media-action="next" class="external-header-next" aria-label="外部播放器下一曲" disabled>›</button>' : ""}</div>
     </nav>
   </header>
   <div id="library-status" class="library-status"><i></i><span>${externalMode ? "正在发现外部播放器" : "正在读取本地音乐索引"}</span></div>
@@ -228,29 +256,31 @@ stage.innerHTML = `
       <h1 id="selection-title"></h1><p id="selection-artist" class="selection-artist"></p>
       <div class="selection-meta" id="selection-meta"></div>
       <button class="open-album" data-action="open"><span id="open-album-label">${externalMode ? "当前曲目与控制" : "打开专辑"}</span> <span>↗</span></button>
+      <button class="open-songs" data-action="songs"><span id="open-songs-label">${externalMode ? "播放队列" : "选歌"}</span> <kbd>S</kbd></button>
     </div>
     <div class="music-navigation">
       <div class="music-counter"><span class="music-eyebrow" id="selection-counter-label">ALBUM / SELECT</span><div><b id="selection-number">01</b><span>/ <i id="selection-total">00</i></span></div></div>
       <div class="album-stepper"><button data-action="prev" aria-label="上一个专辑">↑</button><div id="album-ticks"></div><button data-action="next" aria-label="下一个专辑">↓</button></div>
-      <div class="genre-stepper"><button data-action="genre-prev" aria-label="上一个${sortLabel.column}">←</button><div><small id="genre-position">${sortLabel.code} <span id="genre-index">01</span> / <span id="genre-total">00</span></small><button data-action="genres" id="genre-name"></button></div><button data-action="genre-next" aria-label="下一个${sortLabel.column}">→</button></div>
+      <div class="genre-stepper"><button data-action="genre-prev" aria-label="上一个${sortLabel.column}">←</button><div><small id="genre-position"><span id="genre-code">${sortLabel.code}</span> <span id="genre-index">01</span> / <span id="genre-total">00</span></small><button data-action="genres" id="genre-name"></button></div><button data-action="genre-next" aria-label="下一个${sortLabel.column}">→</button></div>
     </div>
-    <div class="music-keyhint" id="music-keyhint">${externalMode ? "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目" : `← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑`}</div>
+    <div class="music-keyhint" id="music-keyhint">${externalMode ? "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目" : `← → ${sortLabel.column} <span>／</span> ↑ ↓ 专辑 <span>／</span> ENTER 打开专辑 <span>／</span> S 选歌`}</div>
   </section>
   <section id="music-detail" class="music-detail" aria-label="专辑详情" hidden>
     <button class="music-back" data-action="back">← 返回专辑架 <kbd>ESC</kbd></button>
-    <div class="card-caption"><span id="detail-card-id"></span><small>拖动卡片，查看完整封面</small></div>
+    <div class="card-caption"><span id="detail-card-id"></span><small>拖动卡片，查看完整封面</small><button data-action="songs"><span id="detail-songs-label">${externalMode ? "播放队列" : "选歌"}</span> <kbd>S</kbd></button></div>
     <article id="album-detail-content" tabindex="-1"></article>
   </section>
-  <div id="music-empty" class="music-empty" hidden>${externalMode ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p>选择一个外部播放器，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。</p><button data-action="sources">选择播放器 ↗</button><button data-action="local-mode" class="subtle">返回本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><p>选择本地音乐文件夹，专辑封面会出现在每一张卡片上。</p><button data-action="library">设置音乐文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示封面</button>'}</div>
+  <section id="music-song" class="music-song" aria-label="歌曲选择" hidden>${songSceneMarkup()}</section>
+  <div id="music-empty" class="music-empty" hidden>${externalMode ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p id="external-empty-note">选择一个外部播放器，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。</p><button data-action="sources">选择播放器 ↗</button><button data-action="local-mode" class="subtle">返回本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><p>选择本地音乐文件夹，专辑封面会出现在每一张卡片上。</p><button data-action="library">设置音乐文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示封面</button>'}</div>
   <div class="music-bottomline"><span>${externalMode ? "EXTERNAL PLAYER" : "LOCAL COLLECTION"} <i>·</i> <span id="library-count">${externalMode ? "NOT CONNECTED" : "0 ALBUMS"}</span></span><span id="runtime-info">THREE.JS / ${externalMode ? "EXTERNAL" : "LOCAL"}</span></div>
   <div id="music-panel-root"></div><div id="music-toast" role="status" aria-live="polite"></div>
   <div id="music-loading"><span class="loading-orbit"></span><strong>OPENING THE ARCHIVE</strong><small>正在载入三维专辑架</small></div>
 `;
+installWindowFrame(stage);
 const titleMotion = setupMusicTitleLayout(stage);
 const textMotion = setupMusicTextMotion(stage);
 if (externalMode) {
   $<HTMLButtonElement>("#play-pause").disabled = true;
-  $<HTMLButtonElement>("#stop-playback").disabled = true;
 }
 // Keep the previous navigation available while the ruler version is on trial.
 const tickMotion = new URLSearchParams(location.search).get("nav") === "previous"
@@ -336,6 +366,9 @@ const detailTransition = new SurfaceTransition(
   240,
   "right",
 );
+const songView = new SongListView($("#music-song"));
+// The panel fades in place; the section itself is never faded (see song-scene.css).
+const songTransition = new SurfaceTransition($("#music-song"), undefined, 450, 240, "right", undefined, songView.fadeTargets);
 const browseTransition = new SurfaceTransition(
   $("#music-browse"),
   undefined,
@@ -372,6 +405,7 @@ const presentation = new MusicPresentation({
   archiveInteractive: () => scene?.musicArchiveInteractive ?? false,
   enterCamera: () => {
     scene?.setMode("detail");
+    scene?.setSongStage(menu === "song");
     effects.setScene("detail");
     effects.play("open");
   },
@@ -385,9 +419,23 @@ const presentation = new MusicPresentation({
   mode: (next) => {
     mode = next;
     stage.dataset.mode = next;
+    // The shelf always reopens an album's detail page unless the song scene is asked for.
+    if (next === "archive") {
+      setMenu("detail");
+      songStay = pendingSongFocus = false;
+    }
     syncSelectionMotion();
   },
   prepareMenu: () => {
+    if (menu === "song") {
+      if (!songStay) {
+        songTransition.hide(true);
+        $("#music-song").inert = true;
+        $("#music-song").setAttribute("aria-hidden", "true");
+      }
+      renderSongs();
+      return;
+    }
     activeTab = "tracks";
     detailTransition.hide(true);
     renderDetail();
@@ -398,6 +446,18 @@ const presentation = new MusicPresentation({
     $("#music-detail").setAttribute("aria-hidden", "true");
   },
   showMenu: () => {
+    if (menu === "song") {
+      const section = $("#music-song");
+      songStay = false;
+      if (section.hidden || section.dataset.transition === "closing" || section.dataset.transition === "closed") {
+        songTransition.show(preferences.reduced);
+        pendingSongFocus = true;
+      }
+      section.inert = !!panel;
+      section.setAttribute("aria-hidden", "false");
+      syncSongRows(true);
+      return;
+    }
     const detail = $("#music-detail"), content = $("#album-detail-content");
     detailTransition.show(preferences.reduced);
     detail.inert = !!panel;
@@ -408,6 +468,19 @@ const presentation = new MusicPresentation({
     pendingDetailFocus = true;
   },
   hideMenu: (done) => {
+    if (menu === "song") {
+      pendingSongFocus = false;
+      // Moving along the playlist keeps the panel: only its text and the scene change.
+      songStay = presentation.openingOrDetail && !menuSwapping && presentation.pendingSelection?.route !== "archive";
+      if (songStay) {
+        done();
+        return;
+      }
+      $("#music-song").inert = true;
+      $("#music-song").setAttribute("aria-hidden", "true");
+      songTransition.hide(preferences.reduced, done);
+      return;
+    }
     trackFocus.cancel();
     pendingDetailFocus = false;
     tabTransition.cancel();
@@ -428,6 +501,7 @@ boot = new MusicBoot(stage, {
     cancelSearchTrack();
     presentation.reset();
     detailTransition.hide(true);
+    songTransition.hide(true);
     browseTransition.hide(true);
     scene?.setMode("hidden");
     syncSelectionMotion();
@@ -484,6 +558,7 @@ function fit() {
   stage.dataset.layout = viewportLayout(stage.clientWidth, stage.clientHeight, false).kind;
   scene?.resize();
   viewer?.resize();
+  syncSongCard();
   if (mode === "detail") {
     syncTabIndicator(false);
     documentDecryption.refresh();
@@ -591,39 +666,65 @@ async function applyLibrary() {
   albums = orderMusicAlbums(demo ? demoAlbums : library.albums, displaySort);
   genres = demo ? demoGenres : library.genres;
   setMusicAlbums(albums, genres, displaySort);
+  syncLaneLabels();
   selected = Math.max(
     0,
     records.findIndex((r) => r.id === previousId),
   );
-  if (externalMode && previousId && records[selected]?.id !== previousId) {
-    // The box the user rested on left NetEase's queue: nothing to play, follow NetEase again.
+  if (externalMode && records.length && records[selected]?.id !== previousId) {
+    // The box the user rested on is gone: it left NetEase's queue, or its column became or
+    // stopped being the queue (the queue's cases have keys of their own). Nothing to play:
+    // follow NetEase again from the song it plays now, whichever column that is. Asked of
+    // the new queue (queuePlaying is still the last poll's), and never left in a column that
+    // is only for browsing, where following stops.
     forgetQueueJumps();
     queueFollowPaused = false;
+    const queue = shownQueue();
+    const key = queue ? queueTrackKey(playingQueueTrack(queue.tracks, externalMedia?.selected, debugState)) : "";
+    const playing = key ? records.findIndex((record) => record.id === key) : -1;
+    const liveColumn = archiveColumns.findIndex((_, column) => laneAt(columnFiles(column)[0])?.live);
+    if (playing >= 0) selected = playing;
+    else if (liveColumn >= 0) selected = columnFiles(liveColumn)[0];
   }
+  // A column opens where it was left: remembered cases that still exist are kept. A column
+  // that was never visited has no entry and opens on its first case, whatever that now is.
+  const remembered = new Set(columnMemory.values());
   columnMemory = new Map(
-    archiveColumns.map((name, lane) => [
-      name,
-      records[columnFiles(lane)[0]]?.id,
-    ]),
+    archiveColumns.flatMap((_, lane) => {
+      const kept = columnFiles(lane).find((index) => remembered.has(records[index].id));
+      return kept === undefined ? [] : [[lane, records[kept].id] as [number, string]];
+    }),
   );
+  if (records[selected]) columnMemory.set(fileLocation(selected).lane, records[selected].id);
   if (scene && ready && oldVisual !== visualKey(albums, genres)) {
     const reopen = presentation.openingOrDetail;
+    const reopenMenu = menu;
     cancelSearchTrack();
     libraryRebuilding = true;
     libraryIntent = undefined;
     presentation.reset();
     detailTransition.hide(true);
+    songTransition.hide(true);
     browseTransition.hide(true);
     try { await scene.refreshLibrary(selected); }
     finally { libraryRebuilding = false; }
     const intent = libraryIntent as LibraryIntent | undefined;
     libraryIntent = undefined;
     scene.setMode("archive");
-    if (intent && "index" in intent)
-      select(intent.index, intent.navigation, intent.openAfter, intent.route);
-    else if ((intent ? intent.mode === "detail" : reopen) && albums.length)
+    // A rebuilt shelf (NetEase's queue changed) reopens the song scene it interrupted.
+    const keepSongs = reopen && reopenMenu === "song" && songsAvailable();
+    if (intent && "index" in intent) {
+      // A selection made during the rebuild still returns to the song scene; a search
+      // result keeps its shelf -> detail route.
+      const songs = keepSongs && intent.route !== "archive";
+      if (songs) setMenu("song");
+      select(intent.index, intent.navigation, intent.openAfter || songs, intent.route);
+      // A plain selection leaves the shelf at rest: reveal its overlay like the branch below.
+      if (presentation.phase === "archive") showBrowseSurface();
+    } else if ((intent ? intent.mode === "detail" : reopen) && albums.length) {
+      if (keepSongs && !intent) setMenu("song");
       presentation.open();
-    else showBrowseSurface();
+    } else showBrowseSurface();
   }
   if (!albums.length) {
     cancelSearchTrack();
@@ -636,30 +737,40 @@ async function applyLibrary() {
     if (albums.length && mode === "archive") browseTransition.show(true);
     else browseTransition.hide(true);
     // Detail is revealed exclusively by the camera completion gate.
-    if (presentation.phase !== "detail") detailTransition.hide(true);
+    if (presentation.phase !== "detail") {
+      detailTransition.hide(true);
+      songTransition.hide(true);
+    }
     $("#music-browse").inert = !albums.length || mode !== "archive" || !!panel;
-    $("#music-detail").inert = !albums.length || mode !== "detail" || !!panel;
+    $("#music-detail").inert = !albums.length || mode !== "detail" || menu !== "detail" || !!panel;
+    $("#music-song").inert = !albums.length || mode !== "detail" || menu !== "song" || !!panel;
+    $("#music-song").setAttribute("aria-hidden", String(!albums.length || mode !== "detail" || menu !== "song"));
     $("#music-browse").setAttribute(
       "aria-hidden",
       String(!albums.length || mode !== "archive"),
     );
     $("#music-detail").setAttribute(
       "aria-hidden",
-      String(!albums.length || mode !== "detail"),
+      String(!albums.length || mode !== "detail" || menu !== "detail"),
     );
   }
   updateSelection();
   if (mode === "detail" && previousDetail !== JSON.stringify(currentAlbum()))
-    renderDetail();
+    menu === "song" ? renderSongs() : renderDetail();
   updateStatus();
 }
 function updateStatus() {
   if (externalMedia) {
     $("#library-status span").textContent = mediaConnectionLabel(externalMedia);
     $("#library-status").classList.remove("working");
+    // Only while the default link is in force: after a disconnect, or once another player
+    // was selected, NetEase is not connected by itself.
+    setText($("#external-empty-note"), `${externalMedia.followsPreferred
+      ? `${NETEASE_NAME}在运行时会自动连接，也可以选择其他播放器`
+      : "选择一个外部播放器"}，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。`);
     const queue = shownQueue();
     $("#library-count").textContent = queue
-      ? `NETEASE QUEUE / ${albums.length} TRACKS`
+      ? queueLanesShown.length ? `NETEASE / ${queueLanesShown.length} PLAYLISTS / ${albums.length} SONGS` : `NETEASE QUEUE / ${albums.length} TRACKS`
       : externalMedia.selected ? "CURRENT TRACK ONLY" : "NOT CONNECTED";
     return;
   }
@@ -698,6 +809,14 @@ function updateSelection(navigation?: ArchiveNavigation) {
   const location = fileLocation(selected),
     files = columnFiles(location.lane),
     idx = files.indexOf(selected);
+  const lane = laneAt();
+  if (queueLanesShown.length) setText($("#selection-code-label"), lane?.live ? "QUEUE" : "PLAYLIST");
+  if (shownQueue()) {
+    // The song scene lists the selected column: the queue, or a playlist that is not it.
+    const list = lane && !lane.live ? "歌单歌曲" : "播放队列";
+    setText($("#open-songs-label"), list);
+    setText($("#detail-songs-label"), list);
+  }
   const animated = selectionInitialized && selectionMotionEnabled();
   selectionInitialized = true;
   textMotion.update(
@@ -705,15 +824,16 @@ function updateSelection(navigation?: ArchiveNavigation) {
       number: idx + 1,
       total: files.length,
       genresTotal: archiveColumns.length,
-      code: selected + 1,
+      // A playlist column counts its own songs.
+      code: queueLanesShown.length ? idx + 1 : selected + 1,
       genreIndex: location.lane + 1,
       genre: archiveColumns[location.lane],
       genreName: archiveColumns[location.lane],
-      format: shownQueue() ? "NETEASE / 播放队列" : externalMode ? "EXTERNAL / 当前曲目" : demo
+      format: shownQueue() ? (lane && !lane.live ? "NETEASE / 歌单" : "NETEASE / 播放队列") : externalMode ? "EXTERNAL / 当前曲目" : demo
         ? "DEMO"
         : [...new Set(a.tracks.map((t) => t.format))].join(" / "),
       artist: a.artist,
-      meta: shownQueue() ? [queueSong(a.id)?.album || "专辑未提供", a.tracks[0]?.duration ? time(a.tracks[0].duration) : "", a.id === queuePlaying ? "当前曲目" : ""].filter(Boolean).join("  /  ")
+      meta: shownQueue() ? [laneSong()?.album || "专辑未提供", a.tracks[0]?.duration ? time(a.tracks[0].duration) : "", a.id === queuePlaying ? "当前曲目" : lane && !lane.live ? "仅浏览" : ""].filter(Boolean).join("  /  ")
         : externalMedia ? [externalMedia.selected?.album || "专辑未提供", "仅当前曲目"].join("  /  ") : [
         a.year ? String(a.year) : "年份未提供",
         demo ? "演示封面" : `${a.tracks.length} 首曲目`,
@@ -734,17 +854,14 @@ function updateSelection(navigation?: ArchiveNavigation) {
     navigation,
   );
   $("#detail-card-id").textContent =
-    shownQueue() ? `QUEUE / ${String(selected + 1).padStart(3, "0")}`
+    shownQueue() ? `${lane && !lane.live ? "PLAYLIST" : "QUEUE"} / ${String((queueLanesShown.length ? idx : selected) + 1).padStart(3, "0")}`
       : externalMode ? "NOW PLAYING / 当前曲目" : `ALBUM / ${String(selected + 1).padStart(3, "0")}`;
   // Hidden archive content can prepare its static reels before the reveal.
   if (!animated) syncSelectionMotion();
 }
 function commitSelection(index: number, navigation?: ArchiveNavigation, keepDetail = false) {
   selected = wrap(index, records.length);
-  columnMemory.set(
-    archiveColumns[fileLocation(selected).lane],
-    records[selected].id,
-  );
+  columnMemory.set(fileLocation(selected).lane, records[selected].id);
   if (keepDetail) scene?.switchMusicAlbum(selected, navigation);
   else scene?.select(selected, navigation);
   updateSelection(navigation);
@@ -771,6 +888,9 @@ function select(index: number, navigation?: ArchiveNavigation, openAfter = prese
     libraryIntent = { index: wrap(index, records.length), navigation, openAfter, route };
     return;
   }
+  // A search result always opens the detail page, also over a song scene that is still
+  // waiting for the shelf to settle.
+  if (route === "archive" && mode === "archive") setMenu("detail");
   presentation.select({ index: wrap(index, records.length), navigation, route }, openAfter);
 }
 function navigationSelection() {
@@ -797,8 +917,16 @@ function stepGenre(direction: number) {
     fileLocation(navigationSelection()).lane + direction,
     archiveColumns.length,
   );
-  const remembered = columnMemory.get(archiveColumns[lane]);
-  const index = records.findIndex((r) => r.id === remembered);
+  // Stepping into NetEase's own queue lands on the song it plays and follows it again, so
+  // arriving there does not switch the song. Any other column opens where it was left.
+  const live = !!laneAt(columnFiles(lane)[0])?.live;
+  const playing = live ? records.findIndex((r) => r.id === queuePlaying) : -1;
+  // Also when the playing song has no case there: the remembered case is shown, not played.
+  if (live) queueFollowPaused = false;
+  // The wheel's rows still owed belong to the column that is being left.
+  wheelNavigation.reset();
+  const remembered = columnMemory.get(lane);
+  const index = playing >= 0 ? playing : records.findIndex((r) => r.id === remembered);
   select(index >= 0 ? index : columnFiles(lane)[0], {
     axis: "lane",
     direction,
@@ -808,9 +936,154 @@ function setMode(next: "archive" | "detail") {
   if (boot?.active) return;
   if (next === "archive") cancelSearchTrack();
   if (libraryRebuilding) { libraryIntent = { mode: next }; return; }
+  // A song scene still waiting for the shelf to settle is dropped with its request; an
+  // opened menu (mode "detail") keeps its own exit and is reset when the shelf returns.
+  if (mode === "archive") setMenu("detail");
   if (next === "detail") {
     if (currentAlbum()) presentation.open();
   } else presentation.back();
+}
+function setMenu(next: "detail" | "song") {
+  menu = next;
+  stage.dataset.menu = next;
+}
+/** The song scene lists an album's songs or NetEase's queue; a lone live track has neither. */
+function songsAvailable() {
+  return !!currentAlbum() && (!externalMode || !!shownQueue());
+}
+function openSongs() {
+  if (boot?.active || !ready || libraryRebuilding || panel || viewer?.isOpen || !songsAvailable() || menu === "song") return;
+  if (presentation.phase === "archive") {
+    songOrigin = "archive";
+    setMenu("song");
+    presentation.open();
+  } else {
+    // From an opened album; refused while it is still opening or its text is leaving.
+    menuSwapping = true;
+    const swapped = presentation.swapMenu(() => {
+      // Before the panel is rendered: the menu and the scene switch to the song stage.
+      songOrigin = "detail";
+      setMenu("song");
+      scene?.setSongStage(true);
+    });
+    menuSwapping = false;
+    // Changing view cancels a search result's locate animation, as elsewhere.
+    if (swapped) cancelSearchTrack();
+  }
+}
+/**
+ * Swap the song scene for the opened case's details, wherever the song scene was opened
+ * from; false when refused (still arriving, text leaving, shelf settling after a rebuild).
+ */
+function swapToDetail() {
+  if (menu !== "song" || libraryRebuilding || boot?.active) return false;
+  menuSwapping = true;
+  const swapped = presentation.swapMenu(() => {
+    setMenu("detail");
+    scene?.setSongStage(false);
+  });
+  menuSwapping = false;
+  return swapped;
+}
+/**
+ * The three scenes (the shelf, the opened case's details, the song scene) each lead to the
+ * other two, and the keys mean the same in every one of them: Enter (or clicking the
+ * selected case) opens the details, S switches to the song scene and back to the details,
+ * Esc returns to the shelf. (Enter on a focused button does what the button does: on a row
+ * of the song list it selects or plays that row.) S is never a way out to the shelf; while
+ * a swap is refused (still opening, text leaving, shelf settling after a rebuild) it is ignored.
+ */
+function toggleSongs() {
+  if (menu !== "song") openSongs();
+  else swapToDetail();
+}
+/** Song details: opened from the shelf, swapped in from the song scene. */
+function showDetails() {
+  if (menu === "song") swapToDetail();
+  else setMode("detail");
+}
+/** Esc and the back buttons: the shelf, from the details and from the song scene alike. */
+function leaveMenu() {
+  setMode("archive");
+}
+/**
+ * The song panel's first paint builds its glass layers and their blur. Doing that once under
+ * the loading screen keeps the panel's first entrance from stuttering.
+ */
+async function prewarmSongPanel() {
+  const section = $("#music-song");
+  if (!section.hidden) return;
+  syncSongCard();
+  section.inert = true;
+  section.hidden = false;
+  // Two painted frames, or a short wait when the window is not being painted at all.
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 300);
+    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+  });
+  section.hidden = true;
+}
+function syncSongCard() {
+  songView.setCard(songCardRect(stage.clientWidth, stage.clientHeight, SONG_VIEW.span, MUSIC_MODEL.width, MUSIC_MODEL.height));
+}
+function renderSongs() {
+  const a = currentAlbum();
+  if (!a) return;
+  const queue = shownQueue();
+  if (queue) {
+    const index = new Map(records.map((record, i) => [record.id, i] as const));
+    // With playlist columns the panel lists the selected column.
+    const lane = laneAt();
+    songView.render(queueSongModel(lane ? lane.tracks : queue.tracks, {
+      stamp: lane ? `${queueStamp ?? ""}:${playlistStamp ?? ""}:${lane.id}` : queueStamp ?? "",
+      truncated: lane ? lane.truncated : queue.truncated,
+      selected: laneSong(),
+      keyOf: lane ? (track) => laneTrackKey(lane, track) : queueTrackKey,
+      indexOf: (key) => index.get(key) ?? -1,
+      time,
+      note: songQueueNote(),
+      lane: lane && { name: lane.name, live: lane.live },
+    }), preferences.reduced);
+  } else songView.render(albumSongModel(a, { number: selected + 1, demo, time }), preferences.reduced);
+  $("#song-details-label").textContent = queue ? "这首歌" : "专辑详情";
+  $("#song-prev").setAttribute("aria-label", queue ? "上一首" : "上一张专辑");
+  $("#song-next").setAttribute("aria-label", queue ? "下一首" : "下一张专辑");
+  syncSongCard();
+  syncSongRows(true);
+}
+/** Which rows are playing, selected and being switched to; cheap enough for every poll. */
+function syncSongRows(reveal = false) {
+  const queue = !!shownQueue();
+  const selectedKey = queue ? records[selected]?.id : undefined;
+  const playing = (queue ? queuePlaying : playerState?.currentTrack?.id) || undefined;
+  // Paused, stopped or unknown: the current row stays marked but its level meter holds still.
+  const paused = queue
+    ? (debugState.available ? debugState.playback : externalMedia?.selected?.playback) !== "playing"
+    : !(playerState?.playing || playerState?.transport === "loading");
+  songView.sync({ playing, selected: selectedKey, pending: queueJump?.key, paused });
+  if (reveal) songView.reveal(selectedKey ?? playing, !preferences.reduced && !$("#music-song").hidden);
+}
+/** The shorter way round a looping column from one of its files to another. */
+function rowNavigation(from: number, to: number): ArchiveNavigation | undefined {
+  const files = columnFiles(fileLocation(to).lane);
+  const start = files.indexOf(from), end = files.indexOf(to);
+  if (start < 0 || end < 0 || start === end) return undefined;
+  let rows = end - start;
+  if (Math.abs(rows) > files.length / 2) rows -= Math.sign(rows) * files.length;
+  return { axis: "row", direction: rows };
+}
+function togglePlayback() {
+  if (externalMode) {
+    if (!externalMedia?.can("toggle")) return;
+    void controlExternal("toggle");
+  } else playerState?.currentTrack ? void player?.toggle() : playAlbum();
+  scene?.playGesture();
+}
+// Only an external player has a stop (on its details page); local mode has play / pause.
+function stopPlayback() {
+  if (!externalMedia?.can("stop")) return;
+  void controlExternal("stop");
+  scene?.playGesture();
 }
 function syncTabIndicator(animate = true) {
   const button = document.querySelector<HTMLElement>(`#tab-${activeTab}`);
@@ -1004,12 +1277,14 @@ function producerBlock(a: MusicAlbum) {
 }
 function updatePlayingRows() {
   document
-    .querySelectorAll<HTMLButtonElement>("[data-track]")
+    // The detail page's track list; the song scene's list keeps its own states (syncSongRows).
+    .querySelectorAll<HTMLButtonElement>("#album-detail-content [data-track]")
     .forEach((row) => {
       const active = row.dataset.track === playerState?.currentTrack?.id;
       row.classList.toggle("playing", active);
       row.setAttribute("aria-current", String(active));
     });
+  if (menu === "song") syncSongRows();
 }
 let lastPlayerError = "";
 const transportTitleMotion = setupTransportTitle(
@@ -1036,9 +1311,23 @@ player?.subscribe((state) => {
 });
 
 let externalVisual: string | undefined;
-let externalQueue: { tracks: QueueTrack[]; truncated: boolean } | undefined;
+let externalQueue: { tracks: QueueTrack[]; truncated: boolean; source?: QueueSource } | undefined;
 let queueStamp: string | undefined;
 let queueStatus = "";
+// The user's NetEase playlists, read from its local database after the second opt-in.
+let externalPlaylists: NeteasePlaylist[] | undefined;
+let playlistStamp: string | undefined;
+let playlistStatus = "";
+// Whether the last playlists read met the reader's limits.
+let playlistsCut = false;
+let playlistsReadAt = -Infinity;
+let playlistsReadFor: string | undefined;
+// The database is not watched (NetEase rewrites it every few minutes for other reasons): read
+// it again when the queue changes, which is when NetEase saves a playlist it started, and
+// otherwise at this interval.
+const PLAYLIST_REFRESH_MS = 30_000;
+/** The shelf's columns while they are playlists; empty for the single queue column. */
+let queueLanesShown: QueueLane[] = [];
 let queueSettingVisual = "";
 // The queue song the player reports, and whether the user browsed away from it. Following
 // resumes when NetEase changes song by itself or the user returns to the playing song.
@@ -1061,13 +1350,22 @@ let queueJumpTimer: ReturnType<typeof setTimeout> | undefined;
 // Long enough for a wheel glide or a held arrow key to finish before NetEase is asked.
 const QUEUE_SETTLE_MS = 520;
 const QUEUE_JUMP_TIMEOUT_MS = 6000;
-// Windows may only know NetEase as "cloudmusic.exe".
-const NETEASE_NAME = "网易云音乐";
 /** NetEase's queue is shown only for a selected NetEase source after the user opted in. */
 function shownQueue() {
   return externalMedia && preferences.neteaseQueue && isNeteaseSource(externalMedia.selected) && externalQueue?.tracks.length
     ? externalQueue : undefined;
 }
+/** The playlist column a case stands in, when the columns are playlists. */
+function laneAt(index = selected) {
+  const genre = queueLanesShown.length ? albums[index]?.genreId : undefined;
+  return genre ? queueLanesShown.find((lane) => laneGenre(lane) === genre) : undefined;
+}
+/** The song a case shows: in its playlist column, or in NetEase's queue. */
+function laneSong(index = selected) {
+  const lane = laneAt(index), id = records[index]?.id;
+  return lane ? lane.tracks.find((track) => laneTrackKey(lane, track) === id) : queueSong(id);
+}
+/** Only NetEase's own queue has songs it can be asked to play; a playlist column is for browsing. */
 function queueSong(boxId?: string) {
   return boxId ? shownQueue()?.tracks.find((track) => queueTrackKey(track) === boxId) : undefined;
 }
@@ -1227,7 +1525,6 @@ function updateExternalControls() {
   const toggleLabel = source?.playback === "playing" ? "暂停" : source?.playback === "unknown" ? "播放 / 暂停（状态未知）" : "播放";
   toggle.setAttribute("aria-label", toggleLabel);
   toggle.title = source ? `${source.name}：${toggleLabel}` : "请先连接播放器";
-  $<HTMLButtonElement>("#stop-playback").disabled = !externalMedia.can("stop");
   document.querySelectorAll<HTMLButtonElement>("[data-media-action]").forEach(button => {
     button.disabled = !externalMedia.can(button.dataset.mediaAction as MediaAction);
     if (button.dataset.mediaAction === "toggle") button.textContent = toggleLabel;
@@ -1258,17 +1555,23 @@ function updateExternalControls() {
     const control = queueControl();
     // The control switch is not part of the key: rebuilding under it would drop its focus.
     const restarting = debugRestarting && !isNeteaseSource(source);
-    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, restarting]);
+    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, preferences.playlistColumns, restarting]);
     if (queueSetting && queueKey !== queueSettingVisual) {
       queueSettingVisual = queueKey;
       debugSettingVisual = "";
       // NetEase's source disappears while it restarts; keep saying what is happening.
+      // The switch that was just operated is rebuilt with the rest: give it its focus back.
+      const focused = queueSetting.contains(document.activeElement) ? (document.activeElement as HTMLElement).id : "";
       queueSetting.innerHTML = restarting
         ? '<p class="external-note" role="status">正在以调试端口重新启动网易云…</p>'
-        : queueSettingMarkup(source, preferences.neteaseQueue, queueStatus, control);
+        : queueSettingMarkup(source, preferences.neteaseQueue, queueStatus, control,
+            { enabled: preferences.playlistColumns, status: playlistStatus });
+      if (focused) queueSetting.querySelector<HTMLElement>(`#${CSS.escape(focused)}`)?.focus({ preventScroll: true });
     }
     const queueStatusNode = document.querySelector<HTMLElement>("[data-queue-status]");
     if (queueStatusNode) queueStatusNode.textContent = queueStatus;
+    const playlistStatusNode = document.querySelector<HTMLElement>("[data-playlist-status]");
+    if (playlistStatusNode) playlistStatusNode.textContent = preferences.playlistColumns ? playlistStatus : "";
     // The port's state changes with NetEase, not with the panel: update it in place so a
     // half-confirmed restart button is not rebuilt under the pointer.
     const debugKey = JSON.stringify([control.status, control.restart]);
@@ -1284,31 +1587,74 @@ function updateExternalControls() {
 }
 function updateQueueRows() {
   const playing = !!queuePlaying && records[selected]?.id === queuePlaying;
+  const lane = laneAt(), browsing = !!lane && !lane.live;
   document.querySelectorAll<HTMLElement>("[data-queue-state]").forEach((node) => {
-    node.textContent = playing ? mediaPlaybackLabel(externalMedia?.selected) : queueJump?.key === records[selected]?.id ? "正在切换…" : "队列中";
+    node.textContent = playing ? mediaPlaybackLabel(externalMedia?.selected)
+      : queueJump?.key === records[selected]?.id ? "正在切换…" : browsing ? "仅浏览" : "队列中";
   });
   document.querySelectorAll<HTMLElement>("[data-media-now]").forEach((node) => {
     node.textContent = externalMedia?.selected?.title || "未提供";
   });
-  const note = !preferences.neteaseControl ? "切歌未开启：可在“播放器”面板中打开“选中盒子时让网易云切歌”。"
+  const note = queueControlNote();
+  document.querySelectorAll<HTMLElement>("[data-queue-control-note]").forEach((node) => { node.textContent = note; });
+  if (menu === "song") {
+    // The switch and the port change under an open song scene; its rows are not re-rendered for that.
+    if (shownQueue()) setText($("#song-note"), songQueueNote());
+    syncSongRows();
+  }
+}
+const songQueueNote = () => {
+  const lane = laneAt();
+  return `${lane && !lane.live ? "盒子与列表按这个歌单在网易云里的顺序排列。" : "盒子与列表按网易云播放队列的顺序排列。"}${queueControlNote()}`;
+};
+function queueControlNote() {
+  const lane = laneAt();
+  if (lane && !lane.live) return "这一列是歌单，不是网易云当前的播放队列：只供浏览，选中盒子不会切歌。在网易云里播放这个歌单后，它就是播放队列。";
+  return !preferences.neteaseControl ? "切歌未开启：可在“播放器”面板中打开“选中盒子时让网易云切歌”。"
     : debugState.available ? "停在一首歌上约半秒后，网易云播放它。"
     : "网易云的调试端口未连接，选中盒子不会切歌；可在“播放器”面板中查看。";
-  document.querySelectorAll<HTMLElement>("[data-queue-control-note]").forEach((node) => { node.textContent = note; });
+}
+/** The playlists' names beside their columns, written in the scene. */
+let laneNames: LaneName[] | null = null;
+function syncLaneLabels() {
+  // A column is the playlist its first case belongs to.
+  laneNames = queueLanesShown.length
+    ? archiveColumns.map((_, column) => {
+        const lane = laneAt(columnFiles(column)[0]);
+        return { name: lane?.name ?? "", live: !!lane?.live };
+      })
+    : null;
+  scene?.setLaneLabels(laneNames);
+}
+/** The song scene's line meets the large card's edges while the play gesture lifts it. */
+let songHopShown = 0;
+function syncSongHop() {
+  const hop = menu === "song" && scene ? Math.round(scene.songCardHop * 10) / 10 : 0;
+  if (hop === songHopShown) return;
+  songHopShown = hop;
+  $("#music-song").style.setProperty("--songs-hop", `${hop}px`);
 }
 /** Header text and navigation that differ between the single live card and the queue. */
 function syncQueueChrome() {
-  const queue = !!shownQueue();
-  if (stage.dataset.queue === String(queue)) return;
+  const queue = !!shownQueue(), lanes = queueLanesShown.length > 1;
+  if (stage.dataset.queue === String(queue) && stage.dataset.lanes === String(lanes)) return;
   stage.dataset.queue = String(queue);
+  // Several playlist columns bring back the column stepper and the left / right keys.
+  stage.dataset.lanes = String(lanes);
+  $("#genre-code").textContent = queue ? "PLAYLIST" : sortLabel.code;
+  $('.genre-stepper [data-action="genre-prev"]').setAttribute("aria-label", queue ? "上一个歌单" : `上一个${sortLabel.column}`);
+  $('.genre-stepper [data-action="genre-next"]').setAttribute("aria-label", queue ? "下一个歌单" : `下一个${sortLabel.column}`);
   $("#selection-code-label").textContent = queue ? "QUEUE" : "LIVE TRACK";
   $("#selection-counter-label").textContent = queue ? "SONG / SELECT" : "ALBUM / SELECT";
   $("#selection-code-number").hidden = !queue;
   $("#open-album-label").textContent = queue ? "查看这首歌" : "当前曲目与控制";
-  $('.album-stepper [data-action="prev"]').setAttribute("aria-label", queue ? "队列中的上一首" : "上一个专辑");
-  $('.album-stepper [data-action="next"]').setAttribute("aria-label", queue ? "队列中的下一首" : "下一个专辑");
+  // A lone live track has no playlist: the song scene is offered only for the queue.
+  if (!queue && menu === "song" && presentation.phase === "archive") setMenu("detail");
+  $('.album-stepper [data-action="prev"]').setAttribute("aria-label", queue ? "上一首" : "上一个专辑");
+  $('.album-stepper [data-action="next"]').setAttribute("aria-label", queue ? "下一首" : "下一个专辑");
   // Whether NetEase follows depends on the switch and its port, so the hint only says "select".
   $("#music-keyhint").innerHTML = queue
-    ? "滚轮 / ↑ ↓ 选歌 <span>／</span> ENTER 打开 <span>／</span> SPACE 播放 / 暂停"
+    ? `${lanes ? "← → 歌单 <span>／</span> " : ""}滚轮 / ↑ ↓ 选歌 <span>／</span> ENTER 打开 <span>／</span> S ${lanes ? "列表" : "队列"} <span>／</span> SPACE 播放 / 暂停`
     : "SPACE 播放 / 暂停 <span>／</span> ENTER 当前曲目";
 }
 async function refreshQueue() {
@@ -1319,14 +1665,15 @@ async function refreshQueue() {
     return;
   }
   try {
-    const reply = await nativeQueuePort.read(queueStamp);
+    // The playlist the queue came from is asked for only with playlist columns on.
+    const reply = await nativeQueuePort.read(queueStamp, preferences.playlistColumns);
     if (reply.status === "missing") {
       externalQueue = undefined;
       queueStamp = undefined;
       queueStatus = "没有找到网易云保存的播放队列。请先在网易云中播放歌曲。";
     } else if (reply.status === "queue") {
       queueStamp = reply.stamp;
-      externalQueue = reply.tracks.length ? { tracks: reply.tracks, truncated: reply.truncated } : undefined;
+      externalQueue = reply.tracks.length ? { tracks: reply.tracks, truncated: reply.truncated, source: reply.source } : undefined;
       queueStatus = reply.tracks.length
         ? `已读取播放队列 ${reply.tracks.length} 首${reply.truncated ? "（只显示前 3000 首）" : ""}，随网易云更新。`
         : "网易云的播放队列为空。";
@@ -1334,6 +1681,42 @@ async function refreshQueue() {
   } catch (error) {
     // A file being rewritten keeps the queue already shown; the next poll reads it again.
     queueStatus = String(error instanceof Error ? error.message : error);
+  }
+}
+/** The user's playlists from NetEase's local database, only with both switches on. */
+async function refreshPlaylists() {
+  if (!preferences.neteaseQueue || !preferences.playlistColumns || !isNeteaseSource(externalMedia?.selected)) {
+    externalPlaylists = undefined;
+    playlistStamp = undefined;
+    playlistsCut = false;
+    playlistsReadAt = -Infinity;
+    return;
+  }
+  const now = performance.now();
+  if (now - playlistsReadAt < PLAYLIST_REFRESH_MS && playlistsReadFor === queueStamp) return;
+  playlistsReadAt = now;
+  playlistsReadFor = queueStamp;
+  try {
+    const reply = await nativePlaylistPort.read(playlistStamp);
+    if (reply.status === "missing") {
+      externalPlaylists = undefined;
+      playlistStamp = undefined;
+      playlistsCut = false;
+      playlistStatus = "没有找到网易云的本机歌单数据。";
+    } else {
+      if (reply.status === "playlists") {
+        playlistStamp = reply.stamp;
+        externalPlaylists = reply.playlists;
+        playlistsCut = reply.truncated;
+      }
+      // Also for "unchanged": a read that failed before left its error in the status.
+      // (An answer to a read from before the switch was toggled finds nothing held.)
+      if (externalPlaylists) playlistStatus = playlistSummary(externalPlaylists, playlistsCut);
+    }
+  } catch (error) {
+    // A database being written keeps the playlists already shown; the next read tries again.
+    playlistStatus = String(error instanceof Error ? error.message : error);
+    playlistsReadAt = now - PLAYLIST_REFRESH_MS + 3000;
   }
 }
 async function refreshDebug() {
@@ -1429,18 +1812,15 @@ function followQueue() {
   if (!key || !ready || boot?.active || panel || libraryRebuilding) return;
   const index = records.findIndex((record) => record.id === key);
   const cursor = navigationSelection();
+  // Browsing another playlist's column: NetEase changing song does not pull the shelf back.
+  if (queueLanesShown.length && !laneAt(cursor)?.live) return;
   if (index < 0) return;
   if (index === cursor) {
     queueFollowPaused = false;
     return;
   }
   if (queueFollowPaused) return;
-  const files = columnFiles(fileLocation(index).lane);
-  const from = files.indexOf(cursor), to = files.indexOf(index);
-  let rows = to - from;
-  // The column loops: take the shorter way round.
-  if (Math.abs(rows) > files.length / 2) rows -= Math.sign(rows) * files.length;
-  select(index, from >= 0 && to >= 0 && rows ? { axis: "row", direction: rows } : undefined);
+  select(index, rowNavigation(cursor, index));
 }
 function syncExternal(): Promise<void> {
   // Serialize scene changes; a later snapshot wins after an in-flight cover upload.
@@ -1450,9 +1830,14 @@ function syncExternal(): Promise<void> {
     const source = externalMedia.selected;
     const queue = shownQueue();
     // The queue's shelf changes only with the queue; a new song just moves the selection.
-    const nextVisual = queue && source ? JSON.stringify(["queue", source.id, source.name, queueStamp]) : mediaVisualKey(source);
+    // With the playlists read, the columns are playlists; otherwise the queue is the one column.
+    const lanes = queue && source && preferences.playlistColumns && externalPlaylists ? queueLanes(queue, externalPlaylists) : [];
+    const nextVisual = queue && source
+      ? JSON.stringify(["queue", source.id, source.name, queueStamp, ...(lanes.length ? [playlistStamp] : [])])
+      : mediaVisualKey(source);
     if (nextVisual !== externalVisual) {
-      library = queue && source ? queueLibrary(queue.tracks, NETEASE_NAME) : mediaLibrary(source);
+      queueLanesShown = lanes;
+      library = queue && source ? (lanes.length ? laneLibrary(lanes) : queueLibrary(queue.tracks, NETEASE_NAME)) : mediaLibrary(source);
       syncQueueChrome();
       await applyLibrary();
       externalVisual = nextVisual;
@@ -1469,6 +1854,7 @@ async function refreshExternal() {
   try {
     await externalMedia.refresh();
     await refreshQueue();
+    await refreshPlaylists();
     await refreshDebug();
     await syncExternal();
   } catch (error) { notify(String(error)); }
@@ -1489,17 +1875,18 @@ function renderSourcesPanel() {
   if (!externalMedia) return;
   sourcesVisual = "";
   queueSettingVisual = "";
-  $("#panel-body").innerHTML = `<p class="panel-intro">选择要连接的播放器。默认只读取它的当前曲目、封面与可用控制；网易云的播放队列与切歌在连接后于下方另行开关。不会导入曲库，也不会自动选择其他来源。</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div><div id="external-permission"></div><div id="external-queue"></div><p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，没有读数时不推算进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
+  $("#panel-body").innerHTML = `<p class="panel-intro">选择要连接的播放器。网易云音乐是默认连接：发现它时自动连接，断开后重新出现也会自动接回；你选择了别的播放器或点了“断开连接”之后不再自动连接。默认只读取当前曲目、封面与可用控制；网易云的播放队列与切歌在下方另行开关。不会导入曲库，来源消失后也不会自动换到别的播放器。</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div><div id="external-permission"></div><div id="external-queue"></div><p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，没有读数时不推算进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
   updateExternalControls();
 }
 const externalControls = '<div class="external-controls" role="group" aria-label="外部播放器控制"><button data-media-action="previous">上一曲</button><button data-media-action="toggle">播放 / 暂停</button><button data-media-action="next">下一曲</button><button data-media-action="stop">停止</button></div><label class="external-timeline" for="external-seek"><span><span data-media-timeline-label>播放位置</span> <output><span data-media-position></span> / <span data-media-duration></span></output></span><input type="range" id="external-seek" min="0" max="1" step="1" value="0" disabled aria-label="外部播放器播放位置"></label>';
 function renderQueueDetail() {
   const a = currentAlbum();
   if (!a) return;
-  const song = queueSong(a.id);
+  const song = laneSong();
+  const lane = laneAt(), browsing = !!lane && !lane.live;
   const article = $("#album-detail-content");
   detailIdentity = a.id;
-  article.innerHTML = `<div class="detail-overline"><span>NETEASE QUEUE / ${String(selected + 1).padStart(3, "0")}</span><div class="detail-album-navigation" role="group" aria-label="切换歌曲"><button data-action="prev" aria-label="队列中的上一首">↑ 上一首</button><button data-action="next" aria-label="队列中的下一首">下一首 ↓</button></div></div><h1 title="${esc(a.title)}">${albumTitleMarkup(a.title)}</h1><p class="detail-artist">${esc(a.artist)}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span>${esc(song?.album || "未提供")}</span></div><div><small>DURATION / 时长</small><span>${song?.duration ? time(song.duration) : "未提供"}</span></div><div><small>SOURCE / 来源</small><span>${NETEASE_NAME}</span></div><div><small>STATUS / 状态</small><span data-queue-state></span></div><div><small>NOW PLAYING / 网易云当前曲目</small><span data-media-now></span></div></div>${externalControls}<p class="external-note">盒子按网易云播放队列的顺序排列，随机播放时实际播放顺序不同。<span data-queue-control-note></span></p><p data-media-warning class="external-warning" role="status"></p>`;
+  article.innerHTML = `<div class="detail-overline"><span>${browsing ? "NETEASE PLAYLIST" : "NETEASE QUEUE"} / ${String((lane ? columnFiles(fileLocation(selected).lane).indexOf(selected) : selected) + 1).padStart(3, "0")}</span><div class="detail-album-navigation" role="group" aria-label="切换歌曲"><button data-action="prev" aria-label="上一首">↑ 上一首</button><button data-action="next" aria-label="下一首">下一首 ↓</button></div></div><h1 title="${esc(a.title)}">${albumTitleMarkup(a.title)}</h1><p class="detail-artist">${esc(a.artist)}</p><div class="album-facts"><div><small>ALBUM / 专辑</small><span>${esc(song?.album || "未提供")}</span></div><div><small>DURATION / 时长</small><span>${song?.duration ? time(song.duration) : "未提供"}</span></div><div><small>SOURCE / 来源</small><span>${lane ? `${NETEASE_NAME} / ${esc(lane.name)}` : NETEASE_NAME}</span></div><div><small>STATUS / 状态</small><span data-queue-state></span></div><div><small>NOW PLAYING / 网易云当前曲目</small><span data-media-now></span></div></div>${externalControls}<p class="external-note">${browsing ? "盒子按这个歌单在网易云里的顺序排列。" : "盒子按网易云播放队列的顺序排列，随机播放时实际播放顺序不同。"}<span data-queue-control-note></span></p><p data-media-warning class="external-warning" role="status"></p>`;
   documentDecryption.reset(article, preferences.reduced || scene?.decryptionFrame.phase === "clear");
   updateExternalControls();
 }
@@ -1540,12 +1927,15 @@ function closePanel(after?: () => void) {
     for (const node of [
       $("#music-browse"),
       $("#music-detail"),
+      $("#music-song"),
       $(".music-header"),
       $("#three-scene"),
     ])
       node.inert = false;
     $("#music-browse").inert = presentation.phase !== "archive";
-    $("#music-detail").inert = presentation.phase !== "detail";
+    $("#music-detail").inert = presentation.phase !== "detail" || menu !== "detail";
+    // The song panel stays in use while its playlist moves to another song.
+    $("#music-song").inert = menu !== "song" || $("#music-song").hidden || $("#music-song").dataset.transition === "closing";
     panelFocus?.focus({ preventScroll: true });
     const next = pendingPanelAfter;
     pendingPanelAfter = undefined;
@@ -1572,6 +1962,7 @@ function openPanel(next: Panel) {
   for (const node of [
     $("#music-browse"),
     $("#music-detail"),
+    $("#music-song"),
     $(".music-header"),
     $("#three-scene"),
   ])
@@ -1678,7 +2069,7 @@ function renderSettingsPanel() {
     <section class="panel-section" id="introduction-settings"><h3>专辑介绍</h3><p>从公开百科查询并更新专辑介绍，附上资料来源。介绍保存在本机，不需要配置 MusicBrainz 联系信息；音乐文件不会上传。</p><p id="introduction-coverage"></p><button class="primary-button" id="introduction-refresh" data-action="introductions-library">查询 / 更新专辑介绍 ↗</button><progress id="introduction-progress" aria-label="专辑介绍查询进度" max="1" value="0" hidden></progress><p id="introduction-status" class="scan-status" role="status" aria-live="polite"></p><details id="introduction-missing" hidden><summary></summary><ul></ul></details></section>
     ${qualityMarkup(renderQuality)}
     <section class="panel-section"><h3>动效与显示</h3><label class="settings-row"><span>减少动态效果<small>简化镜头、文字加载和页签过渡</small></span><input type="checkbox" id="reduced-motion" ${preferences.reduced ? "checked" : ""}></label><button class="text-button" data-action="fullscreen">切换全屏 ↗</button></section>
-    <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，停止后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 Windows 和 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
+    <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，播完后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 Windows 和 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
     <section class="panel-section"><h3>开发与资源</h3><p>音乐适配与维护：<a href="https://github.com/RonaldDeng/Rhine-Music-Demo" target="_blank" rel="noopener">RonaldDeng ↗</a><br>原版界面：<a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener">LBEILC / RhineLabUI ↗</a></p><p><a href="/licenses/project-mit.txt" target="_blank" rel="noopener">代码 MIT 许可 ↗</a> · <a href="https://github.com/RonaldDeng/Rhine-Music-Demo/blob/v0.2.0/NOTICE.md" target="_blank" rel="noopener">版权与资源说明 ↗</a></p><a href="/?original=1&scene=archive" target="_blank" rel="noopener">打开原版档案界面 ↗</a><p><a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">MiSans 字体许可 ↗</a></p></section>`;
   if (externalMode) {
     $("#music-sort").closest(".panel-section")?.remove();
@@ -1809,7 +2200,10 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (target.dataset.mediaAction && externalMedia) {
-    void controlExternal(target.dataset.mediaAction as MediaAction);
+    // Play / pause and stop answer with the selected case's hop; previous and next move it.
+    if (target.dataset.mediaAction === "toggle") togglePlayback();
+    else if (target.dataset.mediaAction === "stop") stopPlayback();
+    else void controlExternal(target.dataset.mediaAction as MediaAction);
     return;
   }
   if (target.dataset.action === "dismiss-panel" && e.target !== target) return;
@@ -1822,11 +2216,14 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (target.dataset.select) {
+    const index = Number(target.dataset.select);
     const rulerStep = Number(target.dataset.rulerStep);
     queueFollowPaused = true;
-    select(Number(target.dataset.select),
+    select(index,
       target.dataset.rulerStep !== undefined && Number.isInteger(rulerStep)
-        ? { axis: "row", direction: rulerStep } : undefined);
+        ? { axis: "row", direction: rulerStep }
+        // A playlist row: the chain of covers runs to it the shorter way round.
+        : target.closest("#music-song") ? rowNavigation(navigationSelection(), index) : undefined);
     return;
   }
   if (target.dataset.album) {
@@ -1889,7 +2286,9 @@ document.addEventListener("click", (e) => {
       debugRestarting = true;
       updateExternalControls();
       void nativeDebugPort.restart()
-        .then(() => notify("网易云已以调试端口重新启动。请在“播放器”面板重新选择网易云。"))
+        .then(() => notify(externalMedia?.followsPreferred
+          ? "网易云已以调试端口重新启动，出现后会自动重新连接。"
+          : "网易云已以调试端口重新启动。请在“播放器”面板重新选择网易云。"))
         .catch((error) => notify(String(error instanceof Error ? error.message : error)))
         .finally(() => {
           debugRestarting = false;
@@ -1906,8 +2305,14 @@ document.addEventListener("click", (e) => {
     case "open":
       setMode("detail");
       break;
+    case "songs":
+      toggleSongs();
+      break;
+    case "details":
+      showDetails();
+      break;
     case "back":
-      setMode("archive");
+      leaveMenu();
       break;
     case "model-viewer":
       // Temporarily unavailable for the simplified CD shell (no inner assembly).
@@ -1938,12 +2343,7 @@ document.addEventListener("click", (e) => {
       openPanel("search");
       break;
     case "play-pause":
-      if (externalMode) void controlExternal("toggle");
-      else playerState?.currentTrack ? void player?.toggle() : playAlbum();
-      break;
-    case "stop":
-      if (externalMode) void controlExternal("stop");
-      else player?.stop();
+      togglePlayback();
       break;
     case "scan":
       void scan(true);
@@ -2060,6 +2460,18 @@ document.addEventListener("change", (e) => {
     void refreshExternal();
     return;
   }
+  if (externalMedia && el.id === "netease-playlists") {
+    preferences.playlistColumns = el.checked;
+    savePrefs();
+    externalPlaylists = undefined;
+    playlistStamp = undefined;
+    playlistsCut = false;
+    playlistsReadAt = -Infinity;
+    playlistStatus = el.checked ? "正在读取网易云的本机歌单…" : "";
+    updateExternalControls();
+    void refreshExternal();
+    return;
+  }
   if (externalMedia && el.id === "netease-control") {
     preferences.neteaseControl = el.checked;
     savePrefs();
@@ -2113,6 +2525,7 @@ document.addEventListener("change", (e) => {
     if (el.checked) {
       browseTransition.finish();
       detailTransition.finish();
+      songTransition.finish();
     }
     syncSelectionMotion();
     scene?.setReduced(el.checked);
@@ -2131,7 +2544,7 @@ document.addEventListener("keydown", (e) => {
   if (boot?.active) return;
   if (viewer?.isOpen) return;
   if (e.key === "Escape") {
-    panel ? closePanel() : setMode("archive");
+    panel ? closePanel() : leaveMenu();
     return;
   }
   if (panel) {
@@ -2182,6 +2595,13 @@ document.addEventListener("keydown", (e) => {
     searchGenre = "";
     openPanel("search");
   }
+  if (e.code === "KeyS" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
+    e.preventDefault();
+    toggleSongs();
+    return;
+  }
+  // Inside the playlist the arrows move along its rows; elsewhere they move the shelf.
+  if (menu === "song" && songView.handleKey(e)) return;
   if (e.key === "ArrowLeft") {
     e.preventDefault();
     stepGenre(-1);
@@ -2200,13 +2620,17 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !(e.target as HTMLElement).closest("button, a")) {
     e.preventDefault();
-    setMode("detail");
+    showDetails();
   }
-  if (e.code === "Space" && !(e.target as HTMLElement).closest("button, a")) {
+  // Space stays play / pause on a playlist row too; Enter is what activates the row.
+  if (e.code === "Space" && (!(e.target as HTMLElement).closest("button, a") || (e.target as HTMLElement).closest("#song-list"))) {
     e.preventDefault();
-    if (externalMode) void controlExternal("toggle");
-    else playerState?.currentTrack ? void player?.toggle() : playAlbum();
+    togglePlayback();
   }
+});
+// A button is clicked when Space is released: keep that from playing the focused row.
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space" && (e.target as HTMLElement).closest?.("#song-list")) e.preventDefault();
 });
 
 // The wheel scrolls the shelf. Events only add to the accumulator; frame() applies the rows
@@ -2227,7 +2651,8 @@ function scrollsNatively(target: EventTarget | null) {
 stage.addEventListener("wheel", (event) => {
   // Ctrl + wheel is zoom, and a mostly sideways gesture is not a row scroll.
   if (event.ctrlKey || event.metaKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
-  if (!wheelCanNavigate() || scrollsNatively(event.target)) return;
+  // The playlist panel keeps the wheel to itself even when its list is too short to scroll.
+  if (!wheelCanNavigate() || scrollsNatively(event.target) || songView.glass.contains(event.target as Node)) return;
   event.preventDefault();
   // A mouse wheel reports whole notches in wheelDeltaY (120 each), whatever the Windows
   // "lines per notch" setting or the page zoom make of deltaY: one notch is one row.
@@ -2258,6 +2683,7 @@ function frame(ms: number) {
     drainWheel();
     const opening = boot?.update(ms / 1000);
     if (!viewer?.isOpen) scene.update(ms / 1000, opening?.cinema);
+    syncSongHop();
     viewer?.update(ms / 1000);
     if (!viewer?.isOpen && !boot?.active) presentation.update();
     const phase = presentation.phase;
@@ -2274,6 +2700,10 @@ function frame(ms: number) {
       if (pendingDetailFocus && !panel && !viewer?.isOpen) {
         $("#album-detail-content").focus({ preventScroll: true });
         pendingDetailFocus = false;
+      }
+      if (pendingSongFocus && !panel && menu === "song") {
+        songView.focusCurrent();
+        pendingSongFocus = false;
       }
       if (pendingSearchTrack && !panel && !viewer?.isOpen &&
         $("#music-detail").dataset.transition === "open" &&
@@ -2314,7 +2744,7 @@ function frame(ms: number) {
   // While the scene rests and nothing here animates, wait for the scene's next
   // ~60 Hz slot instead of running every display frame (FramePacing).
   const quiet = scene && !document.hidden && !boot?.active && !viewer?.isOpen &&
-    !pendingDetailFocus && !pendingSearchTrack && !wheelNavigation.active && (presentation.phase === "archive" ||
+    !pendingDetailFocus && !pendingSongFocus && !pendingSearchTrack && !wheelNavigation.active && (presentation.phase === "archive" ||
       (presentation.phase === "detail" && !documentDecryption.active));
   const wait = quiet ? scene!.nextFrameAt() * 1000 - performance.now() : 0;
   if (wait > 1) frameTimer = window.setTimeout(requestFrame, wait);
@@ -2345,16 +2775,30 @@ async function start() {
       externalMode ? "三维卡片，显示所选外部播放器的当前曲目" : `三维专辑阵列，左右切${sortLabel.column}，上下切专辑`,
     );
     stage.classList.toggle("reduce-motion", preferences.reduced);
+    // Skin mode starts on the song that is playing: with the default link the queue is there
+    // before the scene, and the opening must not present another song and travel afterwards.
+    if (externalMode && queuePlaying) {
+      const playing = records.findIndex((record) => record.id === queuePlaying);
+      if (playing >= 0) selected = playing;
+    }
+    syncLaneLabels();
     await scene.refreshLibrary(selected);
     scene.setTheme(preferences.theme);
     scene.setQuality(renderQuality);
     scene.setReduced(preferences.reduced);
     await scene.precompile();
-    scene.onSelect = (index, cell) => {
-      if ((!externalMode || shownQueue()) && !boot?.active && presentation.phase === "archive" && !panel) {
-        queueFollowPaused = true;
-        select(index, cell ? { cell } : undefined);
-      }
+    await prewarmSongPanel();
+    scene.onSelect = (index, cell, lifted) => {
+      if (boot?.active || panel) return;
+      const songScene = presentation.phase === "detail" && menu === "song";
+      // The selected case opens its details: on the shelf and as the song scene's large card.
+      if (lifted && (presentation.phase === "archive" || songScene)) return showDetails();
+      if (externalMode && !shownQueue()) return;
+      // A card of the chain becomes the large card, also when a short looping column shows
+      // the same album or song again there.
+      if (!songScene && presentation.phase !== "archive") return;
+      queueFollowPaused = true;
+      select(index, cell ? { cell } : undefined);
     };
     scene.onNavigate = (axis, direction) => {
       if ((!externalMode || shownQueue()) && !boot?.active && presentation.phase === "archive" && !panel)
@@ -2407,6 +2851,7 @@ Object.assign(window, {
       return { phase: presentation.phase, cameraPhase: scene?.musicPresentationPhase,
         pendingIndex: presentation.pendingSelection?.index,
         menuVisible: !$("#music-detail").hidden,
+        menu, songOrigin, songVisible: !$("#music-song").hidden,
         cameraReady: scene?.musicPresentationReady,
         archiveReady: scene?.musicArchiveReady };
     },

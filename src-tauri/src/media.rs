@@ -1,5 +1,8 @@
 //! Read and control sources that already play music. This never logs in to a
-//! service, reads its databases, or represents the current track as a library.
+//! service or represents the current track as a library. The only files of a
+//! player that are read are NetEase Cloud Music's saved queue and, from its local
+//! database, the playlists the user created; `netease_queue` and
+//! `netease_playlists` state exactly which fields.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub struct Snapshot {
 }
 
 pub mod netease_debug;
+pub mod netease_playlists;
 pub mod netease_queue;
 #[cfg(target_os = "windows")]
 mod windows_media;

@@ -11,6 +11,7 @@ reference/*.jpg
 reference/**/*.jpg
 art/.cache/
 .worktrees/
+.claude/
 release/
 /data/
 /preferences.json

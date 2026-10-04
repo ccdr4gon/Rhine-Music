@@ -4,6 +4,7 @@ import {
   ExternalMediaConnection, mediaLibrary, mediaVisualKey, mediaTime,
   mediaPlaybackLabel, mediaConnectionLabel, mediaSourcesMarkup, nativeMediaPort,
 } from '../src/external-media.ts';
+import { isNeteaseSource } from '../src/external-queue.ts';
 
 const source = (id, extra = {}) => ({
   id, name: `Player ${id}`, kind: 'smtc', title: '当前曲目', artist: '歌手', album: '专辑',
@@ -11,17 +12,21 @@ const source = (id, extra = {}) => ({
   capabilities: { toggle: true, previous: true, next: true, stop: false, seek: true },
   ...extra,
 });
-function fixture(initial = [source('a'), source('b')]) {
+function fixture(initial = [source('a'), source('b')], preferred) {
   let snapshot = { sources: initial };
   const calls = [];
   const connection = new ExternalMediaConnection({
     async snapshot() { if (snapshot instanceof Error) throw snapshot; return snapshot; },
     async control(...args) { calls.push(args); },
-  });
+  }, preferred);
   return { connection, calls, set: next => { snapshot = next; } };
 }
+// The app's default link: NetEase Cloud Music, however Windows lists it.
+const NETEASE = { name: '网易云音乐', match: isNeteaseSource };
+const netease = (id, extra = {}) => source(id, { name: 'cloudmusic.exe', player: 'netease', ...extra });
+const neteaseWindow = (id, extra = {}) => source(id, { name: '网易云音乐（窗口标题）', kind: 'netease', player: 'netease', ...extra });
 
-test('sources never auto-select; refresh and another playing source do not transfer user control', async () => {
+test('without a preferred player sources never auto-select; refresh and another playing source do not transfer user control', async () => {
   const { connection, calls, set } = fixture();
   await connection.refresh();
   assert.equal(connection.selected, undefined);
@@ -57,6 +62,142 @@ test('disconnection clears the current card and controls; returning sessions sti
   connection.select('a');
   assert.equal(connection.selected.id, 'a');
   assert.equal(calls.length, 0);
+});
+
+test('the preferred player is the default link: connected when found, whatever else is playing', async () => {
+  // Not running yet: nothing is connected, and another player is not taken instead.
+  const { connection, calls, set } = fixture([source('a')], NETEASE);
+  await connection.refresh();
+  assert.equal(connection.selected, undefined);
+  assert.equal(connection.selectedId, null);
+  assert.equal(connection.awaitsPreferred, true);
+  assert.match(mediaConnectionLabel(connection), /未发现网易云音乐.*自动连接/);
+  assert.equal(await connection.control('toggle'), false);
+  // It appears, behind a player that is playing: it is connected by itself.
+  set({ sources: [source('a', { playback: 'playing' }), netease('n1', { playback: 'paused' })] });
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'n1');
+  assert.equal(connection.followsPreferred, true);
+  assert.equal(connection.awaitsPreferred, false);
+  assert.equal(connection.allowGlobalMediaKeys, false);
+  assert.match(mediaConnectionLabel(connection), /cloudmusic\.exe · 已暂停/);
+  assert.equal(await connection.control('next'), true);
+  assert.deepEqual(calls, [['n1', 'next', undefined, false]]);
+  // Present at the first reading: connected at once; either way Windows lists NetEase.
+  for (const first of [netease('n'), neteaseWindow('w')]) {
+    const other = fixture([source('a'), first], NETEASE);
+    await other.connection.refresh();
+    assert.equal(other.connection.selected.id, first.id);
+    assert.equal(other.connection.allowGlobalMediaKeys, false, 'the default link never grants the global media keys');
+  }
+  // The list marks the default, connected or not.
+  const marked = mediaSourcesMarkup(connection);
+  assert.match(marked, /data-media-source="n1" aria-pressed="true".*已连接 · 默认/);
+  assert.match(marked, /data-media-source="a" aria-pressed="false".*<em>连接<\/em>/);
+});
+
+test('the user\'s own choice wins over the default: another player is never replaced, a disconnect is final', async () => {
+  const { connection, set } = fixture([source('a'), netease('n1')], NETEASE);
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'n1');
+  // The user selects another player: the default no longer applies, also when that player is lost.
+  assert.equal(connection.select('a'), true);
+  assert.equal(connection.followsPreferred, false);
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'a');
+  set({ sources: [netease('n1')] });
+  await connection.refresh();
+  assert.equal(connection.disconnected, true);
+  assert.equal(connection.selected, undefined, 'a lost player is never replaced by another one');
+  assert.equal(connection.awaitsPreferred, false);
+  assert.match(mediaConnectionLabel(connection), /来源已断开，请重新选择播放器/);
+  set({ sources: [netease('n2')] });
+  await connection.refresh();
+  assert.equal(connection.selected, undefined);
+  // The user disconnects: nothing is connected by itself afterwards, not even the preferred player.
+  connection.select('n2');
+  assert.equal(connection.followsPreferred, true);
+  connection.disconnect();
+  assert.equal(connection.followsPreferred, false);
+  for (const next of [[netease('n2')], [], new Error('unreadable'), [netease('n3'), source('a')]]) {
+    set(next instanceof Error ? next : { sources: next });
+    await connection.refresh();
+    assert.equal(connection.selected, undefined);
+    assert.equal(connection.selectedId, null, 'a disconnect holds through empty and failed readings');
+  }
+  assert.match(mediaConnectionLabel(connection), /选择播放器后显示当前曲目/);
+  assert.match(mediaSourcesMarkup(connection), /data-media-source="n3" aria-pressed="false".*连接 · 默认/);
+  // Selecting it again makes it the default link again.
+  assert.equal(connection.select('n3'), true);
+  assert.equal(connection.followsPreferred, true);
+});
+
+test('the preferred player is connected again when it comes back, as a new connection', async () => {
+  const { connection, calls, set } = fixture([neteaseWindow('w1')], NETEASE);
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'w1');
+  connection.setGlobalMediaKeys(true);
+  assert.equal(connection.allowGlobalMediaKeys, true);
+  // While it stays, the default link is not made again: the consent and the controls survive every reading.
+  for (let poll = 0; poll < 3; poll++) await connection.refresh();
+  assert.equal(connection.allowGlobalMediaKeys, true, 'a present default link keeps the consent across polls');
+  assert.equal(connection.can('toggle'), true);
+  // NetEase closes: the card and the controls go, nothing else is taken.
+  set({ sources: [source('a')] });
+  await connection.refresh();
+  assert.equal(connection.disconnected, true);
+  assert.equal(connection.selected, undefined);
+  assert.equal(connection.allowGlobalMediaKeys, false);
+  assert.equal(connection.awaitsPreferred, true);
+  assert.match(mediaConnectionLabel(connection), /网易云音乐已断开，再次出现时会自动重新连接/);
+  assert.equal(await connection.control('toggle'), false);
+  // A failed reading in between neither connects nor forgets.
+  set(new Error('temporary read failure'));
+  await connection.refresh();
+  assert.equal(connection.selected, undefined);
+  assert.equal(connection.awaitsPreferred, true);
+  // It returns as another session (here through the system media session): connected again,
+  // and the consent for global media keys is not carried over.
+  set({ sources: [source('a'), netease('n2')] });
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'n2');
+  assert.equal(connection.disconnected, false);
+  assert.equal(connection.allowGlobalMediaKeys, false);
+  // The same holds for a NetEase source the user selected by hand, and for the same ID returning.
+  const manual = fixture([source('a'), neteaseWindow('w1')], NETEASE);
+  await manual.connection.refresh();
+  manual.connection.select('a');
+  manual.connection.select('w1');
+  manual.connection.setGlobalMediaKeys(true);
+  manual.set({ sources: [source('a')] });
+  await manual.connection.refresh();
+  assert.equal(manual.connection.selected, undefined);
+  manual.set({ sources: [source('a'), neteaseWindow('w1')] });
+  await manual.connection.refresh();
+  assert.equal(manual.connection.selected.id, 'w1');
+  assert.equal(manual.connection.allowGlobalMediaKeys, false, 'every new connection asks for the global media keys again');
+  assert.equal(await manual.connection.control('next'), false);
+  assert.equal(calls.length + manual.calls.length, 0, 'nothing was sent to any player on the way');
+});
+
+test('a reading that fails does not connect the default; the surviving default link recovers', async () => {
+  const { connection, set } = fixture([netease('n1')], NETEASE);
+  set(new Error('snapshot unavailable'));
+  await connection.refresh();
+  assert.equal(connection.selectedId, null);
+  assert.equal(connection.awaitsPreferred, true);
+  set({ sources: [netease('n1')] });
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'n1');
+  set(new Error('snapshot unavailable'));
+  await connection.refresh();
+  assert.equal(connection.selectedId, 'n1');
+  assert.equal(connection.selected, undefined);
+  assert.equal(connection.awaitsPreferred, false, 'an unreadable snapshot is not a disappearance');
+  assert.match(mediaConnectionLabel(connection), /正在重试/);
+  set({ sources: [netease('n1')] });
+  await connection.refresh();
+  assert.equal(connection.selected.id, 'n1');
 });
 
 test('global media keys require opt-in for the selected NetEase session and reset on reconnect', async () => {
@@ -268,7 +409,7 @@ test('queue settings: display is opt-in, song switching names the debug port and
   assert.match(shown, /127\.0\.0\.1:9233/);
   assert.match(shown, /data-debug-restart hidden/, 'no restart button while the port answers');
   const absent = queueSettingMarkup(netease, true, '', closed);
-  assert.match(absent, /data-debug-restart ><button data-action="netease-restart-debug">/);
+  assert.match(absent, /data-debug-restart ><button id="netease-restart-debug" data-action="netease-restart-debug">/);
   assert.match(absent, /&lt;none&gt;/);
   assert.match(queueSettingMarkup(netease, true, '', unprobed), /data-debug-restart hidden/, 'not before the port was actually asked');
   assert.match(queueSettingMarkup(netease, true, '', { enabled: false, available: false, status: '', restart: false }), /id="netease-control" ><\/label>.*data-debug-restart hidden/s);
@@ -411,4 +552,162 @@ test('the state script reads the position from the progress slider and dispatche
   assert.equal(read(slider(component(27), null), { loadingSeekDuration: 50 }).position, 50, 'a pending seek shows its target');
   assert.equal(read(slider(component(27), null), { loadingSeekDuration: 15, freeTrialInfo: { start: 60, end: 90 } }).position, 75, 'on the full-song scale for a trial clip');
   assert.deepEqual(state(() => null, page(null)), { store: false });
+});
+
+// Playlist columns. Every playlist and song here is made up for the check.
+const laneTrack = (id, extra = {}) => ({ id: String(id), title: `Song ${id}`, artist: 'Singer', album: 'Record', albumId: '1', duration: 100, ...extra });
+const laneList = (id, name, tracks, extra = {}) => ({ id: String(id), name, trackCount: tracks.length, liked: false, complete: true, truncated: false, tracks, ...extra });
+const lanePlaylists = () => [
+  laneList(1, 'Alpha', [laneTrack(11), laneTrack(12)], { liked: true }),
+  laneList(2, 'Beta', [laneTrack(21), laneTrack(22), laneTrack(23)]),
+  laneList(3, 'Never opened', [], { trackCount: 20, complete: false }),
+  laneList(4, 'Gamma', [laneTrack(22), laneTrack(41)], { truncated: true }),
+];
+const laneShape = lanes => lanes.map(lane => [lane.id, lane.name, lane.live, lane.tracks.map(track => track.id).join()]);
+
+test('playlist columns: one per playlist with songs; the playlist the queue came from shows the queue itself', async () => {
+  const { queueLanes, QUEUE_LANE } = await import('../src/external-queue.ts');
+  const queue = { tracks: [laneTrack(23), laneTrack(21), laneTrack(99)], truncated: false, source: { id: '2', name: 'Beta' } };
+  const lanes = queueLanes(queue, lanePlaylists());
+  // NetEase's order; the playlist with no songs on this PC is left out; Beta is the queue, in queue order.
+  assert.deepEqual(laneShape(lanes), [['1', 'Alpha', false, '11,12'], ['2', 'Beta', true, '23,21,99'], ['4', 'Gamma', false, '22,41']]);
+  assert.deepEqual(lanes.map(lane => [lane.liked, lane.truncated]), [[true, false], [false, false], [false, true]]);
+  // A queue from anywhere else (an album, a search, a playlist that is not the user's) is a column of its own in front.
+  const loose = queueLanes({ tracks: [laneTrack(90)], truncated: true }, lanePlaylists());
+  assert.deepEqual(laneShape(loose), [[QUEUE_LANE, '播放队列', true, '90'], ['1', 'Alpha', false, '11,12'], ['2', 'Beta', false, '21,22,23'], ['4', 'Gamma', false, '22,41']]);
+  assert.equal(loose[0].truncated, true, 'the queue column says when the queue was cut short');
+  assert.equal(queueLanes({ tracks: [laneTrack(90)], truncated: false, source: { id: '77', name: 'Somebody\'s list' } }, lanePlaylists())[0].name, 'Somebody\'s list');
+  // The queue's own playlist is a column even when its songs were never saved on this PC.
+  const fresh = queueLanes({ tracks: [laneTrack(5)], truncated: false, source: { id: '3', name: 'Never opened' } }, lanePlaylists());
+  assert.deepEqual(laneShape(fresh), [['1', 'Alpha', false, '11,12'], ['2', 'Beta', false, '21,22,23'], ['3', 'Never opened', true, '5'], ['4', 'Gamma', false, '22,41']]);
+  // Exactly one live column, and none without a queue.
+  for (const result of [lanes, loose, fresh]) assert.equal(result.filter(lane => lane.live).length, 1);
+  const idle = queueLanes({ tracks: [], truncated: false, source: { id: '2', name: 'Beta' } }, lanePlaylists());
+  assert.deepEqual(laneShape(idle), [['1', 'Alpha', false, '11,12'], ['2', 'Beta', false, '21,22,23'], ['4', 'Gamma', false, '22,41']]);
+  // Without playlists the queue is the single column it always was.
+  assert.deepEqual(laneShape(queueLanes(queue)), [[QUEUE_LANE, 'Beta', true, '23,21,99']]);
+  // A playlist without a name is still a column.
+  assert.deepEqual(queueLanes({ tracks: [], truncated: false }, [laneList(8, '', [laneTrack(1)]), laneList(9, '', [laneTrack(2)], { liked: true })]).map(lane => lane.name), ['未命名歌单', '我喜欢的音乐']);
+});
+
+test('playlist columns: the queue\'s cases keep the queue\'s keys, every other column has cases of its own', async () => {
+  const { queueLanes, laneLibrary, laneTrackKey, laneGenre, queueTrackKey, queueLibrary } = await import('../src/external-queue.ts');
+  const queue = { tracks: [laneTrack(23), laneTrack(22), laneTrack(23)], truncated: false, source: { id: '2', name: 'Beta' } };
+  const lanes = queueLanes(queue, lanePlaylists());
+  assert.equal(laneTrackKey(lanes[1], laneTrack(23)), queueTrackKey(laneTrack(23)), 'what follows and switches NetEase\'s song finds its cases in the queue\'s column');
+  assert.equal(laneTrackKey(lanes[2], laneTrack(22)), 'netease-list:4:22');
+  assert.equal(laneTrackKey(lanes[0]), '', 'no song, no case');
+  const library = laneLibrary(lanes);
+  assert.deepEqual(library.genres, [{ id: 'netease-lane:1', name: 'Alpha' }, { id: 'netease-lane:2', name: 'Beta' }, { id: 'netease-lane:4', name: 'Gamma' }]);
+  assert.deepEqual(library.genres.map(genre => genre.id), lanes.map(laneGenre));
+  // Song 22 is in the queue and in Gamma: one case in each column. Song 23 is twice in the queue: one case.
+  assert.deepEqual(library.albums.map(album => [album.id, album.genreId]), [
+    ['netease-list:1:11', 'netease-lane:1'], ['netease-list:1:12', 'netease-lane:1'],
+    ['netease-track:23', 'netease-lane:2'], ['netease-track:22', 'netease-lane:2'],
+    ['netease-list:4:22', 'netease-lane:4'], ['netease-list:4:41', 'netease-lane:4'],
+  ]);
+  // The live column is the queue's own shelf, case for case.
+  assert.deepEqual(library.albums.filter(album => album.genreId === 'netease-lane:2').map(album => album.id), queueLibrary(queue.tracks, 'x').albums.map(album => album.id));
+  // Nothing in any column is playable by Rhine itself, and no local path is invented.
+  for (const album of library.albums) {
+    assert.equal(album.folder, '');
+    assert.deepEqual(album.tracks.map(track => [track.browserPlayable, track.audioUrl, track.relativePath]), [[false, '', '']]);
+  }
+  assert.deepEqual(laneLibrary([]).albums, []);
+});
+
+test('playlist columns are on by default once the queue is shown, say what is read, and have no style setting', async () => {
+  const { queueSettingMarkup } = await import('../src/external-queue.ts');
+  const netease = source('n', { player: 'netease' });
+  const control = { enabled: true, available: true, status: 'ok', restart: false };
+  // The queue itself stays opt-in; its consent says that playlist columns come with it.
+  const hidden = queueSettingMarkup(netease, false, '', control);
+  assert.doesNotMatch(hidden, /netease-playlists/, 'offered only with the queue shown');
+  assert.match(hidden, /打开后默认同时按歌单分列（读取本机歌单，见下方），可单独关闭。/);
+  const on = queueSettingMarkup(netease, true, '', control);
+  assert.match(on, /id="netease-playlists" checked/, 'on unless switched off');
+  assert.match(on, /<span>按歌单分列<small>默认打开。/);
+  for (const said of [/webdb\.dat，只读/, /你创建的歌单（含“我喜欢的音乐”）/, /编号、名称、歌曲数与封面地址/, /编号、歌名、歌手、专辑、时长和封面地址/, /来源歌单编号与名称/, /列旁标出歌单名称/, /只供浏览、不会切歌/, /不读取收藏的歌单、账号、Cookie 或播放历史/, /Rhine 不保存歌单名称和歌曲列表/, /封面图片从网易云公开图片服务器加载，会留在界面缓存里/])
+    assert.match(on, said, 'the consent names what is read and what is not');
+  const off = queueSettingMarkup(netease, true, '<q>', control, { enabled: false, status: '<3 lists>' });
+  assert.match(off, /id="netease-playlists" ><\/label>/);
+  assert.match(off, /data-playlist-status role="status"><\/p>/, 'no status while it is off');
+  assert.match(queueSettingMarkup(netease, true, '', control, { enabled: true, status: '<3 lists>' }), /data-playlist-status role="status">&lt;3 lists&gt;<\/p>/);
+  // There is one way to show the names (written in the scene): no style to choose.
+  for (const markup of [on, off]) assert.doesNotMatch(markup, /netease-lane-labels|歌单名称的样式|文字标签|<select/);
+  // The preference: a new key, so the old default (off, saved with every preference) does not outlive the new one.
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  assert.match(app, /playlistColumns: true,/);
+  assert.match(app, /for \(const key of \["laneLabels", "laneNameStyle", "neteasePlaylists"\]\) delete \(preferences as Record<string, unknown>\)\[key\];/);
+  assert.doesNotMatch(app, /preferences\.neteasePlaylists|laneNameStyle =|netease-lane-labels/);
+  // The queue itself stays off until switched on.
+  assert.match(app, /neteaseQueue: false,/);
+});
+
+test('the playlist port asks the native side with the last stamp and nothing else, and only in the client', async () => {
+  const { nativePlaylistPort } = await import('../src/external-queue.ts');
+  const calls = [];
+  const before = globalThis.window;
+  globalThis.window = {};
+  try {
+    await assert.rejects(nativePlaylistPort.read('p1'), /需要 Windows 客户端/);
+    globalThis.window = { __TAURI__: { core: { invoke: async (command, args) => { calls.push([command, args]); return { status: 'missing' }; } } } };
+    assert.deepEqual(await nativePlaylistPort.read('p1'), { status: 'missing' });
+    assert.deepEqual(await nativePlaylistPort.read(), { status: 'missing' });
+  } finally { globalThis.window = before; }
+  assert.deepEqual(calls, [['netease_playlists', { stamp: 'p1' }], ['netease_playlists', { stamp: null }]]);
+  // The queue's source playlist is asked for only when the caller says playlist columns are on.
+  const { nativeQueuePort } = await import('../src/external-queue.ts');
+  calls.length = 0;
+  globalThis.window = { __TAURI__: { core: { invoke: async (command, args) => { calls.push([command, args]); return { status: 'missing' }; } } } };
+  try {
+    await nativeQueuePort.read('q1');
+    await nativeQueuePort.read('q1', false);
+    await nativeQueuePort.read('q1', true);
+  } finally { globalThis.window = before; }
+  assert.deepEqual(calls, [['netease_queue', { stamp: 'q1', source: false }], ['netease_queue', { stamp: 'q1', source: false }], ['netease_queue', { stamp: 'q1', source: true }]]);
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  assert.match(app, /nativeQueuePort\.read\(queueStamp, preferences\.playlistColumns\)/);
+  assert.equal((app.match(/nativeQueuePort\.read\(/g) || []).length, 1, 'the one place the queue is read');
+});
+
+test('the playlists status: what is waiting for NetEase, what the limits cut, and no stale error', async () => {
+  const { playlistSummary } = await import('../src/external-queue.ts');
+  const lists = [
+    laneList(1, 'Alpha', [laneTrack(11)]),
+    laneList(2, 'Never opened', [], { trackCount: 20, complete: false }),
+    laneList(3, 'Empty', [], { trackCount: 0 }),
+  ];
+  assert.equal(playlistSummary(lists, false), '已读取 1 个歌单；另有 1 个歌单在这台电脑上还没有歌曲数据，在网易云里打开或播放一次后出现。');
+  assert.equal(playlistSummary(lists.slice(0, 1), false), '已读取 1 个歌单。');
+  assert.match(playlistSummary([lists[1]], false), /^网易云在这台电脑上还没有保存任何歌单的歌曲。/);
+  assert.match(playlistSummary([], false), /^网易云在这台电脑上还没有保存任何歌单的歌曲。/);
+  // A playlist the reader cut to nothing is not waiting for NetEase: opening it there changes nothing.
+  const cut = [...lists, laneList(4, 'Beyond the limit', [], { trackCount: 500, truncated: true })];
+  const said = playlistSummary(cut, true);
+  assert.match(said, /^已读取 1 个歌单；另有 1 个歌单在这台电脑上还没有歌曲数据/, 'still one waiting, not two');
+  assert.match(said, /超过上限（200 个歌单、每个 3,000 首、合计 12,000 首）的部分没有显示。$/);
+  assert.match(playlistSummary([laneList(5, 'Long', [laneTrack(1)], { truncated: true })], false), /超过上限/, 'a playlist cut partway says so too');
+  assert.match(playlistSummary(lists, true), /超过上限/, 'more playlists than the limit');
+  assert.doesNotMatch(playlistSummary(lists, false), /超过上限/);
+  // The app rebuilds the status from the playlists it holds on every answer, "unchanged" included.
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  assert.match(app, /\/\/ Also for "unchanged": a read that failed before left its error in the status\.[\s\S]{0,120}if \(externalPlaylists\) playlistStatus = playlistSummary\(externalPlaylists, playlistsCut\);/);
+});
+
+test('following survives a rebuilt shelf: the playing song of the new queue, never a browse-only column by default', async () => {
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  const block = app.slice(app.indexOf('if (externalMode && records.length && records[selected]?.id !== previousId) {'), app.indexOf('// A column opens where it was left'));
+  assert.ok(block.length > 200, 'the block is in applyLibrary');
+  // The playing song is asked of the queue just read, not of the last poll's key.
+  assert.match(block, /queueTrackKey\(playingQueueTrack\(queue\.tracks, externalMedia\?\.selected, debugState\)\)/);
+  assert.doesNotMatch(block, /record\.id === queuePlaying/);
+  assert.match(block, /const liveColumn = archiveColumns\.findIndex\(\(_, column\) => laneAt\(columnFiles\(column\)\[0\]\)\?\.live\);/);
+  assert.match(block, /if \(playing >= 0\) selected = playing;\s*else if \(liveColumn >= 0\) selected = columnFiles\(liveColumn\)\[0\];/);
+  // Stepping into the queue's column never plays: following resumes whether or not the playing song has a case there.
+  assert.match(app, /const live = !!laneAt\(columnFiles\(lane\)\[0\]\)\?\.live;[\s\S]{0,260}if \(live\) queueFollowPaused = false;/);
+  // A column opens where it was left across rebuilds.
+  assert.match(app, /const kept = columnFiles\(lane\)\.find\(\(index\) => remembered\.has\(records\[index\]\.id\)\);\s*return kept === undefined \? \[\] : /, 'only cases that exist are carried over; an unvisited column has no entry');
+  // A column step ends the wheel's glide, so rows still owed cannot move (and play) in the queue's column.
+  assert.match(app, /if \(live\) queueFollowPaused = false;[\s\S]{0,160}wheelNavigation\.reset\(\);/);
 });

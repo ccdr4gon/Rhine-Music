@@ -63,6 +63,30 @@ export class MusicPresentation {
     this.beginExit();
   }
 
+  /**
+   * Replace the opened album's menu in place: its text leaves, `change` retargets the
+   * scene, and the other menu enters once the scene is ready. From a settled menu, or
+   * while its scene is still arriving (after a swap or an in-place switch).
+   */
+  swapMenu(change: () => void) {
+    if (this.phase !== "detail" && !(this.phase === "switching" && this.browseHidden)) return false;
+    const revision = ++this.revision;
+    this.phase = "switch-hiding";
+    this.ports.hideMenu(() => {
+      if (revision !== this.revision) return;
+      if (!this.wantsDetail || this.pendingSelection?.route === "archive") {
+        // Esc or a search arrived while the text was leaving.
+        this.returnToArchive();
+        return;
+      }
+      change();
+      this.phase = "switching";
+      if (this.pendingSelection) this.commitDetailSwitch();
+      else this.ports.prepareMenu();
+    });
+    return true;
+  }
+
   select(selection: AlbumSelection, openAfter = this.wantsDetail) {
     this.pendingSelection = selection;
     this.wantsDetail = openAfter;

@@ -4,13 +4,14 @@ import type { ArchiveRecord } from "./data";
 import { MUSIC_COVER, createAlbumPrintMaterial } from "./music-model.ts";
 import { CoverMipTexture, filterCoverShader } from "./cover-filtering.ts";
 import { COVER_PAINT_SIZE } from "./cover-paint.ts";
-import { CoverTiles, type CoverRequest } from "./cover-tiles.ts";
+import { CoverTiles, sizedCoverUrl, type CoverRequest } from "./cover-tiles.ts";
+import type { CoverTint } from "./cover-tint.ts";
 export { COVER_INSET, containCover, coverArtScale } from "./cover-paint.ts";
 
 // Print on the glass surface. No transmitting/frosted layer sits over the image.
 export const COVER_SIZE = MUSIC_COVER;
 
-type Tile = { key: string; scale: [number, number]; ready: boolean; refs: number; used: number; request?: number };
+type Tile = { key: string; scale: [number, number]; tint?: CoverTint; ready: boolean; refs: number; used: number; request?: number };
 
 /**
  * One atlas for the visible pool, regardless of total library size. Tiles are
@@ -23,6 +24,14 @@ type Tile = { key: string; scale: [number, number]; ready: boolean; refs: number
 export class CoverAtlas {
   readonly array: THREE.InstancedMesh;
   readonly selected: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
+  /**
+   * The colour each case's index square takes from its cover, per drawn instance like the
+   * print attributes (the shelf's hardware batch draws with it): linear RGB and a weight,
+   * which is zero while the case shows no art and the square keeps its own amber.
+   */
+  readonly caseTint: THREE.InstancedBufferAttribute;
+  /** The same for the lifted case: it follows the lifted print. */
+  readonly selectedTint = new THREE.Vector4(0, 0, 0, 0);
   private atlas: CoverMipTexture;
   private readonly selectedTexture: CoverMipTexture;
   private readonly tileRect: THREE.InstancedBufferAttribute;
@@ -35,6 +44,7 @@ export class CoverAtlas {
   // draw order (see order()), which the shelf repacks as cases enter and leave the view.
   private readonly slotRect: Float32Array;
   private readonly slotScale: Float32Array;
+  private readonly slotTint: Float32Array;
   private readonly shownSlots: Int32Array;
   private shownCount = -1;
   private slotsChanged = true;
@@ -69,6 +79,7 @@ export class CoverAtlas {
     this.slotTile = new Int32Array(count).fill(-1);
     this.slotRect = new Float32Array(count * 4);
     this.slotScale = new Float32Array(count * 2);
+    this.slotTint = new Float32Array(count * 4);
     this.shownSlots = new Int32Array(count);
     this.atlas = new CoverMipTexture(this.columns, this.rows, this.tileWidth, anisotropy);
     this.selectedTexture = new CoverMipTexture(1, 1, COVER_PAINT_SIZE, anisotropy);
@@ -83,6 +94,8 @@ export class CoverAtlas {
     this.tileRect.setUsage(THREE.DynamicDrawUsage);
     this.artScale = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2);
     this.artScale.setUsage(THREE.DynamicDrawUsage);
+    this.caseTint = new THREE.InstancedBufferAttribute(new Float32Array(count * 4), 4);
+    this.caseTint.setUsage(THREE.DynamicDrawUsage);
     geometry.setAttribute("coverTile", this.tileRect);
     geometry.setAttribute("coverScale", this.artScale);
     // Instances, selected art and snapshots use one matte diffuse material and
@@ -92,13 +105,16 @@ export class CoverAtlas {
       const compile = print.onBeforeCompile;
       print.onBeforeCompile = function (this: THREE.MeshLambertMaterial, shader, renderer) {
         compile.call(this, shader, renderer);
-        lighting?.shadePrint(shader);
+        lighting?.shadePrint(shader, this.userData.musicCard);
         filterCoverShader(shader, this.map as CoverMipTexture, instanced);
       };
       print.onBeforeRender = function (this: THREE.MeshLambertMaterial, renderer) {
         (this.map as CoverMipTexture).flush(renderer);
       };
-      print.customProgramCacheKey = () => `album-filtered-print-${instanced}-${Boolean(lighting)}-v4`;
+      print.customProgramCacheKey = () => `album-filtered-print-${instanced}-${Boolean(lighting)}-v7`;
+      // The lifted print's share of the song scene's large card; a copy made of this material
+      // (snapshot) gets its own through the clone. Shelf prints have none.
+      if (!instanced) print.userData.musicCard = { value: 0 };
       return print;
     };
     const material = makePrint(this.atlas, true);
@@ -124,7 +140,7 @@ export class CoverAtlas {
 
   /** Changes whenever any print's art or its slot assignment changes. */
   get revision() {
-    return CoverMipTexture.revision + this.tileRect.version + this.artScale.version;
+    return CoverMipTexture.revision + this.tileRect.version + this.artScale.version + this.caseTint.version;
   }
 
   /** Visual identity only: metadata refreshes replace records without changing their print. */
@@ -139,9 +155,11 @@ export class CoverAtlas {
   }
 
   private request(record: ArchiveRecord | undefined, size: number, priority = false) {
+    const full = record?.album?.coverUrl, url = sizedCoverUrl(full, size);
     const request: CoverRequest = {
       size,
-      url: record?.album?.coverUrl,
+      url,
+      fallbackUrl: url === full ? undefined : full,
       title: record?.title,
       external: record?.id.startsWith("external:"),
       priority,
@@ -194,6 +212,10 @@ export class CoverAtlas {
       this.tileOfKey.delete(this.tiles[index]!.key);
     }
     const tile: Tile = { key, scale: [0, 0], ready: false, refs: 0, used: ++this.clock };
+    // The lifted case of this album already shows its sharp print (at start-up it is
+    // selected before any slot shows it): the shelf takes that print's colour.
+    if (key === this.selectedKey && this.selectedRequest === undefined && this.selectedTint.w > 0)
+      tile.tint = [this.selectedTint.x, this.selectedTint.y, this.selectedTint.z];
     this.tiles[index] = tile;
     this.tileOfKey.set(key, index);
     const generation = this.generation;
@@ -203,6 +225,9 @@ export class CoverAtlas {
       if (!art || this.disposed || generation !== this.generation || this.tiles[index] !== tile) return;
       this.atlas.setTile(index, art.levels);
       tile.scale = art.scale;
+      // The sharp print of a lifted case can arrive first; its colour then stays, unless
+      // this paint found no art: a missing-cover print carries no colour.
+      tile.tint = art.tint && (tile.tint ?? art.tint);
       tile.ready = true;
       tile.request = undefined;
       for (let slot = 0; slot < this.slotTile.length; slot++) if (this.slotTile[slot] === index) this.writeSlot(slot);
@@ -235,6 +260,10 @@ export class CoverAtlas {
     // next atlas draw, and these attributes upload with that draw.
     this.slotScale[slot * 2] = tile?.ready ? tile.scale[0] : 0;
     this.slotScale[slot * 2 + 1] = tile?.ready ? tile.scale[1] : 0;
+    // The square takes its colour in the frame its cover appears.
+    const tint = tile?.ready ? tile.tint : undefined;
+    for (let k = 0; k < 3; k++) this.slotTint[slot * 4 + k] = tint ? tint[k] : 0;
+    this.slotTint[slot * 4 + 3] = tint ? 1 : 0;
     this.slotsChanged = true;
   }
 
@@ -248,16 +277,18 @@ export class CoverAtlas {
     for (let i = 0; i < count && !changed; i++) changed = this.shownSlots[i] !== slots[i];
     if (!changed) return;
     const rect = this.tileRect.array as Float32Array, scale = this.artScale.array as Float32Array;
+    const tint = this.caseTint.array as Float32Array;
     for (let i = 0; i < count; i++) {
       const slot = slots[i];
       this.shownSlots[i] = slot;
       for (let k = 0; k < 4; k++) rect[i * 4 + k] = this.slotRect[slot * 4 + k];
+      for (let k = 0; k < 4; k++) tint[i * 4 + k] = this.slotTint[slot * 4 + k];
       scale[i * 2] = this.slotScale[slot * 2];
       scale[i * 2 + 1] = this.slotScale[slot * 2 + 1];
     }
     this.shownCount = count;
     this.slotsChanged = false;
-    for (const attribute of [this.tileRect, this.artScale]) {
+    for (const attribute of [this.tileRect, this.artScale, this.caseTint]) {
       attribute.clearUpdateRanges();
       attribute.addUpdateRange(0, count * attribute.itemSize);
       attribute.needsUpdate = true;
@@ -267,6 +298,27 @@ export class CoverAtlas {
   private showInterimSelection(index: number) {
     this.selectedTexture.setLevelsFrom(this.atlas, index);
     this.selectedTexture.coverScale.value.set(...this.tiles[index]!.scale);
+    this.writeTint(this.selectedTint, this.tiles[index]!.tint);
+  }
+
+  private writeTint(target: THREE.Vector4, tint: CoverTint | undefined) {
+    if (tint) target.set(tint[0], tint[1], tint[2], 1);
+    else target.set(0, 0, 0, 0);
+  }
+
+  /**
+   * The colour that goes with a sharp print. The shelf tile of the same album decides when it
+   * is painted, so a case keeps one colour between the shelf and the lifted position (the two
+   * paint sizes differ by about 1%); a tile still waiting takes this print's colour. A print
+   * painted without art (a failed load) has no colour, whatever the other size found.
+   */
+  private tintWith(key: string | undefined, art: { tint?: CoverTint }) {
+    if (!art.tint) return undefined;
+    const index = key === undefined ? undefined : this.tileOfKey.get(key);
+    const tile = index === undefined ? undefined : this.tiles[index];
+    if (!tile) return art.tint;
+    if (!tile.ready) tile.tint ??= art.tint;
+    return tile.tint ?? art.tint;
   }
 
   async select(record: ArchiveRecord | undefined) {
@@ -277,7 +329,10 @@ export class CoverAtlas {
     // Show the shelf's tile at once (coarser levels only), then the sharp print.
     const index = this.tileOfKey.get(key);
     if (index !== undefined && this.tiles[index]!.ready) this.showInterimSelection(index);
-    else this.selectedTexture.coverScale.value.set(0, 0);
+    else {
+      this.selectedTexture.coverScale.value.set(0, 0);
+      this.selectedTint.set(0, 0, 0, 0);
+    }
     const generation = this.generation;
     const { id, tile } = this.request(record, COVER_PAINT_SIZE, true);
     this.selectedRequest = id;
@@ -286,9 +341,11 @@ export class CoverAtlas {
     this.selectedRequest = undefined;
     this.selectedTexture.setTile(0, art.levels);
     this.selectedTexture.coverScale.value.set(...art.scale);
+    this.writeTint(this.selectedTint, this.tintWith(key, art));
   }
 
-  snapshot(mesh: THREE.Mesh) {
+  /** `tint` receives the copy's index-square colour, which stays with the print it shows. */
+  snapshot(mesh: THREE.Mesh, tint?: THREE.Vector4) {
     // The returning copy keeps the print it already shows: copy the prepared
     // levels instead of repainting and rebuilding a 1024 px chain.
     const texture = new CoverMipTexture(1, 1, COVER_PAINT_SIZE, this.selectedTexture.coverAnisotropy.value);
@@ -299,13 +356,16 @@ export class CoverAtlas {
     mesh.material.customProgramCacheKey = this.selected.material.customProgramCacheKey;
     (mesh.material as THREE.MeshLambertMaterial).map = texture;
     mesh.userData.coverDisposed = false;
+    tint?.copy(this.selectedTint);
     if (this.selectedRequest === undefined) return;
     // The sharp print was still being prepared: finish it for the copy too.
+    const key = this.selectedKey;
     const { tile } = this.request(this.selectedRecord, COVER_PAINT_SIZE, true);
     void tile.then((art) => {
       if (!art || mesh.userData.coverDisposed || this.disposed) return;
       texture.setTile(0, art.levels);
       texture.coverScale.value.set(...art.scale);
+      if (tint) this.writeTint(tint, this.tintWith(key, art));
     });
   }
 
@@ -323,6 +383,10 @@ export class CoverAtlas {
     (this.artScale.array as Float32Array).fill(0);
     this.artScale.needsUpdate = true;
     this.slotScale.fill(0);
+    (this.caseTint.array as Float32Array).fill(0);
+    this.caseTint.needsUpdate = true;
+    this.slotTint.fill(0);
+    this.selectedTint.set(0, 0, 0, 0);
     this.slotsChanged = true;
     this.selectedRecord = this.selectedKey = this.selectedRequest = undefined;
     this.selectedTexture.coverScale.value.set(0, 0);

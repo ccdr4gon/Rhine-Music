@@ -15,8 +15,8 @@ commands.allow = ["media_snapshot", "media_control"]
 
 [[permission]]
 identifier = "allow-netease-queue"
-description = "Read NetEase Cloud Music's saved play queue (display fields only) after the user switches it on."
-commands.allow = ["netease_queue"]
+description = "After the user switches the queue on: read NetEase Cloud Music's saved play queue (display fields). After the user also switches playlist columns on: the id and name of the queue's source playlist and, read-only from its local database, the playlists the user created with their saved song lists (display fields only)."
+commands.allow = ["netease_queue", "netease_playlists"]
 
 [[permission]]
 identifier = "allow-netease-debug"
