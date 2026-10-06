@@ -1,6 +1,9 @@
 import { createRollingText } from "@kitlangton/rolling-number";
 
-/** Keep one interruptible archive-style reel while the outer playback slot grows. */
+/**
+ * Keep one interruptible archive-style reel while the outer playback slot grows. The slot stays
+ * aria-hidden: the page gives assistive technology the words once (music-app.ts #now-status).
+ */
 export function setupTransportTitle(slot: HTMLElement, label: HTMLElement) {
   const measure = document.createElement("span");
   measure.className = "transport-title-measure";
@@ -29,7 +32,8 @@ export function setupTransportTitle(slot: HTMLElement, label: HTMLElement) {
     const nextFont = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
     canvas.font = nextFont;
     const spacing = Number.parseFloat(style.letterSpacing) || 0;
-    const available = label.getBoundingClientRect().width;
+    // The label's right padding is room for the reel's unkerned characters, not for text.
+    const available = label.getBoundingClientRect().width - (Number.parseFloat(style.paddingRight) || 0);
     let fitted = title;
     if (naturalWidth > available + 0.5) {
       const glyphs = [...title];
@@ -74,10 +78,9 @@ export function setupTransportTitle(slot: HTMLElement, label: HTMLElement) {
       const changed = shown && next !== title;
       visible = shown;
       slot.classList.toggle("visible", shown);
-      slot.setAttribute("aria-hidden", String(!shown));
       if (changed) {
         title = next;
-        // Native text measures the full name and supplies the accessible label.
+        // Native text measures the full name (and the tooltip shows it).
         measure.textContent = title;
         slot.title = title;
         reconcile(wasVisible);

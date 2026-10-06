@@ -146,6 +146,9 @@ export function setupMusicTicks(host: HTMLElement) {
       if (slots.some((button) => button === focused && button.disabled))
         (activeButton || slots.find((button) => !button.disabled))?.focus({ preventScroll: true });
     },
+    // The earlier navigation (?nav=previous) has no playing dot and no play ripple.
+    setPlaying(_index: number | undefined) {},
+    ripple() {},
     destroy() {
       disposed = true;
       resize.disconnect();

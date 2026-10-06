@@ -1,7 +1,7 @@
 //! Jump to an exact song of NetEase Cloud Music's play queue through the Chrome DevTools
 //! port NetEase serves when it is started with `--remote-debugging-port=9233`. Used while
-//! the user shows NetEase's queue and has not turned song switching off (it is on by
-//! default). Connections go to 127.0.0.1 only. The scripts run in
+//! the user shows NetEase's queue and has not turned off playing the selected song with the
+//! play button (it is on by default). Connections go to 127.0.0.1 only. The scripts run in
 //! NetEase's player page read, from its Redux store, the current song id, playback state,
 //! play mode, duration, trial-clip range, pending seek target, whether the song is loaded
 //! (play-session id, first-load flag, launch-restore record) and the queue entries' song

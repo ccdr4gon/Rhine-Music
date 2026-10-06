@@ -2,22 +2,69 @@
 @property --ink {
   syntax: "<color>";
   inherits: true;
-  initial-value: #232722;
+  initial-value: #1e201c;
 }
 @property --muted {
   syntax: "<color>";
   inherits: true;
-  initial-value: #74786f;
+  initial-value: #5c6058;
 }
 @property --line {
   syntax: "<color>";
   inherits: true;
-  initial-value: rgba(42, 49, 42, 0.18);
+  initial-value: rgba(30, 32, 28, 0.18);
+}
+@property --rule {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(30, 32, 28, 0.62);
 }
 @property --accent {
   syntax: "<color>";
   inherits: true;
-  initial-value: #b56834;
+  initial-value: #e5701d;
+}
+/* --signal, --playing, --paused and --hl change at once (not registered, not interpolated). */
+@property --tag-bg {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #171814;
+}
+@property --tag-ink {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #f2f0eb;
+}
+@property --glass-fill {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.34);
+}
+@property --glass-edge {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.92);
+}
+@property --glass-rim {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.3);
+}
+@property --strip-bg {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.92);
+}
+/* The selected playlist row's glow: the lifted case's lit spine (design notes, 3D-notes.md). */
+@property --spine-glow {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(244, 240, 230, 0.96);
+}
+@property --spine-glow-mid {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(244, 240, 230, 0.44);
 }
 @property --surface {
   syntax: "<color>";
@@ -39,11 +86,6 @@
   inherits: true;
   initial-value: rgba(236, 233, 225, 0.72);
 }
-@property --music-status-ink {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #74786f;
-}
 @property --music-night-mix {
   syntax: "<number>";
   inherits: true;
@@ -56,7 +98,6 @@
 }
 
 .music-app {
-  --music-status-ink: #74786f;
   --music-night-mix: 0;
   --music-side-veil-opacity: 1;
 }
@@ -65,25 +106,30 @@
   --music-side-veil-opacity: 0;
 }
 .music-app[data-theme="night"] {
-  --music-status-ink: #e9eef2;
   --music-night-mix: 1;
 }
-.music-app[data-theme="dusk"] {
-  --music-status-ink: #5f7280;
-}
 
-/* Enabled after the saved theme has painted; rapid reversals resume in place. */
+/* Enabled after the saved theme has painted; rapid reversals resume in place. Starts on the
+   frame the 3D theme does (setTheme), over the same 650 ms (theme-transition.ts). */
 .music-app.theme-motion-ready {
   transition-property:
     --ink,
     --muted,
     --line,
+    --rule,
     --accent,
+    --tag-bg,
+    --tag-ink,
+    --glass-fill,
+    --glass-edge,
+    --glass-rim,
+    --strip-bg,
+    --spine-glow,
+    --spine-glow-mid,
     --surface,
     --panel,
     --page-bg,
     --veil,
-    --music-status-ink,
     --music-night-mix,
     --music-side-veil-opacity;
   transition-duration: 650ms;
@@ -130,11 +176,6 @@
     );
   opacity: var(--music-night-mix);
 }
-.music-app .library-status,
-.music-app[data-theme="night"] .library-status {
-  color: var(--music-status-ink);
-}
-
 .music-app.reduce-motion {
   transition: none;
 }

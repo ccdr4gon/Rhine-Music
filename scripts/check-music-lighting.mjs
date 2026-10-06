@@ -70,7 +70,8 @@ assert.ok(printShader.fragmentShader.includes('outgoingLight *= mix(musicPrintAm
 // band along its row and a rim on the raised case. Offsets are (lane, row) from the
 // light column. The rows on the shelf (instances) always rest; only the lifted case and
 // returning copies (plain meshes) are raised, by their height from the column.
-const browsingLift = 0.9;
+// The shelf's lift as the scene has it (scene.ts needs a browser to load).
+const browsingLift = Number(/export const MUSIC_PREVIEW_LIFT = ([\d.]+);/.exec(fs.readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8'))[1]);
 for (const rows of [0, -1, -3, -8]) assert.equal(selectionPool(0, rows * ROW_SPACING), 0, 'The selected row and the rows behind it stay out of the shadow pool');
 assert.equal(selectionRaised(-browsingLift), 0, 'A copy back at shelf level, the browsing lift below the selection, no longer counts as raised');
 assert.equal(selectionRaised(0), 1, 'A case as high as the lit selection counts as raised');

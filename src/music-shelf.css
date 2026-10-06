@@ -1,0 +1,770 @@
+/* The shelf (scene 1) after Claude Design's "Overlay Frame" (direction A, layout "stack",
+   2026-10-05): the right column (tag, title, artist, the two facts, the play ring with its note
+   and the two links, the playlist list), the counter and ruler at the bottom left, the key hints
+   and the selection bracket on the lifted case. Sizes are the design's at 1440 x 900; the
+   layouts (data-layout, viewport-layout.ts) place them, width queries only size them. */
+
+/* ---- the right column ------------------------------------------------------------------- */
+.music-app .album-callout {
+  --drum-row: 28px;
+  position: absolute;
+  z-index: 3;
+  /* Left 872 and right 40 at 1440 (528 wide); narrower windows keep 60.5 % for the scene. */
+  left: max(60.5%, calc(100% - 568px));
+  right: 40px;
+  top: max(calc(var(--chrome-bottom, 70px) + 40px), 21.8vh);
+  bottom: var(--callout-bottom, 158px);
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  text-shadow: none;
+}
+.music-app .album-callout > * {
+  flex-shrink: 0;
+}
+
+/* The tag: QUEUE 012 (PL 03 · 012 in a playlist column, ALBUM 001 locally), then / 034. */
+.music-app .selection-tag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.music-app .selection-tag {
+  display: inline-block;
+  padding: 4px 7px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+}
+.music-app .selection-code-of {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The title: 38 px / 1.14, balanced, 496 wide; long titles shrink to 28 px, then end in an
+   ellipsis on the second line (music-title.ts). The probe shares these rules. */
+.music-app .album-callout h1 {
+  font-size: var(--album-title-size, 38px);
+  line-height: 1.14;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+.music-app #selection-title {
+  margin: 12px 0 0;
+  max-width: 496px;
+}
+.music-app .album-callout .selection-artist {
+  margin: 12px 0 0;
+  font-size: 16px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+/* The two facts: 专辑 + album (ellipsis, at most 380 wide) and 曲目数 + N 首. */
+.music-app .selection-meta {
+  display: flex;
+  gap: 28px;
+  margin-top: 12px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.music-app .selection-fact {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  max-width: 380px;
+}
+.music-app .selection-fact-count {
+  flex: none;
+}
+.music-app .selection-fact small {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.music-app .selection-fact-value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.music-app .selection-fact-value .music-inline-plain {
+  white-space: nowrap !important;
+}
+
+/* The actions: the play ring (42 px) and its note on the left, the two quiet links on the right. */
+.music-app .shelf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: 20px;
+  row-gap: 8px;
+  min-height: 44px;
+  margin-top: 28px;
+}
+.music-app .shelf-play {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.music-app .play-ring-big {
+  width: 42px;
+  height: 42px;
+  transition: opacity 120ms ease;
+}
+.music-app .play-ring-big:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .play-ring-big .transport-play::before {
+  margin-left: 4px;
+  border-left-width: 11px;
+  border-top-width: 6.5px;
+  border-bottom-width: 6.5px;
+}
+.music-app .play-ring-big .transport-pause i {
+  width: 2.5px;
+  height: 12px;
+}
+.music-app .shelf-play-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.music-app .shelf-play-note > i {
+  display: none;
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state);
+}
+.music-app .shelf-play-note[data-dot="true"] > i {
+  display: block;
+}
+.music-app .shelf-links {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  margin-left: auto;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.music-app .shelf-links button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.music-app .shelf-links button:hover {
+  opacity: 0.65;
+}
+.music-app .link-chevron {
+  display: block;
+  flex: none;
+  /* The design's 5 px square plus its 1.5 px border (the page is border-box). */
+  width: 6.5px;
+  height: 6.5px;
+  border-top: 1.5px solid currentColor;
+  border-right: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  opacity: 0.55;
+}
+/* The right column's controls keep the design's ink: a thin ink ring for the keyboard. */
+.music-app .album-callout button:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 4px;
+}
+.music-app .album-callout .drum-row:focus-visible {
+  outline-offset: -1px;
+}
+
+/* ---- the playlist list (the drum) --------------------------------------------------------- */
+.music-app .album-callout > .playlist-drum {
+  /* It takes the room left above the column's bottom; music-app.ts fits odd rows into it. */
+  flex: 1 1 0;
+  min-height: calc(24px + 8px + var(--drum-row));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 36px;
+  min-width: 0;
+}
+.music-app .drum-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 24px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.music-app .drum-steps {
+  display: flex;
+  gap: 2px;
+  color: var(--ink);
+}
+.music-app .drum-step {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ink);
+}
+.music-app .drum-step:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .chevron {
+  display: block;
+  /* 7 px plus the 1.5 px border, as the design's content-box chevrons. */
+  width: 8.5px;
+  height: 8.5px;
+  border: 0 solid currentColor;
+}
+.music-app .chevron-left {
+  border-left-width: 1.5px;
+  border-bottom-width: 1.5px;
+  transform: translateX(2px) rotate(45deg);
+}
+.music-app .chevron-right {
+  border-top-width: 1.5px;
+  border-right-width: 1.5px;
+  transform: translateX(-2px) rotate(45deg);
+}
+.music-app .chevron-up {
+  border-left-width: 1.5px;
+  border-top-width: 1.5px;
+  transform: translateY(2px) rotate(45deg);
+}
+.music-app .chevron-down {
+  border-right-width: 1.5px;
+  border-bottom-width: 1.5px;
+  transform: translateY(-2px) rotate(45deg);
+}
+.music-app .drum-window {
+  /* The rows above and below the middle fade out: about 1.8 rows each at seven rows. */
+  --drum-fade: calc(var(--drum-row) * min(1.8, (var(--drum-rows, 1) - 1) * 0.3));
+  position: relative;
+  height: calc(var(--drum-rows, 1) * var(--drum-row));
+  overflow: hidden;
+  cursor: ns-resize;
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 var(--drum-fade), #000 calc(100% - var(--drum-fade)), transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 var(--drum-fade), #000 calc(100% - var(--drum-fade)), transparent);
+}
+.music-app .drum-track {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+}
+.music-app .drum-row {
+  position: relative;
+  flex: none;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 6px 28px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: var(--drum-row);
+  padding: 0 10px;
+  border-radius: 2px;
+  text-align: left;
+  color: var(--ink);
+}
+.music-app .drum-row[data-blank="true"] {
+  visibility: hidden;
+}
+.music-app .drum-n {
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.music-app .drum-name {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 400;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.music-app .drum-dot {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state);
+  visibility: hidden;
+}
+/* inherit, not visible: the hidden shelf (visibility: hidden while the details show) hides it too. */
+.music-app .drum-row[data-live="true"] .drum-dot {
+  visibility: inherit;
+}
+.music-app .drum-count {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.music-app .drum-row:not([aria-current="true"]):hover .drum-name {
+  opacity: 0.65;
+}
+/* The selected column: bold, on a soft glow in the colour of the lifted case's lit spine. */
+.music-app .drum-row[aria-current="true"] {
+  cursor: default;
+  background: radial-gradient(ellipse 42% 64% at 30% 50%, var(--spine-glow), var(--spine-glow-mid) 48%, transparent 100%);
+}
+.music-app .drum-row[aria-current="true"] .drum-n {
+  font-weight: 700;
+  color: var(--ink);
+}
+.music-app .drum-row[aria-current="true"] .drum-name {
+  font-weight: 600;
+}
+
+/* ---- the counter and the ruler, bottom left ---------------------------------------------- */
+.music-app .music-navigation {
+  position: absolute;
+  z-index: 4;
+  left: 40px;
+  bottom: 74px;
+  display: flex;
+  align-items: flex-end;
+  gap: 36px;
+}
+.music-app .music-counter {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.music-app .music-counter-label {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+}
+.music-app .music-counter > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.music-app .music-counter b {
+  font-size: 44px;
+  line-height: 0.9;
+  font-weight: 300;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.music-app .music-counter > div > span {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.music-app .music-counter i {
+  font-style: normal;
+}
+.music-app .album-stepper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 44px;
+}
+.music-app .album-stepper > button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--ink);
+}
+.music-app .album-stepper > button:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .ruler-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* ---- the key hints: centred, bottom 22, the shelf only ----------------------------------- */
+.music-app .music-keyhint {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  bottom: 22px;
+  display: flex;
+  justify-content: center;
+  gap: 26px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.music-app .music-keyhint .hint {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.music-app .music-keyhint kbd {
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+}
+.music-app .music-keyhint .hint-play {
+  display: block;
+  align-self: center;
+  /* The design leaves an empty word between SPACE and the triangle: two gaps. */
+  margin-left: 6px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid var(--muted);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+}
+
+/* ---- the selection bracket: four squares on the lifted case's box ------------------------ */
+.music-app .selection-bracket {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+}
+.music-app .selection-bracket[data-shown="false"] {
+  visibility: hidden;
+}
+.music-app .selection-bracket i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 6px;
+  height: 6px;
+  background: var(--ink);
+}
+.music-app .selection-bracket i:nth-child(1) {
+  transform: translate3d(calc(var(--bl, 0px) - 3px), calc(var(--bt, 0px) - 3px), 0);
+}
+.music-app .selection-bracket i:nth-child(2) {
+  transform: translate3d(calc(var(--br, 0px) - 3px), calc(var(--bt, 0px) - 3px), 0);
+}
+.music-app .selection-bracket i:nth-child(3) {
+  transform: translate3d(calc(var(--bl, 0px) - 3px), calc(var(--bb, 0px) - 3px), 0);
+}
+.music-app .selection-bracket i:nth-child(4) {
+  transform: translate3d(calc(var(--br, 0px) - 3px), calc(var(--bb, 0px) - 3px), 0);
+}
+
+/* ---- the playlists' names on the shelf (lane-names.ts): flat text over the picture ------- */
+/* Above the canvas, under everything else; the pointer passes through. Each name is laid out
+   at one size and placed by the scene (translate, rotate, scale, opacity) at the slot of its
+   role. Text only: no background, border, outline or shadow box; a thin soft rim in the ground
+   colour (1 and 2.5 screen pixels whatever the name's scale: --lane-unscale is 1 / scale) keeps
+   it readable on lit and shaded cases. The sizes are the scene's former writing: the number
+   34 / 54 of the name, 20 / 54 of it apart. */
+.music-app .lane-names {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.music-app .lane-name {
+  --lane-rim: color-mix(in srgb, var(--page-bg) 70%, transparent);
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  white-space: nowrap;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: normal;
+  color: var(--ink);
+  text-shadow:
+    0 0 calc(1px * var(--lane-unscale, 1)) var(--lane-rim),
+    0 0 calc(2.5px * var(--lane-unscale, 1)) var(--lane-rim);
+}
+.music-app .lane-name-index {
+  margin-right: calc(20em / 34);
+  font-size: calc(34em / 54);
+  font-weight: 400;
+  color: var(--muted);
+}
+/* The playing queue's column: its number in the playback colour (as the list's dot). */
+.music-app .lane-name[data-live="true"] .lane-name-index {
+  color: var(--state);
+}
+
+/* ---- short windows: tighter steps between the groups -------------------------------------- */
+@media (max-height: 650px) {
+  .music-app:not([data-layout="portrait"]) .shelf-actions {
+    margin-top: 16px;
+  }
+  .music-app:not([data-layout="portrait"]) .album-callout > .playlist-drum {
+    margin-top: 18px;
+  }
+}
+
+/* ---- large windows: the earlier enlargement, applied to the design's proportions ---------- */
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] .album-callout {
+    --drum-row: 33px;
+    left: max(60.5%, calc(100% - 680px));
+    right: 60px;
+  }
+  .music-app[data-layout="desktop"] .album-callout h1 {
+    font-size: var(--album-title-size, 44px);
+  }
+  .music-app[data-layout="desktop"] #selection-title {
+    margin-top: 14px;
+    max-width: 580px;
+  }
+  .music-app[data-layout="desktop"] .selection-tag-row {
+    gap: 12px;
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .selection-tag {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .music-app[data-layout="desktop"] .album-callout .selection-artist {
+    margin-top: 14px;
+    font-size: 19px;
+  }
+  .music-app[data-layout="desktop"] .selection-meta {
+    gap: 32px;
+    margin-top: 14px;
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .selection-fact {
+    max-width: 440px;
+  }
+  .music-app[data-layout="desktop"] .selection-fact small {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .shelf-actions {
+    min-height: 52px;
+    margin-top: 32px;
+  }
+  .music-app[data-layout="desktop"] .play-ring-big {
+    width: 49px;
+    height: 49px;
+  }
+  .music-app[data-layout="desktop"] .shelf-play {
+    gap: 16px;
+  }
+  .music-app[data-layout="desktop"] .shelf-play-note {
+    font-size: 13px;
+  }
+  .music-app[data-layout="desktop"] .shelf-links {
+    gap: 38px;
+    font-size: 15px;
+  }
+  .music-app[data-layout="desktop"] .shelf-links button {
+    gap: 10px;
+    height: 36px;
+  }
+  .music-app[data-layout="desktop"] .album-callout > .playlist-drum {
+    min-height: calc(28px + 9px + var(--drum-row));
+    gap: 9px;
+    margin-top: 42px;
+  }
+  .music-app[data-layout="desktop"] .drum-head {
+    height: 28px;
+    font-size: 11px;
+  }
+  .music-app[data-layout="desktop"] .drum-step {
+    width: 28px;
+    height: 28px;
+  }
+  .music-app[data-layout="desktop"] .drum-row {
+    grid-template-columns: 26px minmax(0, 1fr) 7px 33px;
+    gap: 9px;
+    padding: 0 12px;
+  }
+  .music-app[data-layout="desktop"] .drum-n {
+    font-size: 11px;
+  }
+  .music-app[data-layout="desktop"] .drum-name {
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .drum-count {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .drum-dot {
+    width: 6px;
+    height: 6px;
+  }
+  .music-app[data-layout="desktop"] .music-navigation {
+    left: 60px;
+    bottom: 88px;
+    gap: 42px;
+  }
+  .music-app[data-layout="desktop"] .music-counter-label {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .music-counter b {
+    font-size: 52px;
+  }
+  .music-app[data-layout="desktop"] .music-counter > div > span {
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .album-stepper {
+    gap: 19px;
+    height: 52px;
+  }
+  .music-app[data-layout="desktop"] .album-stepper > button {
+    width: 30px;
+    height: 30px;
+  }
+  .music-app[data-layout="desktop"] #album-ticks.music-ruler {
+    --tick-height: 35px;
+    --tick-full: 33px;
+    --tick-long: 16px;
+    --tick-short: 11px;
+    --tick-hover: 21px;
+    --tick-pitch: 9px;
+  }
+  .music-app[data-layout="desktop"] .ruler-box {
+    --ruler-ripple: 140px;
+  }
+  .music-app[data-layout="desktop"] .music-keyhint {
+    bottom: 28px;
+    gap: 30px;
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .music-keyhint kbd {
+    font-size: 11px;
+  }
+}
+
+/* ---- compact: the header's 25 px margins; the column keeps 57 % for the scene ------------- */
+.music-app[data-layout="compact"] .album-callout {
+  left: max(57%, calc(100% - 553px));
+  right: 25px;
+  top: max(calc(var(--chrome-bottom, 56px) + 32px), 21.8vh);
+}
+.music-app[data-layout="compact"] .album-callout h1 {
+  font-size: var(--album-title-size, 28px);
+}
+.music-app[data-layout="compact"] #selection-title,
+.music-app[data-layout="compact"] .album-callout .selection-artist,
+.music-app[data-layout="compact"] .selection-meta {
+  margin-top: 10px;
+}
+.music-app[data-layout="compact"] .album-callout .selection-artist {
+  font-size: 14px;
+}
+.music-app[data-layout="compact"] .selection-meta {
+  gap: 20px;
+  font-size: 11px;
+}
+.music-app[data-layout="compact"] .shelf-actions {
+  margin-top: 20px;
+}
+.music-app[data-layout="compact"] .shelf-links {
+  gap: 24px;
+}
+.music-app[data-layout="compact"] .album-callout > .playlist-drum {
+  margin-top: 24px;
+}
+.music-app[data-layout="compact"] .music-navigation {
+  left: 25px;
+  bottom: 52px;
+  gap: 28px;
+}
+.music-app[data-layout="compact"] .music-counter b {
+  font-size: 38px;
+}
+.music-app[data-layout="compact"] .music-keyhint {
+  bottom: 18px;
+  gap: 22px;
+}
+
+/* ---- portrait: the text below the scene, the list as its header and the selected row ------ */
+.music-app[data-layout="portrait"] .album-callout h1 {
+  font-size: var(--album-title-size, 28px);
+}
+.music-app[data-layout="portrait"] #selection-title,
+.music-app[data-layout="portrait"] .album-callout .selection-artist,
+.music-app[data-layout="portrait"] .selection-meta {
+  margin-top: 9px;
+}
+.music-app[data-layout="portrait"] .album-callout .selection-artist {
+  font-size: 14px;
+}
+.music-app[data-layout="portrait"] .selection-meta {
+  gap: 20px;
+  font-size: 11px;
+}
+.music-app[data-layout="portrait"] .shelf-actions {
+  margin-top: 16px;
+}
+.music-app[data-layout="portrait"] .shelf-links {
+  gap: 24px;
+}
+.music-app[data-layout="portrait"] .album-callout > .playlist-drum {
+  margin-top: 16px;
+}
+.music-app[data-layout="portrait"] .music-navigation {
+  left: 20px;
+  bottom: 28px;
+  gap: 24px;
+}
+.music-app[data-layout="portrait"] .music-counter b {
+  font-size: 36px;
+}
+.music-app[data-layout="portrait"] .ruler-box {
+  --ruler-ripple: 90px;
+}
+.music-app[data-layout="portrait"] .music-keyhint {
+  display: none;
+}
+@media (max-width: 700px) {
+  .music-app[data-layout="portrait"] .album-callout h1 {
+    font-size: var(--album-title-size, 25px);
+  }
+  .music-app[data-layout="portrait"] .shelf-links {
+    gap: 18px;
+    font-size: 12px;
+  }
+}

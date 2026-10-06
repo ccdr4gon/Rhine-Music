@@ -102,9 +102,6 @@ export class SharedDepthBokehPass extends BokehPass {
   private height = 1;
   /** Whether the last render reused the SSAO depth, for diagnostics. */
   sharedDepth = false;
-  /** The size of the depth this pass reads, in pixels. */
-  get depthWidth() { return this.width; }
-  get depthHeight() { return this.height; }
 
   constructor(
     scene: THREE.Scene,

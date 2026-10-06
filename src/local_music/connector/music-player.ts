@@ -1,4 +1,4 @@
-import type { MusicTrack } from "./music-types";
+import type { MusicTrack } from "../../music-types";
 
 export interface MusicPlayerState {
   transport: "idle" | "loading" | "playing" | "paused" | "error";

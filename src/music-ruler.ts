@@ -15,13 +15,22 @@ type RulerSlot = {
   rippleAt: number;
   pointer: boolean;
   focused: boolean;
+  side: string;
+  playing: boolean;
 };
 
-const CAPACITY = 12;
+/**
+ * The design's ruler (2026-10-05): 13 ticks, the selected song always the tall centre tick, every
+ * fifth song a longer tick. A column of 13 or fewer shows its ticks only (none outside 1..N); a
+ * longer one keeps the continuous wrap, so a step from the last song to the first keeps its
+ * physical direction.
+ */
+const CAPACITY = 13;
 const OVERSCAN = 2;
 const POOL_SIZE = CAPACITY + OVERSCAN * 2;
-const ANCHOR = 5;
+const ANCHOR = 6;
 const RIPPLE_DURATION = 560;
+const REST_OPACITY = 0.7;
 
 function spring(value: number): Spring {
   return { value, velocity: 0 };
@@ -43,32 +52,39 @@ function approach(state: Spring, target: number, seconds: number, instant: boole
   return true;
 }
 
-/** A bounded, reusable ruler; the selected tick itself grows, with no overlay. */
-export function setupMusicRuler(host: HTMLElement) {
+/**
+ * A bounded, reusable ruler; the selected tick itself grows, with no overlay. `noun` names what a
+ * tick selects (专辑, or 歌曲 in the player skin).
+ */
+export function setupMusicRuler(host: HTMLElement, noun = "专辑") {
   const events = new AbortController();
   const reducedQuery = matchMedia("(prefers-reduced-motion: reduce)");
   let items: MusicRulerItem[] = [];
   let groupKey = "";
   let selectedIndex = -1;
   let selectedOrdinal = 0;
+  let playingIndex: number | undefined;
   let populated = false;
   let reduced = false;
   let disposed = false;
   let frame = 0;
   let lastFrame = 0;
   let tickWidth = 3;
-  let gap = 8;
-  let restHeight = 10;
-  let fullHeight = 30;
-  let hoverHeight = 22;
-  let step = tickWidth + gap;
+  let step = 8;
+  let fullHeight = 28;
+  let longHeight = 14;
+  let shortHeight = 9;
+  let hoverHeight = 18;
+  let hostWidth = (CAPACITY - 1) * step + tickWidth;
+  // A pitch of room on either side (CSS pulls it back with negative margins), where ticks that
+  // scroll in or out fade under the mask; the 13 ticks themselves are never faded.
+  let pad = step;
   const scroll = spring(0);
-  const width = spring(0);
   let scrollTarget = 0;
 
   host.classList.add("music-ruler");
   host.setAttribute("role", "group");
-  host.setAttribute("aria-label", "选择专辑");
+  host.setAttribute("aria-label", `选择${noun}`);
 
   const slots: RulerSlot[] = Array.from({ length: POOL_SIZE }, (_, ordinal) => {
     const button = document.createElement("button");
@@ -81,12 +97,16 @@ export function setupMusicRuler(host: HTMLElement) {
     const mark = document.createElement("span");
     mark.className = "music-ruler-mark";
     mark.setAttribute("aria-hidden", "true");
-    button.appendChild(mark);
+    // The playing song's tick carries a dot in the playback colour (not the selected tick).
+    const dot = document.createElement("i");
+    dot.className = "music-ruler-dot";
+    dot.setAttribute("aria-hidden", "true");
+    button.append(mark, dot);
     const slot: RulerSlot = {
       button, mark, ordinal, x: ordinal * step,
-      offset: spring(0), presence: spring(0), height: spring(restHeight),
-      opacity: spring(0.28), revealAt: 0, rippleAt: -Infinity,
-      pointer: false, focused: false,
+      offset: spring(0), presence: spring(0), height: spring(shortHeight),
+      opacity: spring(REST_OPACITY), revealAt: 0, rippleAt: -Infinity,
+      pointer: false, focused: false, side: "", playing: false,
     };
     for (const [name, field, value] of [
       ["pointerenter", "pointer", true], ["pointerleave", "pointer", false],
@@ -103,26 +123,27 @@ export function setupMusicRuler(host: HTMLElement) {
 
   const overflowing = () => items.length > CAPACITY;
   const instantMotion = () => reduced || reducedQuery.matches;
-  const visibleCount = () => Math.min(CAPACITY, items.length);
-  const targetWidth = () => Math.max(0, visibleCount() * step - gap);
   const validOrdinal = (ordinal: number) => items.length > 0 &&
     (overflowing() || (ordinal >= 0 && ordinal < items.length));
   const itemAt = (ordinal: number) => validOrdinal(ordinal) ? items[wrap(ordinal, items.length)] : undefined;
+  // Every fifth song of the column has a longer tick.
+  const restHeight = (ordinal: number) => (wrap(ordinal, Math.max(1, items.length)) + 1) % 5 === 0 ? longHeight : shortHeight;
 
   function measure() {
     const css = getComputedStyle(host);
     const read = (name: string, fallback: number) => Number.parseFloat(css.getPropertyValue(name)) || fallback;
     const oldStep = step;
     tickWidth = read("--tick-width", 3);
-    gap = read("--tick-gap", 8);
-    restHeight = read("--tick-rest", 10);
-    fullHeight = read("--tick-height", 30);
-    hoverHeight = read("--tick-hover", 22);
-    step = tickWidth + gap;
+    step = read("--tick-pitch", 8);
+    fullHeight = read("--tick-full", 28);
+    longHeight = read("--tick-long", 14);
+    shortHeight = read("--tick-short", 9);
+    hoverHeight = read("--tick-hover", 18);
+    hostWidth = (CAPACITY - 1) * step + tickWidth;
+    pad = step;
+    host.style.width = `${hostWidth + 2 * pad}px`;
     if (step !== oldStep) {
       const ratio = step / oldStep;
-      width.value *= ratio;
-      width.velocity *= ratio;
       slots.forEach((slot) => {
         slot.x *= ratio;
         slot.offset.value *= ratio;
@@ -141,7 +162,7 @@ export function setupMusicRuler(host: HTMLElement) {
       slot.button.dataset.select = String(item.index);
       // Preserve the particular visible occurrence when a loop edge is clicked.
       slot.button.dataset.rulerStep = String(slot.ordinal - selectedOrdinal);
-      slot.button.setAttribute("aria-label", `选择专辑 ${item.title}`);
+      slot.button.setAttribute("aria-label", `选择${noun} ${item.title}`);
       slot.button.title = item.title;
     } else {
       delete slot.button.dataset.select;
@@ -154,7 +175,6 @@ export function setupMusicRuler(host: HTMLElement) {
   // Only offscreen slots are recycled. Crossing an album/category boundary
   // never replaces the visible window or resets its fractional scroll position.
   function recycle() {
-    if (!overflowing()) return;
     const start = Math.floor(scroll.value) - OVERSCAN;
     const end = start + POOL_SIZE;
     const free = slots.filter((slot) => {
@@ -162,20 +182,22 @@ export function setupMusicRuler(host: HTMLElement) {
       const x = (slot.ordinal - scroll.value) * step + slot.offset.value;
       // A category transition may still carry a displayed position offset.
       // Retain that physical tick until it has really left the viewport.
-      return slot.presence.value <= 0.025 || x + tickWidth <= 0.5 || x >= width.value - 0.5;
+      return slot.presence.value <= 0.025 || x + tickWidth <= 0.5 || x >= hostWidth - 0.5;
     });
     const present = new Set(slots.filter((slot) => slot.ordinal >= start && slot.ordinal < end).map((slot) => slot.ordinal));
     for (let ordinal = start; ordinal < end; ordinal++) {
       if (present.has(ordinal)) continue;
       const slot = free.shift();
       if (!slot) break;
+      const valid = validOrdinal(ordinal);
       slot.ordinal = ordinal;
       slot.offset.value = slot.offset.velocity = 0;
-      slot.presence.value = 1;
+      // Outside a short column there is no tick: the slot arrives already hidden.
+      slot.presence.value = valid ? 1 : 0;
       slot.presence.velocity = 0;
-      slot.height.value = ordinal === selectedOrdinal ? fullHeight : restHeight;
+      slot.height.value = ordinal === selectedOrdinal ? fullHeight : restHeight(ordinal);
       slot.height.velocity = 0;
-      slot.opacity.value = ordinal === selectedOrdinal ? 1 : 0.28;
+      slot.opacity.value = ordinal === selectedOrdinal ? 1 : REST_OPACITY;
       slot.opacity.velocity = 0;
       slot.revealAt = 0;
       slot.rippleAt = -Infinity;
@@ -184,14 +206,20 @@ export function setupMusicRuler(host: HTMLElement) {
     }
   }
 
+  function markPlaying(slot: RulerSlot) {
+    const playing = playingIndex !== undefined && slot.ordinal !== selectedOrdinal &&
+      itemAt(slot.ordinal)?.index === playingIndex;
+    if (playing === slot.playing) return;
+    slot.playing = playing;
+    slot.button.dataset.playing = String(playing);
+  }
+
   function render(now: number, seconds: number, forceInstant = false) {
     const instant = forceInstant || instantMotion();
     let moving = approach(scroll, scrollTarget, seconds, instant);
-    moving = approach(width, targetWidth(), seconds, instant) || moving;
     recycle();
     host.dataset.overflow = String(overflowing());
     host.dataset.reduced = String(instantMotion());
-    host.style.width = `${Math.max(0, width.value).toFixed(3)}px`;
     const focused = document.activeElement;
     let lostFocus = false;
     for (const slot of slots) {
@@ -208,26 +236,34 @@ export function setupMusicRuler(host: HTMLElement) {
       slot.x = (slot.ordinal - scroll.value) * step + slot.offset.value;
       // Hidden overscan and departing ticks are never focusable or clickable.
       const visible = valid && (instant || revealed) && slot.presence.value > 0.025 &&
-        slot.x + tickWidth > 0.5 && slot.x < width.value - 0.5;
+        slot.x + tickWidth > 0.5 && slot.x < hostWidth - 0.5;
       slot.button.disabled = !visible;
       slot.button.tabIndex = visible ? 0 : -1;
       slot.button.dataset.visible = String(visible);
       slot.button.setAttribute("aria-hidden", String(!visible));
       if (!visible && slot.button === focused) lostFocus = true;
+      // A tick before the selected one sits a pixel left in its slot, one after it a pixel
+      // right: the gaps on either side of the wider selected tick stay even.
+      const side = active ? "" : slot.ordinal < selectedOrdinal ? "before" : "after";
+      if (side !== slot.side) {
+        slot.side = side;
+        slot.button.dataset.side = side;
+      }
+      markPlaying(slot);
       const hovering = visible && (slot.pointer || slot.focused);
       const rippleProgress = (now - slot.rippleAt) / RIPPLE_DURATION;
       const rippling = !instant && valid && rippleProgress >= 0 && rippleProgress < 1;
-      // Unselected category ripples only contract the resting gray tick.
+      // Unselected category ripples only contract the resting tick.
       const contraction = rippling ? 0.4 * Math.sin(Math.PI * rippleProgress) : 0;
-      const heightTarget = active ? fullHeight : hovering ? hoverHeight : restHeight * (1 - contraction);
-      const opacityTarget = active || hovering ? 1 : 0.28 - contraction * 0.2;
+      const rest = restHeight(slot.ordinal);
+      const heightTarget = active ? fullHeight : hovering ? Math.max(hoverHeight, rest) : rest * (1 - contraction);
+      const opacityTarget = active || hovering ? 1 : REST_OPACITY - contraction * 0.2;
       moving = approach(slot.height, heightTarget, seconds, instant) || moving;
       moving = approach(slot.opacity, opacityTarget, seconds, instant) || moving;
       moving = moving || (!instant && (!revealed || (valid && now < slot.rippleAt + RIPPLE_DURATION)));
-      slot.button.style.transform = `translate3d(${slot.x.toFixed(3)}px, 0, 0)`;
+      slot.button.style.transform = `translate3d(${(slot.x + pad).toFixed(3)}px, 0, 0)`;
       slot.button.style.opacity = String(Math.max(0, Math.min(1, slot.presence.value)));
-      slot.button.style.setProperty("--ruler-presence", String(slot.presence.value));
-      slot.mark.style.setProperty("--ruler-height", `${Math.max(0, slot.height.value).toFixed(3)}px`);
+      slot.button.style.setProperty("--ruler-height", `${Math.max(0, slot.height.value).toFixed(3)}px`);
       slot.mark.style.setProperty("--ruler-opacity", String(Math.max(0, Math.min(1, slot.opacity.value))));
     }
     if (lostFocus) {
@@ -252,10 +288,11 @@ export function setupMusicRuler(host: HTMLElement) {
   }
 
   function regroup(now: number, instant: boolean) {
-    scrollTarget = overflowing() ? selectedOrdinal - ANCHOR : 0;
+    // The selected song is always the centre tick.
+    scrollTarget = selectedOrdinal - ANCHOR;
     scroll.value = scrollTarget;
     scroll.velocity = 0;
-    const start = overflowing() ? Math.floor(scroll.value) - OVERSCAN : 0;
+    const start = Math.floor(scroll.value) - OVERSCAN;
     const ordinals = Array.from({ length: POOL_SIZE }, (_, i) => start + i);
     // Assign visible destinations first, matching their currently displayed x.
     // This preserves existing bars while extra bars unfold or collapse.
@@ -270,7 +307,7 @@ export function setupMusicRuler(host: HTMLElement) {
       const slot = [...available].sort((a, b) => Math.abs(a.x - x) - Math.abs(b.x - x))[0];
       available.delete(slot);
       const valid = validOrdinal(ordinal);
-      const wasVisible = slot.presence.value > 0.025 && slot.x + tickWidth > 0.5 && slot.x < width.value - 0.5;
+      const wasVisible = slot.presence.value > 0.025 && slot.x + tickWidth > 0.5 && slot.x < hostWidth - 0.5;
       slot.ordinal = ordinal;
       slot.offset.value = instant || !wasVisible ? 0 : slot.x - x;
       if (instant || !wasVisible) slot.offset.velocity = 0;
@@ -278,9 +315,9 @@ export function setupMusicRuler(host: HTMLElement) {
         // An invisible pool node has no displayed position to preserve. Place
         // it directly at its new destination before fading it into the ruler.
         slot.presence.value = slot.presence.velocity = 0;
-        slot.height.value = restHeight;
+        slot.height.value = restHeight(ordinal);
         slot.height.velocity = 0;
-        slot.opacity.value = 0.28;
+        slot.opacity.value = REST_OPACITY;
         slot.opacity.velocity = 0;
       }
       const order = Math.max(0, Math.min(CAPACITY - 1, ordinal - scroll.value));
@@ -298,8 +335,7 @@ export function setupMusicRuler(host: HTMLElement) {
     render(performance.now(), 0, instantMotion());
     schedule();
   };
-  // The host width is animated by this controller, so observing it would cause
-  // self-triggered layout updates. CSS breakpoint sizes only need window resize.
+  // The host keeps the width of 13 ticks. CSS breakpoint sizes only need window resize.
   window.addEventListener("resize", onResize, { signal: events.signal });
   reducedQuery.addEventListener("change", onReduced);
   measure();
@@ -334,14 +370,38 @@ export function setupMusicRuler(host: HTMLElement) {
               selectedOrdinal += delta;
             }
           } else selectedOrdinal = nearestOccurrence(row, scroll.value + ANCHOR, items.length);
-          scrollTarget = selectedOrdinal - ANCHOR;
         } else selectedOrdinal = row;
+        scrollTarget = selectedOrdinal - ANCHOR;
       }
       // Metadata refreshes and repeated selection updates do not restart motion.
       slots.forEach(labelSlot);
       populated = populated || items.length > 0;
       render(now, 0, first || instantMotion());
       schedule();
+    },
+    /** The record index of the song (or album) that plays, for the dot over its tick. */
+    setPlaying(index: number | undefined) {
+      if (disposed || index === playingIndex) return;
+      playingIndex = index;
+      slots.forEach(markPlaying);
+    },
+    /**
+     * Play / pause: a ring in the playback colour spreads from the ruler's centre (not with
+     * reduced motion). Its colour is the one at the press; it never anticipates the player.
+     */
+    ripple() {
+      const box = host.parentElement;
+      if (disposed || instantMotion() || !box) return;
+      const ring = document.createElement("i");
+      ring.className = "music-ruler-ripple";
+      ring.setAttribute("aria-hidden", "true");
+      ring.style.borderColor = getComputedStyle(host).getPropertyValue("--state").trim() || "currentColor";
+      box.append(ring);
+      const animation = ring.animate([
+        { transform: "translate(-50%, -50%) scale(0.2)", opacity: 0.9 },
+        { transform: "translate(-50%, -50%) scale(1)", opacity: 0 },
+      ], { duration: RIPPLE_DURATION, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" });
+      animation.onfinish = animation.oncancel = () => ring.remove();
     },
     destroy() {
       disposed = true;

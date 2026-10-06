@@ -1,26 +1,32 @@
-/* Trial navigation: individual marks grow; the scale itself scrolls. */
+/* The shelf's ruler (Claude Design, 2026-10-05; music-ruler.ts): 13 ticks, 1 px and muted at
+   .7, every fifth song 14 px tall, the others 9; the selected song is the 3 x 28 ink tick in the
+   middle; a 5 px dot in the playback colour 8 px above the playing song's tick. The earlier
+   navigation (?nav=previous, .music-ticks) keeps its own rules. */
 #album-ticks.music-ruler {
   --tick-height: 30px;
-  --tick-rest: 10px;
-  --tick-hover: 22px;
+  --tick-full: 28px;
+  --tick-long: 14px;
+  --tick-short: 9px;
+  --tick-hover: 18px;
   --tick-width: 3px;
-  --tick-gap: 8px;
+  --tick-pitch: 8px;
   position: relative;
   display: block;
   flex: 0 0 auto;
   isolation: isolate;
   height: var(--tick-height);
+  /* A pitch of room on either side, where ticks scrolling in or out fade (music-ruler.ts). */
+  margin: 0 calc(-1 * var(--tick-pitch));
   overflow: hidden;
   gap: 0;
   transition: none;
-}
-
-#album-ticks.music-ruler[data-overflow="true"] {
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--tick-gap), #000 calc(100% - var(--tick-gap)), transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 var(--tick-gap), #000 calc(100% - var(--tick-gap)), transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--tick-pitch), #000 calc(100% - var(--tick-pitch)), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 var(--tick-pitch), #000 calc(100% - var(--tick-pitch)), transparent);
 }
 
 #album-ticks.music-ruler > button.music-ruler-slot {
+  --mark-x: 1px;
+  --mark-w: 1px;
   position: absolute;
   left: 0;
   top: 0;
@@ -33,6 +39,18 @@
   background: transparent;
   transition: none;
 }
+/* Even gaps beside the wider selected tick: the ticks before it sit left in their slot, the
+   ticks after it right. */
+#album-ticks.music-ruler > button.music-ruler-slot[data-side="before"] {
+  --mark-x: 0px;
+}
+#album-ticks.music-ruler > button.music-ruler-slot[data-side="after"] {
+  --mark-x: calc(var(--tick-width) - 1px);
+}
+#album-ticks.music-ruler > button.music-ruler-slot.active {
+  --mark-x: 0px;
+  --mark-w: var(--tick-width);
+}
 
 #album-ticks.music-ruler > button::before {
   content: none;
@@ -41,7 +59,7 @@
 #album-ticks.music-ruler > button::after {
   content: "";
   position: absolute;
-  inset: 0 calc(var(--tick-gap) / -2);
+  inset: 0 calc((var(--tick-pitch) - var(--tick-width)) / -2);
 }
 
 #album-ticks.music-ruler > button:disabled {
@@ -51,31 +69,61 @@
 #album-ticks.music-ruler .music-ruler-mark {
   position: absolute;
   display: block;
-  left: 0;
+  left: var(--mark-x);
   top: 50%;
-  width: 100%;
-  height: var(--ruler-height, var(--tick-rest));
+  width: var(--mark-w);
+  height: var(--ruler-height, var(--tick-short));
   transform: translateY(-50%);
-  opacity: var(--ruler-opacity, 0.28);
-  background: var(--ink);
+  opacity: var(--ruler-opacity, 0.7);
+  background: var(--muted);
   pointer-events: none;
+  transition:
+    left 160ms ease,
+    width 160ms ease,
+    background-color 400ms ease;
 }
 
+#album-ticks.music-ruler > button.active .music-ruler-mark,
 #album-ticks.music-ruler > button:not(.active):is(:hover, :focus-visible) .music-ruler-mark {
-  background: var(--accent);
+  background: var(--ink);
+}
+
+#album-ticks.music-ruler .music-ruler-dot {
+  position: absolute;
+  display: none;
+  left: calc(var(--mark-x) - 2px);
+  top: calc(50% - var(--ruler-height, var(--tick-short)) / 2 - 8px);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state);
+  pointer-events: none;
+}
+#album-ticks.music-ruler > button[data-playing="true"] .music-ruler-dot {
+  display: block;
 }
 
 #album-ticks.music-ruler > button:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--ink);
   outline-offset: 2px;
 }
 
-@media (max-width: 700px) {
-  #album-ticks.music-ruler {
-    --tick-height: 21px;
-    --tick-rest: 8px;
-    --tick-hover: 16px;
-    --tick-width: 2px;
-    --tick-gap: 6px;
-  }
+#album-ticks.music-ruler[data-reduced="true"] .music-ruler-mark {
+  transition: none;
+}
+
+/* Play / pause: a ring in the playback colour spreads from the ruler's centre (music-ruler.ts
+   ripple); it passes under the counter. */
+.music-app .music-ruler-ripple {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--ruler-ripple, 120px);
+  height: var(--ruler-ripple, 120px);
+  box-sizing: border-box;
+  border: 1px solid;
+  border-radius: 50%;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.2);
+  pointer-events: none;
 }

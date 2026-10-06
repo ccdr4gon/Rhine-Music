@@ -9,16 +9,16 @@ export class MusicTrackFocus {
   reveal(container: HTMLElement, row: HTMLButtonElement, reduced: boolean) {
     this.cancel();
     let frame = 0;
-    let pulse: Animation | undefined;
     let hold: ReturnType<typeof setTimeout> | undefined;
+    let tag: HTMLElement | undefined;
     let active = true;
     const cancel = () => {
       if (!active) return;
       active = false;
       cancelAnimationFrame(frame);
-      pulse?.cancel();
       clearTimeout(hold);
-      row.classList.remove("search-track-highlight");
+      row.classList.remove("search-track-hit");
+      tag?.remove();
       container.removeEventListener("wheel", cancel);
       container.removeEventListener("pointerdown", cancel);
       container.removeEventListener("touchstart", cancel);
@@ -39,21 +39,19 @@ export class MusicTrackFocus {
     const rowTop = row.getBoundingClientRect().top - container.getBoundingClientRect().top + start;
     const centerOffset = tabsHeight + Math.max(0, (container.clientHeight - tabsHeight - row.offsetHeight) / 2);
     const target = Math.max(0, Math.min(container.scrollHeight - container.clientHeight, rowTop - centerOffset));
+    // The design's search hit (2026-10-05): a 1 px ink outline round the row and a 搜索结果 tag
+    // on its top edge, for 1100 ms; the tag fades in its last 30 % (CSS), or not with reduced motion.
     const highlight = () => {
       if (!active || !row.isConnected) { cancel(); return; }
       row.focus({ preventScroll: true });
-      if (reduced) {
-        row.classList.add("search-track-highlight");
-        hold = setTimeout(cancel, 1100);
-      } else {
-        pulse = row.animate([
-          { backgroundColor: "transparent", boxShadow: "inset 3px 0 transparent", offset: 0 },
-          { backgroundColor: "var(--search-track-tint)", boxShadow: "inset 3px 0 var(--accent)", offset: 0.28 },
-          { backgroundColor: "var(--search-track-tint)", boxShadow: "inset 3px 0 var(--accent)", offset: 0.55 },
-          { backgroundColor: "transparent", boxShadow: "inset 3px 0 transparent", offset: 1 },
-        ], { duration: 1100, easing: "ease-in-out" });
-        pulse.onfinish = cancel;
-      }
+      row.classList.add("search-track-hit");
+      tag = document.createElement("span");
+      tag.className = "track-hit-tag";
+      tag.setAttribute("aria-hidden", "true");
+      tag.textContent = "搜索结果";
+      tag.dataset.reduced = String(reduced);
+      row.append(tag);
+      hold = setTimeout(cancel, 1100);
     };
     if (reduced || Math.abs(target - start) < 1) {
       container.scrollTop = target;

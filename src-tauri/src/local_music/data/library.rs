@@ -1,4 +1,4 @@
-use crate::metadata;
+use super::metadata;
 use chrono::Utc;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -83,6 +83,11 @@ fn read_json(file: &Path, fallback: Value) -> Result<Value> {
     }
 }
 
+/// The saved folders, cleaned. The first one is the main folder (the owner, 2026-10-06: "Local
+/// music means choosing a main folder, and each playlist will be a subfolder"): it is always kept,
+/// first. A later folder that is the same, lies inside a kept one or contains the main folder is
+/// dropped, and a later folder replaces the ones inside it, as before. Folders after the main one
+/// come only from earlier versions, which scanned several: they stay saved, unused.
 pub fn safe_roots(value: &Value) -> Result<Vec<String>> {
     let roots = value
         .as_array()
@@ -110,7 +115,11 @@ pub fn safe_roots(value: &Value) -> Result<Vec<String>> {
         }
         let root = clean.to_string_lossy().into_owned();
         let key = path_key(&root);
-        if output.iter().any(|p| contains_path(&path_key(p), &key)) {
+        if output.iter().any(|p| contains_path(&path_key(p), &key))
+            || output
+                .first()
+                .is_some_and(|main| contains_path(&key, &path_key(main)))
+        {
             continue;
         }
         output.retain(|p| !contains_path(&key, &path_key(p)));
@@ -203,7 +212,7 @@ pub fn genre_for(album: &Value, rules: &Value) -> String {
             if [&genre["id"], &genre["name"]]
                 .into_iter()
                 .chain(array(&genre["aliases"]))
-                .any(|v| crate::library::normalized(text(v)) == normalized)
+                .any(|v| self::normalized(text(v)) == normalized)
             {
                 return text(&genre["id"]).into();
             }
@@ -292,6 +301,16 @@ impl Store {
         c["musicBrainzConfigured"] = json!(!self.contact().is_empty());
         c
     }
+    /// The main folder: the first saved folder (see `safe_roots`). Only it is scanned, shown
+    /// and served; folders saved after it by earlier versions are kept but not used.
+    pub fn main_folder(&self) -> Option<&str> {
+        array(&self.config["roots"]).first().and_then(Value::as_str)
+    }
+    /// Whether an indexed album lies in the main folder.
+    pub fn in_library(&self, album: &Value) -> bool {
+        self.main_folder()
+            .is_some_and(|main| album["_root"].as_str() == Some(main))
+    }
     pub fn save_index(&self) -> Result<()> {
         write_json(&self.data_dir.join("library-index.json"), &self.index)
     }
@@ -371,7 +390,11 @@ impl Store {
         let roots = array(&self.config["roots"]);
         let mut counts: HashMap<String, usize> = HashMap::new();
         let mut generated = Vec::new();
-        let albums: Vec<_> = array(&self.index["albums"]).iter().filter(|a| roots.contains(&a["_root"])).map(|album| {
+        let library: Vec<_> = array(&self.index["albums"])
+            .iter()
+            .filter(|a| self.in_library(a))
+            .collect();
+        let albums: Vec<_> = library.iter().map(|&album| {
             let id = genre_for(album, &self.rules);
             if !counts.contains_key(&id) && id.starts_with("source-") {
                 generated.push(json!({"id":id,"name":array(&album["_onlineGenres"]).first().or_else(|| array(&album["_localGenres"]).first()).unwrap_or(&Value::Null)}));
@@ -381,7 +404,7 @@ impl Store {
             public.as_object_mut().unwrap().retain(|k,_| !k.starts_with('_'));
             public["genreId"] = json!(id);
             public["rawGenres"] = json!(unique(array(&album["_onlineGenres"]).iter().chain(array(&album["_localGenres"])).cloned()));
-            public["tracks"] = json!(array(&album["tracks"]).iter().map(|t| { let mut t=t.clone(); t.as_object_mut().unwrap().retain(|k,_| !k.starts_with('_')); t }).collect::<Vec<_>>());
+            public["tracks"] = json!(array(&album["tracks"]).iter().map(public_track).collect::<Vec<_>>());
             if album["_cover"].is_object() { public["coverUrl"] = json!(format!("/api/artwork/{}?v={}", text(&album["id"]), text(&album["_cover"]["version"]))); }
             if text(&public["descriptionSource"]["url"]).is_empty() { public.as_object_mut().unwrap().remove("description"); public.as_object_mut().unwrap().remove("descriptionSource"); }
             if text(&public["localNote"]).is_empty() { public.as_object_mut().unwrap().remove("localNote"); }
@@ -408,7 +431,11 @@ impl Store {
                     .unwrap_or_else(|| json!({"path":root,"status":"unscanned"}))
             })
             .collect();
-        let mut public = json!({"version":1,"albums":albums,"genres":genres,"roots":roots,"scan":self.scan,"onlineEnabled":self.config["onlineEnabled"] == true,"enrich":self.enrich,"introductions":self.introductions});
+        let playlists = self
+            .main_folder()
+            .map(|main| playlists(main, &library))
+            .unwrap_or_default();
+        let mut public = json!({"version":1,"albums":albums,"genres":genres,"playlists":playlists,"roots":roots,"scan":self.scan,"onlineEnabled":self.config["onlineEnabled"] == true,"enrich":self.enrich,"introductions":self.introductions});
         // TypeScript optional fields must be absent, not null. Apply this only
         // to the cloned public snapshot; config and private index retain their
         // existing representation (including foobarBaseUrl: null).
@@ -418,7 +445,7 @@ impl Store {
     pub fn file(&self, id: &str, artwork: bool) -> Option<AllowedFile> {
         for album in array(&self.index["albums"])
             .iter()
-            .filter(|a| array(&self.config["roots"]).contains(&a["_root"]))
+            .filter(|a| self.in_library(a))
         {
             if artwork && album["id"] == id && album["_cover"].is_object() {
                 return Some(AllowedFile {
@@ -481,7 +508,7 @@ impl Store {
                 store.config["onlineEnabled"] == true
             };
             if online {
-                let _ = crate::online::begin_enrich(&shared, &json!({}), false);
+                let _ = super::online::begin_enrich(&shared, &json!({}), false);
             }
         });
         Ok(())
@@ -490,13 +517,16 @@ impl Store {
         self.reload_rules()?;
         let mut albums = Vec::new();
         let mut roots = Vec::new();
-        for root in array(&self.config["roots"]) {
+        // Only the main folder: the folders earlier versions saved after it are not scanned.
+        for root in array(&self.config["roots"]).iter().take(1) {
             let previous: Vec<_> = array(&self.index["albums"])
                 .iter()
                 .filter(|a| a["_root"] == *root)
                 .collect();
+            let mut encrypted = 0;
             let scanned = (|| {
-                let entries = walk(Path::new(text(root)))?;
+                let (entries, skipped) = walk(Path::new(text(root)))?;
+                encrypted = skipped;
                 entries
                     .into_iter()
                     .map(|entry| {
@@ -519,7 +549,11 @@ impl Store {
             match scanned {
                 Ok(found) => {
                     albums.extend(found);
-                    roots.push(json!({"path":root,"status":"online"}));
+                    let mut status = json!({"path":root,"status":"online"});
+                    if encrypted > 0 {
+                        status["encrypted"] = json!(encrypted);
+                    }
+                    roots.push(status);
                 }
                 Err(e) => {
                     albums.extend(previous.into_iter().map(|a| {
@@ -898,8 +932,39 @@ struct Entry {
     single: Option<PathBuf>,
     cover: Option<PathBuf>,
 }
-fn walk(root: &Path) -> Result<Vec<Entry>> {
-    fn visit(root: &Path, folder: &Path, output: &mut Vec<Entry>) -> Result<()> {
+/// QQ Music's encrypted downloads (`.mflac`, `.mgg`, `.qmc*` and their numbered variants): not
+/// audio Rhine can read, never decrypted. They are only counted for the scan's summary.
+pub fn is_encrypted_download(path: &Path) -> bool {
+    let extension = extension(path);
+    ["qmc", "mflac", "mgg"]
+        .iter()
+        .any(|prefix| extension.starts_with(prefix))
+}
+/// Files and folders the scan leaves alone: names starting with a dot (macOS's `._` copies
+/// included), and on Windows folders marked hidden or system (`$RECYCLE.BIN`, `System Volume
+/// Information`, ...) and links (symbolic links and junctions are never followed).
+fn hidden(entry: &fs::DirEntry, folder: bool) -> Result<bool> {
+    if entry.file_name().to_string_lossy().starts_with('.') {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    if folder {
+        use std::os::windows::fs::MetadataExt;
+        const HIDDEN: u32 = 0x2;
+        const SYSTEM: u32 = 0x4;
+        const REPARSE_POINT: u32 = 0x400;
+        let attributes = entry.metadata().map_err(|e| e.to_string())?.file_attributes();
+        return Ok(attributes & (HIDDEN | SYSTEM | REPARSE_POINT) != 0);
+    }
+    let _ = folder;
+    Ok(false)
+}
+/// The folders that hold audio, under the main folder: each folder with audio is an album
+/// record (its songs, cover and introduction); audio directly in the main folder is one record
+/// per file. The playlists are made from these records' paths (`playlists`). Also returns how
+/// many of QQ Music's encrypted downloads were seen.
+fn walk(root: &Path) -> Result<(Vec<Entry>, usize)> {
+    fn visit(root: &Path, folder: &Path, output: &mut Vec<Entry>, encrypted: &mut usize) -> Result<()> {
         let mut entries = fs::read_dir(folder)
             .map_err(|e| e.to_string())?
             .collect::<std::io::Result<Vec<_>>>()
@@ -916,25 +981,13 @@ fn walk(root: &Path) -> Result<Vec<Entry>> {
         let mut directories = Vec::new();
         for entry in &entries {
             let kind = entry.file_type().map_err(|e| e.to_string())?;
-            if kind.is_file() {
-                files.push(entry.path());
-            } else if kind.is_dir()
-                && !kind.is_symlink()
-                && !entry.file_name().to_string_lossy().starts_with('.')
-            {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    if entry
-                        .metadata()
-                        .map_err(|e| e.to_string())?
-                        .file_attributes()
-                        & 0x400
-                        != 0
-                    {
-                        continue;
-                    }
+            if kind.is_file() && !hidden(entry, false)? {
+                if is_encrypted_download(&entry.path()) {
+                    *encrypted += 1;
+                } else {
+                    files.push(entry.path());
                 }
+            } else if kind.is_dir() && !kind.is_symlink() && !hidden(entry, true)? {
                 directories.push(entry.path());
             }
         }
@@ -1019,13 +1072,122 @@ fn walk(root: &Path) -> Result<Vec<Entry>> {
             });
         }
         for directory in directories {
-            visit(root, &directory, output)?;
+            visit(root, &directory, output, encrypted)?;
         }
         Ok(())
     }
     let mut output = Vec::new();
-    visit(root, root, &mut output)?;
-    Ok(output)
+    let mut encrypted = 0;
+    visit(root, root, &mut output, &mut encrypted)?;
+    Ok((output, encrypted))
+}
+
+/// A song's public record: its stored fields without the private ones, plus its own album and
+/// year tags (read at scan time, kept in the index) for the song's details.
+fn public_track(track: &Value) -> Value {
+    let mut public = track.clone();
+    public.as_object_mut().unwrap().retain(|k, _| !k.starts_with('_'));
+    let album = text(&track["_common"]["album"]);
+    if !album.is_empty() {
+        public["album"] = json!(album);
+    }
+    if track["_common"]["year"]
+        .as_f64()
+        .is_some_and(|n| n.is_finite() && n > 0.0)
+    {
+        public["year"] = track["_common"]["year"].clone();
+    }
+    public
+}
+
+/// Natural order of two paths inside the main folder, folder by folder (so `Pop/x` comes before
+/// `Pop B/y`), whichever separator they use. Equal names in another case keep a fixed order.
+pub fn path_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |path: &str| -> Vec<String> {
+        path.split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (a, b) = (parts(a), parts(b));
+    for (x, y) in a.iter().zip(&b) {
+        let order = natural_cmp(x, y).then_with(|| x.cmp(y));
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// The main folder's playlists (the owner, 2026-10-06): each direct subfolder that holds audio
+/// at any depth is a playlist named after it, its songs in natural order of their paths; audio
+/// directly in the main folder is one more playlist, named after the main folder and listed
+/// first. Playlists come in natural order of their names. A folder without audio has no songs
+/// and so no playlist. Made from the indexed songs' paths: nothing more is read.
+pub fn playlists(main: &str, albums: &[&Value]) -> Vec<Value> {
+    struct Playlist {
+        name: String,
+        folder: String,
+        main: bool,
+        songs: Vec<(String, String)>,
+    }
+    let mut lists: Vec<Playlist> = Vec::new();
+    let mut by_folder: HashMap<String, usize> = HashMap::new();
+    for album in albums {
+        for track in array(&album["tracks"]) {
+            let relative = text(&track["relativePath"]);
+            let mut parts = relative.split(['/', '\\']).filter(|part| !part.is_empty());
+            let first = parts.next().unwrap_or_default();
+            let nested = parts.next().is_some();
+            let (name, folder) = if nested {
+                (
+                    first.to_owned(),
+                    Path::new(main).join(first).to_string_lossy().into_owned(),
+                )
+            } else {
+                let name = Path::new(main)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| main.to_owned());
+                (name, main.to_owned())
+            };
+            let song = (relative.to_owned(), text(&track["id"]).to_owned());
+            match by_folder.get(&folder) {
+                Some(&index) => lists[index].songs.push(song),
+                None => {
+                    by_folder.insert(folder.clone(), lists.len());
+                    lists.push(Playlist {
+                        name,
+                        folder,
+                        main: !nested,
+                        songs: vec![song],
+                    });
+                }
+            }
+        }
+    }
+    for list in &mut lists {
+        list.songs.sort_by(|a, b| path_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1)));
+    }
+    lists.sort_by(|a, b| {
+        b.main
+            .cmp(&a.main)
+            .then_with(|| natural_cmp(&a.name, &b.name))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.folder.cmp(&b.folder))
+    });
+    lists
+        .into_iter()
+        .map(|list| {
+            json!({
+                "id": format!("playlist-{}", hash(list.folder.as_bytes())),
+                "name": list.name,
+                "folder": list.folder,
+                "main": list.main,
+                "trackIds": list.songs.into_iter().map(|(_, id)| id).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
 }
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (a, b) = (a.to_lowercase(), b.to_lowercase());

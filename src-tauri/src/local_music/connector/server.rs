@@ -1,4 +1,4 @@
-use crate::{
+use crate::local_music::data::{
     library::{self, AllowedFile, SharedStore, Store},
     online,
 };

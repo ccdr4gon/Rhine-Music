@@ -1,5 +1,5 @@
 //! Attributed online metadata. Only album text and public IDs leave the machine.
-use crate::library::{array, normalized, now, text, unique, Result, SharedStore};
+use super::library::{array, normalized, now, text, unique, Result, SharedStore};
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -810,7 +810,7 @@ fn start_introductions(
         let albums: Vec<_> = array(&s.index["albums"])
             .iter()
             .filter(|a| {
-                array(&s.config["roots"]).contains(&a["_root"])
+                s.in_library(a)
                     && ids
                         .as_ref()
                         .is_none_or(|ids| ids.iter().any(|id| a["id"] == *id))
@@ -937,7 +937,7 @@ fn start_enrich(
             .iter()
             .filter(|a| {
                 a["offline"] != true
-                    && array(&s.config["roots"]).contains(&a["_root"])
+                    && s.in_library(a)
                     && ids
                         .as_ref()
                         .is_none_or(|ids| ids.iter().any(|id| a["id"] == *id))

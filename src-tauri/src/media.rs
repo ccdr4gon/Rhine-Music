@@ -1,8 +1,8 @@
 //! Read and control sources that already play music. This never logs in to a
 //! service or represents the current track as a library. The only files of a
 //! player that are read are NetEase Cloud Music's saved queue and, from its local
-//! database, the playlists the user created; `netease_queue` and
-//! `netease_playlists` state exactly which fields.
+//! database, the playlists the user created; `netease_music::data::queue` and
+//! `netease_music::data::playlists` state exactly which fields.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,10 +44,17 @@ pub struct Source {
     pub capabilities: Capabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
-    /// "netease" when the source is NetEase Cloud Music, whose saved play queue the user
-    /// may choose to show.
+    /// The player the source belongs to (`player_of`): "netease" for NetEase Cloud Music,
+    /// whose saved play queue the user may choose to show, "qqmusic" for QQ Music (its media
+    /// session only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player: Option<String>,
+    /// The app id Windows reports for a media session (its AppUserModelId), when it has one: the
+    /// same for every session of that player and across restarts, unlike `id`. The page remembers
+    /// a player it does not know by it (`playerLink` in its preferences, the owner's 2026-10-06
+    /// request); nothing the player plays is ever saved with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -58,11 +65,33 @@ pub struct Snapshot {
     pub warning: Option<String>,
 }
 
-pub mod netease_debug;
-pub mod netease_playlists;
-pub mod netease_queue;
 #[cfg(target_os = "windows")]
-mod windows_media;
+pub(crate) mod windows_media;
+
+/// The player a media session belongs to, by the app id it reports: the source list of the
+/// native side. Any other player is still listed, as a source of its own.
+pub fn player_of(app: &str) -> Option<&'static str> {
+    if crate::netease_music::connector::is_app(app) {
+        Some(crate::netease_music::PLAYER)
+    } else if crate::qq_music::connector::is_app(app) {
+        Some(crate::qq_music::PLAYER)
+    } else {
+        None
+    }
+}
+
+/// A media session's source as its player's module shows it: marked with `player_of`, and
+/// QQ Music's under its own name (its now-playing model, `qq_music::data`). Every other
+/// source keeps the name Windows gives it, NetEase's included, as before.
+pub fn player_source(app: &str, source: Source) -> Source {
+    match player_of(app) {
+        Some(crate::qq_music::PLAYER) => crate::qq_music::data::now_playing(source),
+        player => Source {
+            player: player.map(Into::into),
+            ..source
+        },
+    }
+}
 
 /// Blocking native operations are serialized on their own initialized WinRT
 /// thread. The Tauri command should call this through spawn_blocking.
@@ -100,25 +129,62 @@ pub fn control(
     }
 }
 
-fn parse_netease_title(title: &str) -> Option<(String, String)> {
-    let (title, artist) = title.trim().rsplit_once(" - ")?;
-    if title.trim().is_empty() || artist.trim().is_empty() {
-        return None;
-    }
-    Some((title.trim().into(), artist.trim().into()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn title_preserves_song_separators_and_rejects_unavailable_metadata() {
+    fn sessions_belong_to_the_player_their_app_id_names() {
+        assert_eq!(player_of("cloudmusic.exe"), Some("netease"));
+        assert_eq!(player_of("QQMusic.exe"), Some("qqmusic"));
+        assert_eq!(player_of("qqmusic.exe"), Some("qqmusic"));
+        for other in ["QQMusicExternal.exe", "QQ.exe", "Chrome", "Spotify.exe", ""] {
+            assert_eq!(player_of(other), None, "{other}");
+        }
+    }
+    // A made-up session under the name Windows gives it (its app id: no display name).
+    fn listed(app: &str) -> Source {
+        Source {
+            id: "smtc-fixture".into(),
+            name: app.into(),
+            kind: "smtc".into(),
+            title: "Fictional Song".into(),
+            artist: "Fictional Artist".into(),
+            album: String::new(),
+            cover_url: None,
+            playback: "playing".into(),
+            position: Some(12.0),
+            duration: Some(180.0),
+            capabilities: Capabilities {
+                toggle: true,
+                next: true,
+                ..Capabilities::default()
+            },
+            warning: None,
+            player: None,
+            app: Some(app.into()),
+        }
+    }
+    #[test]
+    fn qq_musics_session_is_named_and_marked_while_other_names_stay_as_windows_gives_them() {
+        let qq = player_source("QQMusic.exe", listed("QQMusic.exe"));
+        assert_eq!((qq.name.as_str(), qq.player.as_deref()), ("QQ音乐", Some("qqmusic")));
+        assert_eq!((qq.title.as_str(), qq.playback.as_str()), ("Fictional Song", "playing"));
+        assert!(qq.capabilities.toggle && qq.capabilities.next);
+        assert!(!qq.capabilities.previous && !qq.capabilities.stop && !qq.capabilities.seek);
+        // Its app id stays with it: what a remembered source is recognised by after a restart.
+        assert_eq!(qq.app.as_deref(), Some("QQMusic.exe"));
+        // NetEase keeps the name Windows gives (unchanged); its mark is what gates its features.
+        let netease = player_source("cloudmusic.exe", listed("cloudmusic.exe"));
         assert_eq!(
-            parse_netease_title("Song - Live - Artist"),
-            Some(("Song - Live".into(), "Artist".into()))
+            (netease.name.as_str(), netease.player.as_deref()),
+            ("cloudmusic.exe", Some("netease"))
         );
-        for title in ["网易云音乐", " - Artist", "Song - "] {
-            assert_eq!(parse_netease_title(title), None);
+        assert_eq!(netease.app.as_deref(), Some("cloudmusic.exe"));
+        // A helper process or any other player is neither named nor marked.
+        for app in ["QQMusicExternal.exe", "Chrome"] {
+            let other = player_source(app, listed(app));
+            assert_eq!(other.app.as_deref(), Some(app), "{app}");
+            assert_eq!((other.name.as_str(), other.player), (app, None), "{app}");
         }
     }
     #[test]

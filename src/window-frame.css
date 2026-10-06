@@ -41,6 +41,17 @@
   stroke-width: 1;
   shape-rendering: crispEdges;
 }
+.window-controls svg .fill {
+  fill: currentColor;
+  stroke: none;
+}
+.window-controls [data-window="close"] svg {
+  width: 12px;
+  height: 12px;
+}
+.window-controls svg .diagonal {
+  shape-rendering: geometricPrecision;
+}
 .window-controls button:hover {
   background: color-mix(in srgb, var(--ink, #232722) 10%, transparent);
 }

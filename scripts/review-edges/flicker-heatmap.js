@@ -21,7 +21,7 @@ window.addEventListener('unhandledrejection', event => { window.__error = String
 const prefix = code === 'checkpoint' ? '/.tools/subpixel-baseline/src/' : '/src/';
 const [sceneModule, dataModule, demoModule, qualityModule] = await Promise.all([
   import(/* @vite-ignore */ `${prefix}scene.ts`), import(/* @vite-ignore */ `${prefix}data.ts`),
-  import(/* @vite-ignore */ `${prefix}demo-library.ts`), import(/* @vite-ignore */ `${prefix}render-quality.ts`),
+  import(/* @vite-ignore */ `${prefix}${code === 'checkpoint' ? '' : 'local_music/data/'}demo-library.ts`), import(/* @vite-ignore */ `${prefix}render-quality.ts`),
 ]);
 dataModule.setMusicAlbums(demoModule.demoAlbums, demoModule.demoGenres);
 function seeded(perform) {

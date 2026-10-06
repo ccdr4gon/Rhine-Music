@@ -1,6 +1,6 @@
 [[permission]]
 identifier = "allow-choose-music-folders"
-description = "Select music folders through the system dialog. No arbitrary file writes."
+description = "Select the main music folder through the system dialog. No arbitrary file writes."
 commands.allow = ["choose_music_folders"]
 
 [[permission]]
@@ -20,5 +20,5 @@ commands.allow = ["netease_queue", "netease_playlists"]
 
 [[permission]]
 identifier = "allow-netease-debug"
-description = "Control NetEase Cloud Music through its local DevTools port (127.0.0.1:9233) while its queue is shown and song switching is not turned off."
+description = "Control NetEase Cloud Music through its local DevTools port (127.0.0.1:9233) while its queue is shown and playing the selected song with the play button is not turned off."
 commands.allow = ["netease_debug_state", "netease_debug_play", "netease_debug_seek", "netease_debug_restart"]

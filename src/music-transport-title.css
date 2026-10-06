@@ -1,6 +1,8 @@
-/* Growing this slot moves every preceding control left while playback stays put. */
+/* The header's now-playing slot (music-transport-title.ts): it grows to the title, which rolls
+   in with the 460 ms direct reel, in the muted colour. Its room (--song-cap, the text's room
+   plus the reel's 14 px) is set by fitChrome (music-app.ts) from what the row leaves. */
 .music-topnav {
-  --song-cap: clamp(0px, calc(100vw - 760px), 240px);
+  --song-cap: 244px;
   flex-shrink: 0;
 }
 .music-topnav .transport-track {
@@ -8,14 +10,19 @@
   position: relative;
   flex: none;
   width: 0;
-  margin-right: -6px;
+  margin-right: 0;
   overflow: hidden;
   white-space: nowrap;
   opacity: 0;
-  transition: width 640ms cubic-bezier(0.4, 0, 0.2, 1), opacity 400ms ease;
+  transition:
+    width 640ms cubic-bezier(0.4, 0, 0.2, 1),
+    margin-right 640ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 400ms ease;
 }
 .music-topnav .transport-track.visible {
   width: min(var(--song-width, 240px), var(--song-cap));
+  /* The reel's 14 px beyond the text do not push the transport further away. */
+  margin-right: -14px;
   opacity: 1;
 }
 .transport-track > span {
@@ -23,10 +30,13 @@
   position: relative;
   width: max-content;
   max-width: max(0px, calc(var(--song-cap) - 14px));
+  /* The reel sets its characters one by one (no kerning), a little wider than the measured
+     text: room for that before the clip, inside the slot's own 14 px. */
+  padding-right: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 12px;
-  line-height: 29px;
+  color: var(--muted);
+  line-height: 24px;
   transform: translateX(18px);
   transition: transform 640ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -47,20 +57,6 @@
   left: 0;
   top: 0;
   white-space: pre;
-}
-@media (max-width: 1100px) {
-  .music-topnav { --song-cap: clamp(0px, calc(100vw - 610px), 180px); }
-  .transport-track > span { font-size: 11px; }
-}
-@media (max-width: 700px) {
-  .music-topnav { --song-cap: clamp(0px, calc(100vw - 340px), 100px); }
-  .music-topnav .transport-track { margin-right: -1px; }
-  .transport-track > span { font-size: 10px; }
-}
-@media (max-width: 480px) {
-  .music-header { gap: 12px; }
-  .music-brand strong { font-size: clamp(18px, 5vw, 24px); }
-  .music-brand span { font-size: 6px; letter-spacing: 0.8px; }
 }
 .reduce-motion .transport-track,
 .reduce-motion .transport-track > span {

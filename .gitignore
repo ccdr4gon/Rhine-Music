@@ -46,3 +46,5 @@ art/archive-studio.png
 
 # Local comparison audio from the original reference video (not a runtime asset)
 reference/typing-original.wav
+# Claude Design brief: holds a private copy of the reference film and its frames; never committed.
+/design-brief/

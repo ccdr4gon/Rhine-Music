@@ -47,9 +47,9 @@ async fn media_control(
 async fn netease_queue(
     stamp: Option<String>,
     source: Option<bool>,
-) -> Result<rhine_music::media::netease_queue::QueueReply, String> {
+) -> Result<rhine_music::netease_music::data::queue::QueueReply, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        rhine_music::media::netease_queue::read(stamp.as_deref(), source.unwrap_or(false))
+        rhine_music::netease_music::data::queue::read(stamp.as_deref(), source.unwrap_or(false))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -60,19 +60,19 @@ async fn netease_queue(
 #[tauri::command]
 async fn netease_playlists(
     stamp: Option<String>,
-) -> Result<rhine_music::media::netease_playlists::PlaylistsReply, String> {
+) -> Result<rhine_music::netease_music::data::playlists::PlaylistsReply, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        rhine_music::media::netease_playlists::read(stamp.as_deref())
+        rhine_music::netease_music::data::playlists::read(stamp.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
-/// NetEase's local DevTools port; polled while its queue is shown and song switching is not
-/// turned off.
+/// NetEase's local DevTools port; polled while its queue is shown and playing the selected
+/// song with the play button is not turned off.
 #[tauri::command]
-async fn netease_debug_state() -> Result<rhine_music::media::netease_debug::DebugState, String> {
-    tauri::async_runtime::spawn_blocking(rhine_music::media::netease_debug::state)
+async fn netease_debug_state() -> Result<rhine_music::netease_music::connector::debug_port::DebugState, String> {
+    tauri::async_runtime::spawn_blocking(rhine_music::netease_music::connector::debug_port::state)
         .await
         .map_err(|error| error.to_string())?
 }
@@ -80,7 +80,7 @@ async fn netease_debug_state() -> Result<rhine_music::media::netease_debug::Debu
 #[tauri::command]
 async fn netease_debug_play(track_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        rhine_music::media::netease_debug::play(&track_id)
+        rhine_music::netease_music::connector::debug_port::play(&track_id)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -89,7 +89,7 @@ async fn netease_debug_play(track_id: String) -> Result<(), String> {
 #[tauri::command]
 async fn netease_debug_seek(track_id: String, position: f64) -> Result<f64, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        rhine_music::media::netease_debug::seek(&track_id, position)
+        rhine_music::netease_music::connector::debug_port::seek(&track_id, position)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -98,7 +98,7 @@ async fn netease_debug_seek(track_id: String, position: f64) -> Result<f64, Stri
 /// Closes NetEase and starts it with the debugging port; only from the user's button.
 #[tauri::command]
 async fn netease_debug_restart() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(rhine_music::media::netease_debug::restart)
+    tauri::async_runtime::spawn_blocking(rhine_music::netease_music::connector::debug_port::restart)
         .await
         .map_err(|error| error.to_string())?
 }
@@ -117,10 +117,12 @@ fn save_preferences(
     Ok(())
 }
 
+/// The system folder picker for the main music folder: one folder (the owner, 2026-10-06: each
+/// playlist is a subfolder of it). The command keeps its name and its list reply (none or one).
 #[tauri::command]
 async fn choose_music_folders(initial_directory: Option<String>) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut picker = rfd::FileDialog::new().set_title("选择音乐文件夹");
+        let mut picker = rfd::FileDialog::new().set_title("选择音乐主文件夹");
         if let Some(directory) = initial_directory
             .map(PathBuf::from)
             .filter(|p| p.is_absolute() && p.is_dir())
@@ -128,8 +130,7 @@ async fn choose_music_folders(initial_directory: Option<String>) -> Result<Vec<S
             picker = picker.set_directory(directory);
         }
         picker
-            .pick_folders()
-            .unwrap_or_default()
+            .pick_folder()
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect()
@@ -141,6 +142,39 @@ async fn choose_music_folders(initial_directory: Option<String>) -> Result<Vec<S
 fn option(name: &str) -> Option<String> {
     let args: Vec<_> = std::env::args().collect();
     args.windows(2).find(|a| a[0] == name).map(|a| a[1].clone())
+}
+
+/// Whether a start opens the player skin (`?mode=external`) rather than local music. `--skin`
+/// and `--local` (the two launchers) decide, `--skin` first, as when they are forwarded to a
+/// running window. A plain start resumes the player skin when the last session was in it and a
+/// source is remembered there, so that the source is connected again without being chosen (the
+/// owner, 2026-10-06); otherwise it opens local music, as before. The page keeps both in its
+/// preferences (`playerMode`, `playerLink`; src/music-app.ts).
+fn opens_skin(args: &[String], preferences: &serde_json::Value) -> bool {
+    if args.iter().any(|arg| arg == "--skin") {
+        return true;
+    }
+    if args.iter().any(|arg| arg == "--local") {
+        return false;
+    }
+    preferences.get("playerMode").and_then(serde_json::Value::as_str) == Some("external")
+        && preferences.get("playerLink").is_some_and(remembers_source)
+}
+
+/// A remembered source as the page saves it (`readSourceLink` in
+/// src/external_player/external-media.ts accepts the same): a player Rhine knows, by its module
+/// id, or any other by the app id of its media session. `null` (the user disconnected) and
+/// anything this version cannot read remember nothing.
+fn remembers_source(link: &serde_json::Value) -> bool {
+    match link.get("player") {
+        Some(serde_json::Value::String(player)) => {
+            player == rhine_music::netease_music::PLAYER || player == rhine_music::qq_music::PLAYER
+        }
+        _ => link
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|app| !app.is_empty() && app.encode_utf16().count() <= 512),
+    }
 }
 
 // Portable state follows the executable, never the shell's working directory.
@@ -274,8 +308,9 @@ fn main() {
                 "Object.defineProperty(window, '__RHINE_DESKTOP__', {{ value: true }}); try {{ const session = '{}'; if (sessionStorage.getItem('rhine-desktop-session') !== session) {{ const saved = JSON.parse({}); if (saved) localStorage.setItem('rhine-music-preferences', JSON.stringify(saved)); sessionStorage.setItem('rhine-desktop-session', session); }} }} catch (error) {{ console.error('无法恢复播放器偏好', error); }}",
                 uuid::Uuid::new_v4(), serde_json::to_string(&preferences.to_string())?
             );
+            let skin = opens_skin(&std::env::args().collect::<Vec<_>>(), &preferences);
             app.manage(DesktopState { directory: data_dir, preferences: Mutex::new(preferences) });
-            let entry = if std::env::args().any(|arg| arg == "--skin") {
+            let entry = if skin {
                 format!("{origin}/?mode=external")
             } else {
                 origin
@@ -324,6 +359,71 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    fn args(list: &[&str]) -> Vec<String> {
+        std::iter::once("Rhine Music.exe")
+            .chain(list.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_start_resumes_the_player_skin_only_with_a_remembered_source() {
+        let skin = |link: Value| json!({ "theme": "night", "playerMode": "external", "playerLink": link });
+        for link in [
+            json!({ "player": "netease" }),
+            json!({ "player": "qqmusic" }),
+            json!({ "app": "Fictional.Player_0abc!App", "name": "Fictional Player" }),
+            json!({ "app": "fictional.exe" }),
+            json!({ "app": "x".repeat(512) }),
+        ] {
+            assert!(opens_skin(&args(&[]), &skin(link.clone())), "{link}");
+        }
+        // Nothing remembered: the user disconnected (null), or a link this version cannot read.
+        for link in [
+            Value::Null,
+            json!({}),
+            json!({ "player": "spotify" }),
+            json!({ "player": "NETEASE" }),
+            json!({ "player": "spotify", "app": "spotify.exe" }),
+            json!({ "player": 7 }),
+            json!({ "app": "" }),
+            json!({ "app": 7 }),
+            json!({ "app": "x".repeat(513) }),
+            json!("netease"),
+            json!(["netease"]),
+        ] {
+            assert!(!opens_skin(&args(&[]), &skin(link.clone())), "{link}");
+        }
+        // Never connected in the player skin (no link at all).
+        assert!(!opens_skin(&args(&[]), &json!({ "playerMode": "external" })));
+        // The last session was local music, older preferences have no mode, or there are none.
+        for preferences in [
+            json!({ "playerMode": "local", "playerLink": { "player": "netease" } }),
+            json!({ "playerLink": { "player": "netease" } }),
+            json!({ "playerMode": "EXTERNAL", "playerLink": { "player": "netease" } }),
+            json!({ "playerMode": true, "playerLink": { "player": "netease" } }),
+            Value::Null,
+            json!([]),
+        ] {
+            assert!(!opens_skin(&args(&[]), &preferences), "{preferences}");
+        }
+    }
+
+    #[test]
+    fn the_launchers_arguments_win_over_the_saved_mode() {
+        let remembered = json!({ "playerMode": "external", "playerLink": { "player": "qqmusic" } });
+        let local = json!({ "playerMode": "local" });
+        assert!(opens_skin(&args(&["--skin"]), &local));
+        assert!(opens_skin(&args(&["--skin"]), &Value::Null));
+        assert!(!opens_skin(&args(&["--local"]), &remembered));
+        // Both given: the player skin, as when they are forwarded to a running window.
+        assert!(opens_skin(&args(&["--local", "--skin"]), &local));
+        // Anything else is not a mode.
+        assert!(opens_skin(&args(&["--data-dir", "x"]), &remembered));
+        assert!(!opens_skin(&args(&["skin", "--Skin"]), &local));
+    }
 
     #[test]
     fn portable_resources_and_state_follow_the_executable_when_moved() {

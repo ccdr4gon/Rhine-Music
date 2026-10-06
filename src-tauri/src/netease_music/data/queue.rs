@@ -200,7 +200,7 @@ fn track(item: &Value) -> Option<QueueTrack> {
 }
 
 /// The display fields of one of NetEase's song records. The queue file and the local
-/// database (`netease_playlists`) store songs in the same shape.
+/// database (`super::playlists`) store songs in the same shape.
 pub(crate) fn display_track(track: &Value) -> Option<QueueTrack> {
     let id = text(track.get("id"));
     let title = text(track.get("name"));

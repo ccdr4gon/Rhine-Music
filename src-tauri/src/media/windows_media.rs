@@ -1,7 +1,8 @@
-use super::{parse_netease_title, Action, Capabilities, Snapshot, Source};
+use super::{player_source, Action, Capabilities, Snapshot, Source};
+use crate::netease_music::connector::{self as netease, window::WindowFallback};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         mpsc::{self, SyncSender},
         OnceLock,
@@ -9,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::{
-    core::{Interface, RuntimeType, BOOL, HSTRING},
+    core::{Interface, RuntimeType, HSTRING},
     ApplicationModel::AppInfo,
     Media::Control::{
         GlobalSystemMediaTransportControlsSession as Session,
@@ -18,27 +19,7 @@ use windows::{
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as Playback,
     },
     Storage::Streams::DataReader,
-    Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM},
-        System::{
-            Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-                TH32CS_SNAPPROCESS,
-            },
-            WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
-        },
-        UI::{
-            Input::KeyboardAndMouse::{
-                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-                KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE,
-                VK_MEDIA_PREV_TRACK,
-            },
-            WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId,
-            },
-        },
-    },
+    Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
 };
 use windows_future::{AsyncStatus, IAsyncOperation};
 
@@ -144,7 +125,7 @@ pub(super) fn control(
         .map_err(|_| "媒体控制超时，未确认播放结果".to_string())?
 }
 
-fn win_error(error: windows::core::Error) -> String {
+pub(crate) fn win_error(error: windows::core::Error) -> String {
     format!("Windows 媒体服务：{error}")
 }
 fn wait<T: RuntimeType>(operation: IAsyncOperation<T>) -> Outcome<T> {
@@ -184,7 +165,8 @@ struct Entry {
 struct State {
     manager: Option<Manager>,
     entries: Vec<Entry>,
-    netease: Option<(String, NeteaseWindow)>,
+    /// NetEase without a media session of its own (netease_music/connector/window.rs).
+    netease: WindowFallback,
 }
 fn app_counts<'a>(apps: impl IntoIterator<Item = &'a str>) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
@@ -287,25 +269,6 @@ impl State {
         self.entries = next;
         Ok(())
     }
-    fn refresh_netease(&mut self) -> Outcome<()> {
-        let current = match observe_netease() {
-            Ok(current) => current,
-            Err(error) => {
-                self.netease = None;
-                return Err(error);
-            }
-        };
-        self.netease = current.map(|window| {
-            let id = self
-                .netease
-                .as_ref()
-                .filter(|(_, old)| old.pid == window.pid && old.hwnd == window.hwnd)
-                .map(|(id, _)| id.clone())
-                .unwrap_or_else(|| format!("netease-{}", uuid::Uuid::new_v4()));
-            (id, window)
-        });
-        Ok(())
-    }
     fn snapshot(&mut self) -> Outcome<Snapshot> {
         let discovery = self.refresh_sessions();
         let mut warnings = Vec::new();
@@ -320,22 +283,14 @@ impl State {
                 source.capabilities = Capabilities::default();
             }
         }
-        if let Err(error) = self.refresh_netease() {
+        if let Err(error) = self.netease.refresh() {
             warnings.push(error);
         }
-        let netease_smtc = self.entries.iter().any(|entry| is_netease_app(&entry.app));
+        let netease_smtc = self.entries.iter().any(|entry| netease::is_app(&entry.app));
         if !netease_smtc {
-            if let Some((id, window)) = &self.netease {
-                let no_competitor = discovery.is_ok() && self.entries.is_empty();
-                sources.push(Source {
-                    id: id.clone(), name: "网易云音乐（窗口标题）".into(), kind: "netease".into(),
-                    title: window.title.clone(), artist: window.artist.clone(), album: String::new(),
-                    cover_url: None, playback: "unknown".into(), position: None, duration: None,
-                    capabilities: Capabilities { toggle: no_competitor, previous: no_competitor, next: no_competitor, ..Capabilities::default() },
-                    warning: Some(if no_competitor { "仅有曲名与歌手，播放状态、封面和进度不可用。控制需要允许系统媒体键，不能保证只发送给网易云。" }
-                        else { "仅有曲名与歌手。检测到其它媒体会话或无法确认系统会话，已禁用系统媒体键以免控制其它播放器。" }.into()),
-                    player: Some("netease".into()),
-                });
+            let no_competitor = discovery.is_ok() && self.entries.is_empty();
+            if let Some(source) = self.netease.source(no_competitor) {
+                sources.push(source);
             }
         }
         Ok(Snapshot {
@@ -355,25 +310,9 @@ impl State {
         // the unambiguous same official app identity, can receive the action.
         // An observed disappearance removes the old ID before any later return.
         self.refresh_sessions()?;
-        if id.starts_with("netease-") {
-            self.refresh_netease()?;
-            if self
-                .netease
-                .as_ref()
-                .is_none_or(|(current, _)| current != id)
-            {
-                return Err("选中的网易云来源已断开，请重新选择".into());
-            }
-            if !global_keys {
-                return Err("网易云回退控制需要明确允许系统媒体键".into());
-            }
-            if !self.entries.is_empty() {
-                return Err("发现其它系统媒体会话，已拒绝全局媒体键以免控制错误播放器".into());
-            }
-            if Instant::now() >= deadline {
-                return Err("媒体控制请求已过期，未发送操作".into());
-            }
-            return send_global_key(action);
+        if WindowFallback::owns(id) {
+            let other_sessions = !self.entries.is_empty();
+            return self.netease.control(id, action, global_keys, other_sessions, deadline);
         }
         let entry = self
             .entries
@@ -441,11 +380,6 @@ impl State {
     }
 }
 
-fn is_netease_app(app: &str) -> bool {
-    let app = app.to_lowercase();
-    app.contains("cloudmusic") || app.contains("netease") || app.contains("网易云")
-}
-
 fn read_source(entry: &mut Entry) -> Source {
     let mut source = Source {
         id: entry.id.clone(),
@@ -460,7 +394,9 @@ fn read_source(entry: &mut Entry) -> Source {
         duration: None,
         capabilities: Capabilities::default(),
         warning: None,
-        player: is_netease_app(&entry.app).then(|| "netease".into()),
+        player: None,
+        // The session's app id: how a player Rhine does not know is remembered (never its id).
+        app: (!entry.app.is_empty()).then(|| entry.app.clone()),
     };
     let result = (|| -> Outcome<()> {
         let media = wait(
@@ -544,7 +480,8 @@ fn read_source(entry: &mut Entry) -> Source {
     if let Err(error) = result {
         source.warning = Some(error);
     }
-    source
+    // Marked (and, for QQ Music, named) by the module of the player it belongs to, if any.
+    player_source(&entry.app, source)
 }
 
 fn read_cover(media: &Properties) -> Outcome<Option<String>> {
@@ -614,114 +551,6 @@ fn can_toggle(state: Playback, toggle: bool, play: bool, pause: bool) -> bool {
             state,
             Playback::Paused | Playback::Stopped | Playback::Opened
         ) && play)
-}
-
-#[derive(Clone)]
-struct NeteaseWindow {
-    pid: u32,
-    hwnd: usize,
-    title: String,
-    artist: String,
-    priority: u8,
-}
-struct WindowContext {
-    pids: HashSet<u32>,
-    candidates: Vec<NeteaseWindow>,
-}
-fn observe_netease() -> Outcome<Option<NeteaseWindow>> {
-    let mut context = WindowContext {
-        pids: HashSet::new(),
-        candidates: Vec::new(),
-    };
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(win_error)?;
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                if wide(&entry.szExeFile).eq_ignore_ascii_case("cloudmusic.exe") {
-                    context.pids.insert(entry.th32ProcessID);
-                }
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        let _ = CloseHandle(snapshot);
-        if context.pids.is_empty() {
-            return Ok(None);
-        }
-        EnumWindows(
-            Some(enum_window),
-            LPARAM((&mut context as *mut WindowContext) as isize),
-        )
-        .map_err(win_error)?;
-    }
-    context
-        .candidates
-        .sort_by_key(|window| (window.priority, window.pid, window.hwnd));
-    Ok(context.candidates.into_iter().next())
-}
-unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let context = unsafe { &mut *(lparam.0 as *mut WindowContext) };
-    let mut pid = 0;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    }
-    if !context.pids.contains(&pid) {
-        return true.into();
-    }
-    let mut class = [0u16; 256];
-    let count = unsafe { GetClassNameW(hwnd, &mut class) }.max(0) as usize;
-    let priority = match String::from_utf16_lossy(&class[..count]).as_str() {
-        "OrpheusBrowserHost" => 0,
-        "icon" => 1,
-        _ => return true.into(),
-    };
-    let length = unsafe { GetWindowTextLengthW(hwnd) }.clamp(0, 8192) as usize;
-    let mut title = vec![0; length + 1];
-    let count = unsafe { GetWindowTextW(hwnd, &mut title) }.max(0) as usize;
-    if let Some((title, artist)) = parse_netease_title(&String::from_utf16_lossy(&title[..count])) {
-        context.candidates.push(NeteaseWindow {
-            pid,
-            hwnd: hwnd.0 as usize,
-            title,
-            artist,
-            priority,
-        });
-    }
-    true.into()
-}
-fn wide(s: &[u16]) -> String {
-    String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
-}
-fn send_global_key(action: Action) -> Outcome<()> {
-    let key = match action {
-        Action::Toggle => VK_MEDIA_PLAY_PAUSE,
-        Action::Previous => VK_MEDIA_PREV_TRACK,
-        Action::Next => VK_MEDIA_NEXT_TRACK,
-        _ => return Err("网易云窗口模式不支持停止或跳转进度".into()),
-    };
-    let event = |flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let inputs = [
-        event(KEYEVENTF_EXTENDEDKEY),
-        event(KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
-    ];
-    if unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) } != 2 {
-        return Err("Windows 未接收完整媒体键，播放结果未确认".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

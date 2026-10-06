@@ -14,6 +14,72 @@ const normalized = (value) => text(value).normalize('NFKC').toLocaleLowerCase().
 const exists = async (file) => { try { await fs.access(file); return true } catch { return false } }
 const timestamp = () => new Date().toISOString()
 const METADATA_VERSION = 2
+// QQ Music's encrypted downloads (.mflac, .mgg, .qmc* and their numbered variants): not audio this
+// service can read, never decrypted; only counted for the scan's summary (as library.rs does).
+const ENCRYPTED_DOWNLOAD = /^\.(?:qmc|mflac|mgg)/i
+
+const codePoints = (value) => Array.from(value, (char) => char.codePointAt(0))
+const isDigit = (code) => code >= 48 && code <= 57
+/** Code point order (Rust's string order). */
+export function codePointCompare(left, right) {
+  const a = codePoints(left), b = codePoints(right)
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1
+  return Math.sign(a.length - b.length)
+}
+/** Natural order, exactly as library.rs natural_cmp: case folded, runs of ASCII digits by value. */
+export function naturalCompare(left, right) {
+  const a = codePoints(left.toLowerCase()), b = codePoints(right.toLowerCase())
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (isDigit(a[i]) && isDigit(b[j])) {
+      let x = ''
+      let y = ''
+      while (i < a.length && isDigit(a[i])) x += String.fromCodePoint(a[i++])
+      while (j < b.length && isDigit(b[j])) y += String.fromCodePoint(b[j++])
+      x = x.replace(/^0+/, '')
+      y = y.replace(/^0+/, '')
+      const order = x.length - y.length || codePointCompare(x, y)
+      if (order) return Math.sign(order)
+    } else {
+      if (a[i] !== b[j]) return a[i] < b[j] ? -1 : 1
+      i++
+      j++
+    }
+  }
+  return (i < a.length ? 1 : 0) - (j < b.length ? 1 : 0)
+}
+const pathParts = (value) => value.split(/[\\/]/).filter(Boolean)
+/** Natural order of two paths inside the main folder, folder by folder (library.rs path_cmp). */
+export function pathCompare(left, right) {
+  const a = pathParts(left), b = pathParts(right)
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const order = naturalCompare(a[i], b[i]) || codePointCompare(a[i], b[i])
+    if (order) return order
+  }
+  return Math.sign(a.length - b.length)
+}
+
+/**
+ * The main folder's playlists (the owner, 2026-10-06), as library.rs `playlists` makes them: each
+ * direct subfolder holding audio at any depth, named after it, its songs in natural order of their
+ * paths; the main folder's own audio first, named after the main folder.
+ */
+export function folderPlaylists(main, albums) {
+  const lists = new Map()
+  for (const album of albums) for (const track of album.tracks) {
+    const parts = pathParts(track.relativePath ?? '')
+    const nested = parts.length > 1
+    const folder = nested ? path.join(main, parts[0]) : main
+    let list = lists.get(folder)
+    if (!list) lists.set(folder, list = { name: nested ? parts[0] : path.basename(main) || main, folder, main: !nested, songs: [] })
+    list.songs.push(track)
+  }
+  return [...lists.values()]
+    .map((list) => ({ ...list, songs: list.songs.sort((a, b) => pathCompare(a.relativePath, b.relativePath) || codePointCompare(a.id, b.id)) }))
+    .sort((a, b) => (b.main ? 1 : 0) - (a.main ? 1 : 0) || naturalCompare(a.name, b.name) || codePointCompare(a.name, b.name) || codePointCompare(a.folder, b.folder))
+    .map((list) => ({ id: `playlist-${hash(list.folder)}`, name: list.name, folder: list.folder, main: list.main, trackIds: list.songs.map((track) => track.id) }))
+}
 
 export const DEFAULT_RULES = {
   version: 1,
@@ -79,14 +145,20 @@ export function resolveGenre(album, rules) {
 
 export function safeRootList(roots) {
   if (!Array.isArray(roots) || roots.length > 64 || roots.some((root) => typeof root !== 'string' || !path.isAbsolute(root) || root.includes('\0') || (process.platform === 'win32' && path.parse(root).root.length <= 1))) throw new Error('音乐目录必须是绝对路径数组（最多 64 个）；Windows 请包含盘符，例如 D:\\Music')
-  // Nested roots would scan the same album twice; keep the highest selected root.
-  const resolved = unique(roots.map((root) => path.resolve(root)))
-  return resolved.filter((root, index) => !resolved.some((parent, parentIndex) => {
-    if (parentIndex === index) return false
-    const relative = path.relative(parent, root)
-    if (!relative) return parentIndex < index
-    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-  }))
+  // The first folder is the main folder (2026-10-06): always kept, first. A later folder that is
+  // the same, lies inside a kept one or contains the main folder is dropped; a later folder
+  // replaces the ones inside it. Folders after the main one come from earlier versions: kept, unused.
+  const inside = (parent, child) => {
+    const relative = path.relative(parent, child)
+    return !relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  }
+  const output = []
+  for (const root of unique(roots.map((root) => path.resolve(root)))) {
+    if (output.some((kept) => inside(kept, root)) || (output.length && inside(root, output[0]))) continue
+    for (let index = output.length - 1; index >= 1; index--) if (inside(root, output[index])) output.splice(index, 1)
+    output.push(root)
+  }
+  return output
 }
 
 function audioMime(file) {
@@ -97,13 +169,20 @@ export function imageMime(file) {
   return ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' })[path.extname(file).toLowerCase()] ?? 'application/octet-stream'
 }
 
-/** Root-level files are singles; nested folders are albums. Source files stay read-only. */
+/**
+ * Main-folder files are one record each; nested folders with audio are album records (their songs,
+ * cover and introduction). The playlists are made from these records' paths (folderPlaylists).
+ * Names starting with a dot are skipped (macOS's `._` copies included); this service cannot see
+ * Windows' hidden attribute, which the Windows client also skips. Source files stay read-only.
+ */
 async function walkAlbums(root) {
   const folders = []
+  let encrypted = 0
   const visit = async (folder) => {
     const entries = await fs.readdir(folder, { withFileTypes: true })
     entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
-    const files = entries.filter((entry) => entry.isFile())
+    const files = entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
+    encrypted += files.filter((entry) => ENCRYPTED_DOWNLOAD.test(path.extname(entry.name))).length
     const tracks = files.filter((entry) => AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())).map((entry) => path.join(folder, entry.name))
     if (tracks.length) {
       const images = files.filter((entry) => /\.(png|jpe?g|webp)$/i.test(entry.name))
@@ -125,7 +204,7 @@ async function walkAlbums(root) {
     for (const entry of entries) if (entry.isDirectory() && !entry.name.startsWith('.')) await visit(path.join(folder, entry.name))
   }
   await visit(root)
-  return folders
+  return { folders, encrypted }
 }
 
 const albumEntryId = (entry) => `album-${hash(entry.singleFile ?? entry.folder)}`
@@ -164,6 +243,11 @@ export class MusicLibraryStore {
     await writeJsonAtomic(path.join(this.dataDir, 'config.json'), this.config)
     return this
   }
+
+  /** The main folder: the first saved folder. Only it is scanned, shown and served. */
+  get mainFolder() { return this.config.roots[0] }
+
+  inLibrary(album) { return !!this.mainFolder && album._root === this.mainFolder }
 
   saveIndex() {
     // Serialize snapshots so an enrichment finishing during a scan cannot leave
@@ -217,7 +301,8 @@ export class MusicLibraryStore {
   snapshot() {
     const counts = new Map()
     const generated = new Map()
-    const albums = this.index.albums.filter((album) => this.config.roots.includes(album._root)).map((album) => {
+    const library = this.index.albums.filter((album) => this.inLibrary(album))
+    const albums = library.map((album) => {
       const genreId = resolveGenre(album, this.rules)
       counts.set(genreId, (counts.get(genreId) ?? 0) + 1)
       if (genreId.startsWith('source-')) generated.set(genreId, { id: genreId, name: album._onlineGenres?.[0] ?? album._localGenres?.[0] ?? album.rawGenres[0] })
@@ -228,14 +313,17 @@ export class MusicLibraryStore {
         introduction: album.introduction,
         genreId, rawGenres: unique([...(album._onlineGenres ?? []), ...(album._localGenres ?? [])]),
         folder: album.folder, coverUrl: album._cover ? `/api/artwork/${album.id}?v=${album._cover.version}` : undefined,
-        tracks: album.tracks.map(({ _path, _fingerprint, _common, _embeddedCover, _metadataVersion, ...track }) => track),
+        // A song's own album and year tags come along for its details (as library.rs public_track).
+        tracks: album.tracks.map(({ _path, _fingerprint, _common, _embeddedCover, _metadataVersion, ...track }) => ({
+          ...track, ...(text(_common?.album) ? { album: text(_common.album) } : {}), ...(numberOrUndefined(_common?.year) ? { year: _common.year } : {}),
+        })),
         producers: album.producers ?? [], offline: !!album.offline,
         online: album.online ?? { status: 'unqueried' },
       }
     })
     const genres = [...this.rules.genres, ...generated.values()].filter((genre) => counts.has(genre.id)).map((genre) => ({ ...genre, albumCount: counts.get(genre.id) ?? 0 }))
     return {
-      version: 1, albums, genres,
+      version: 1, albums, genres, playlists: this.mainFolder ? folderPlaylists(this.mainFolder, library) : [],
       roots: this.config.roots.map((root) => this.index.roots.find((entry) => entry.path === root) ?? { path: root, status: 'unscanned' }),
       scan: { ...this.scanStatus }, onlineEnabled: !!this.config.onlineEnabled, enrich: { ...this.enrichStatus },
       introductions: { ...this.introductionsStatus },
@@ -251,19 +339,20 @@ export class MusicLibraryStore {
         await this.reloadRules()
         const nextAlbums = []
         const nextRoots = []
-        for (const root of this.config.roots) {
+        // Only the main folder: the folders earlier versions saved after it are not scanned.
+        for (const root of this.config.roots.slice(0, 1)) {
           const previous = this.index.albums.filter((album) => album._root === root)
           try {
             const stat = await fs.stat(root)
             if (!stat.isDirectory()) throw new Error('根目录不是文件夹')
             // Finish enumeration before replacing anything: partial permission
             // failures must never masquerade as deletions.
-            const folders = await walkAlbums(root)
+            const { folders, encrypted } = await walkAlbums(root)
             const rootAlbums = []
             const previousById = new Map(previous.map((album) => [album.id, album]))
             for (const folder of folders) rootAlbums.push(await this.readAlbum(root, folder, previousById.get(albumEntryId(folder))))
             nextAlbums.push(...rootAlbums)
-            nextRoots.push({ path: root, status: 'online' })
+            nextRoots.push({ path: root, status: 'online', ...(encrypted ? { encrypted } : {}) })
           } catch (error) {
             nextRoots.push({ path: root, status: 'offline', error: error.message })
             nextAlbums.push(...previous.map((album) => ({ ...album, offline: true })))
@@ -398,7 +487,7 @@ export class MusicLibraryStore {
   }
 
   trackFile(id) {
-    for (const album of this.index.albums) if (this.config.roots.includes(album._root)) {
+    for (const album of this.index.albums) if (this.inLibrary(album)) {
       const track = album.tracks.find((entry) => entry.id === id)
       if (track) return { path: track._path, mime: audioMime(track._path), allowedRoot: album._root }
     }
@@ -406,7 +495,7 @@ export class MusicLibraryStore {
   }
 
   artworkFile(id) {
-    const album = this.index.albums.find((entry) => entry.id === id && this.config.roots.includes(entry._root))
+    const album = this.index.albums.find((entry) => entry.id === id && this.inLibrary(entry))
     return album?._cover ? { ...album._cover, allowedRoot: album._cover.embedded ? this.dataDir : album._root } : null
   }
 
@@ -469,7 +558,7 @@ export class MusicLibraryStore {
   async enrich({ albumIds, force = false } = {}) {
     if (this.enrichPromise) return this.enrichPromise
     if (albumIds !== undefined && (!Array.isArray(albumIds) || albumIds.some((id) => typeof id !== 'string'))) throw new Error('albumIds 必须是专辑 ID 数组')
-    const selected = this.index.albums.filter((album) => !album.offline && (!albumIds || albumIds.includes(album.id)) && (force || !album.online?.checkedAt))
+    const selected = this.index.albums.filter((album) => !album.offline && this.inLibrary(album) && (!albumIds || albumIds.includes(album.id)) && (force || !album.online?.checkedAt))
     this.enrichStatus = { running: true, completed: 0, total: selected.length }
     this.enrichPromise = (async () => {
       // Yield once even for an empty queue so finally clears the assigned promise.
@@ -493,7 +582,7 @@ export class MusicLibraryStore {
     if (albumIds !== undefined && (!Array.isArray(albumIds) || albumIds.length > 10000 || albumIds.some((id) => typeof id !== 'string'))) throw new Error('albumIds 必须是专辑 ID 数组')
     if (typeof force !== 'boolean') throw new Error('force 必须为布尔值')
     const selected = this.index.albums.filter((album) => {
-      if (!this.config.roots.includes(album._root) || (albumIds && !albumIds.includes(album.id))) return false
+      if (!this.inLibrary(album) || (albumIds && !albumIds.includes(album.id))) return false
       if (force) return true
       if (album.description && album.descriptionSource?.url) return false
       const cached = album.introduction

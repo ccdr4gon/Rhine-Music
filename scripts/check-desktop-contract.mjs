@@ -215,6 +215,13 @@ try {
   await fs.writeFile(path.join(root, 'Album A', '1-02 Two.wav'), wav({ ...common, TIT2: '第二首', TRCK: '2/10' }));
   await fs.writeFile(path.join(root, 'Album A', 'Nested', '1-01 Nested.wav'), wav());
   await fs.writeFile(path.join(root, 'Album A', 'cover.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1cAAAAASUVORK5CYII=', 'base64'));
+  // The main folder's playlists (2026-10-06): a folder without audio and a hidden one are no
+  // playlists; a `._` copy and QQ Music's encrypted downloads are no songs (the downloads are counted).
+  await fs.mkdir(path.join(root, 'Empty folder', 'Still empty'), { recursive: true });
+  await fs.mkdir(path.join(root, '.hidden'), { recursive: true });
+  await fs.writeFile(path.join(root, '.hidden', 'hidden.wav'), wav());
+  await fs.writeFile(path.join(root, 'Album A', '._1-02 Two.wav'), wav());
+  await fs.writeFile(path.join(root, 'download.mflac'), Buffer.from('encrypted fixture'));
   const original = new Map();
   for (const file of ['单曲一.wav', '单曲二.wav', 'Album A/1-10 Ten.wav', 'Album A/1-02 Two.wav', 'Album A/Nested/1-01 Nested.wav']) original.set(file, await fs.readFile(path.join(root, file)));
   const store = await new MusicLibraryStore({ dataDir: nodeData, defaultRoots: [], musicBrainzContact: '', fetcher: () => { throw new Error('Contract fixture must not query network'); } }).init();
@@ -245,6 +252,15 @@ try {
   assert.ok(tagged); assert.equal(tagged.year, 2001); assert.equal(tagged.discCount, 2);
   assert.deepEqual(tagged.tracks.map(t => t.trackNumber), [2, 10]);
   assert.equal(tagged.genreId, 'jazz'); assert.ok(tagged.coverUrl);
+  // Playlists: the main folder's own songs first (named after it), then each subfolder with its
+  // songs at any depth, in natural order of their paths. Both services order them alike.
+  assert.deepEqual(first.playlists.map(p => [p.name, p.main, p.trackIds.length]), [[path.basename(root), true, 2], ['Album A', false, 3]]);
+  const pathOf = new Map(first.albums.flatMap(a => a.tracks.map(t => [t.id, t.relativePath])));
+  assert.deepEqual(first.playlists[1].trackIds.map(id => pathOf.get(id)),
+    [path.join('Album A', '1-02 Two.wav'), path.join('Album A', '1-10 Ten.wav'), path.join('Album A', 'Nested', '1-01 Nested.wav')]);
+  assert.deepEqual(first.playlists[0].trackIds.map(id => pathOf.get(id)), ['单曲一.wav', '单曲二.wav']);
+  assert.equal(first.roots[0].encrypted, 1);
+  assert.deepEqual([tagged.tracks[0].album, tagged.tracks[0].year], [common.TALB, 2001], 'a song\'s own album and year tags');
   const audio = tagged.tracks[0];
   const ranged = await fetch(`${nativeOrigin}${audio.audioUrl}`, { headers: { Range: 'bytes=0-43' } });
   assert.equal(ranged.status, 206);
@@ -274,6 +290,15 @@ try {
   await scanBoth();
   await compare('reconnected directory');
   for (const [file, bytes] of original) assert.deepEqual(await fs.readFile(path.join(root, file)), bytes, `Source file changed: ${file}`);
+  // A second folder saved by an earlier version stays saved after the main one, unused.
+  const earlier = path.join(temporary, 'earlier second folder');
+  await fs.mkdir(earlier, { recursive: true });
+  await fs.writeFile(path.join(earlier, 'other.wav'), wav());
+  await Promise.all([nativeOrigin, nodeOrigin].map(origin => json(origin, '/api/config', { roots: [root, earlier] })));
+  await scanBoth();
+  const extra = await compare('an earlier second folder stays saved but unused');
+  assert.deepEqual(extra.roots.map(r => [r.path, r.status]), [[root, 'online'], [earlier, 'unscanned']]);
+  assert.equal(extra.albums.length, 4);
   await Promise.all([nativeOrigin, nodeOrigin].map(origin => json(origin, '/api/config', { roots: [] })));
   const removed = await compare('removed root hides its albums');
   assert.equal(removed.albums.length, 0);

@@ -17,6 +17,10 @@ export interface MusicTrack {
   browserPlayable: boolean;
   audioUrl: string;
   relativePath: string;
+  /** The song's own album tag, when it has one (its album record may hold other songs too). */
+  album?: string;
+  /** The song's own year tag, when it has one. */
+  year?: number;
 }
 
 export interface MusicProducer {
@@ -83,12 +87,33 @@ export interface LibraryRoot {
   path: string;
   status: "online" | "offline" | "unscanned";
   error?: string;
+  /** QQ Music's encrypted downloads (.mflac, .mgg, .qmc*) seen by the last scan: never read. */
+  encrypted?: number;
+}
+
+/**
+ * One playlist of the main folder (the owner, 2026-10-06: "Local music means choosing a main
+ * folder, and each playlist will be a subfolder"): a direct subfolder with its songs at any depth,
+ * or the main folder's own songs, listed first and named after the main folder.
+ */
+export interface MusicPlaylist {
+  id: string;
+  name: string;
+  /** The playlist's folder: the subfolder, or the main folder itself. */
+  folder: string;
+  /** The main folder's own songs rather than a subfolder. */
+  main: boolean;
+  /** The songs (track IDs) in natural order of their paths inside the main folder. */
+  trackIds: string[];
 }
 
 export interface MusicLibrary {
   version: 1;
   albums: MusicAlbum[];
   genres: MusicGenre[];
+  /** The local library's columns: the main folder's playlists (the first of `roots`). */
+  playlists?: MusicPlaylist[];
+  /** The main folder first; folders saved after it by earlier versions are kept but unused. */
   roots: LibraryRoot[];
   scan: {
     running: boolean;

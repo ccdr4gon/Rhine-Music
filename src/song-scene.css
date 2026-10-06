@@ -1,7 +1,10 @@
-/* The song scene: flat chrome around the large card, a tilted glass sheet with the
-   playlist, and a title plate floating in front of it. SongListView.setCard writes the
-   geometry as --songs-* variables on the section; the values here are its 16:9 defaults.
-   The section itself is never faded: the sheet's backdrop must stay the canvas. */
+/* The song scene (Claude Design "Overlay Frame", direction B, 2026-10-05): flat chrome around
+   the large card (the ways out, a 1 px line behind the card with its marker, the column's name
+   at the bottom left) and one tilted pane of glass with the column's tab, the selected song, the
+   playlist as text and a quiet note. SongListView.setCard writes the geometry as --songs-*
+   variables on the section; the values here are its 16:9 defaults. Inside the pane lengths are
+   in layout units (--songs-u: 9 px at 1440 x 900, where they are the design's pixels). The
+   section itself is never faded: the pane's backdrop must stay the canvas. */
 .music-song {
   position: absolute;
   inset: 0;
@@ -11,58 +14,37 @@
   --songs-rail-x: 22.4vw;
   --songs-card-top: 34.89vh;
   --songs-card-bottom: 66.29vh;
-  --songs-marker-y: 29.03vh;
-  --songs-glass-x: calc(100vw - 109.06vh);
-  --songs-glass-y: 13.67vh;
-  --songs-glass-w: 102.49vh;
-  --songs-glass-h: 78.07vh;
+  --songs-marker-y: 28.22vh;
+  --songs-glass-x: calc(100vw - 102.34vh);
+  --songs-glass-y: 11.98vh;
+  --songs-glass-w: 97.73vh;
+  --songs-glass-h: 80.95vh;
   --songs-tilt: -18deg;
-  --songs-perspective: 184.49vh;
-  --songs-side: 36.9vh;
-  --songs-plate-x: calc(100vw - 104.75vh);
-  --songs-plate-y: 47.7vh;
-  --songs-plate-w: 32.01vh;
-  --songs-plate-h: 13vh;
-  --songs-cross-x: calc(100vw - 71.94vh);
-  --songs-cross-y: 46.6vh;
-  --songs-cross-top: 9.58vh;
-  --songs-cross-bottom: 95.82vh;
-  --songs-head-inset: 0px;
-  --songs-head-height: 0px;
-  --songs-row: max(44px, calc(var(--songs-u) * 5.4));
+  --songs-perspective: 227.7vh;
+  --songs-side: 39.77vh;
+  /* Rows are 48 high and their rule 1 px (49 apart, as the design's). */
+  --songs-row: max(44px, calc(var(--songs-u) * 5.4444));
   --songs-group: max(34px, calc(var(--songs-u) * 4.4));
-  --songs-pad: calc(var(--songs-u) * 3);
+  /* The pane's padding at the top and left, at the right and bottom; the gap left of the list. */
+  --songs-start: calc(var(--songs-u) * 3.3333);
+  --songs-end: calc(var(--songs-u) * 3.1111);
+  --songs-gap: calc(var(--songs-u) * 2.6667);
   --songs-night: calc(var(--music-night-mix, 0) * 100%);
-  --songs-signal: #bae534;
-  --songs-rail-ink: color-mix(in srgb, rgba(233, 238, 242, 0.46) var(--songs-night), #494843);
-  --songs-edge: color-mix(in srgb, rgba(208, 226, 243, 0.3) var(--songs-night), #bbbdb8);
-  --songs-rim: color-mix(in srgb, rgba(170, 196, 226, 0.07) var(--songs-night), rgba(255, 255, 255, 0.3));
-  --songs-glass-fill: color-mix(in srgb, rgba(16, 27, 45, 0.5) var(--songs-night), rgba(255, 255, 255, 0.35));
-  --songs-sheet-fill: color-mix(in srgb, rgba(7, 14, 26, 0.44) var(--songs-night), rgba(255, 255, 255, 0.4));
-  --songs-sheet-edge: color-mix(in srgb, rgba(208, 226, 243, 0.14) var(--songs-night), rgba(255, 255, 255, 0.85));
-  --songs-strip: color-mix(in srgb, rgba(233, 238, 242, 0.12) var(--songs-night), rgba(255, 255, 255, 0.82));
-  --songs-hover: color-mix(in srgb, rgba(233, 238, 242, 0.07) var(--songs-night), rgba(255, 255, 255, 0.5));
-  --songs-chosen: color-mix(in srgb, rgba(233, 238, 242, 0.15) var(--songs-night), rgba(255, 255, 255, 0.94));
-  --songs-plate-fill: color-mix(in srgb, #1d2c44 var(--songs-night), #f6f7f7);
-  --songs-plate-ink: color-mix(in srgb, #eef2f6 var(--songs-night), #1e1e1e);
-  --songs-plate-muted: color-mix(in srgb, #94a4ba var(--songs-night), #85867f);
-  --songs-shadow: color-mix(in srgb, rgba(0, 0, 0, 0.5) var(--songs-night), rgba(58, 54, 40, 0.2));
-  --songs-cross: color-mix(in srgb, rgba(255, 255, 255, 0.2) var(--songs-night), rgba(255, 255, 255, 0.92));
+  --songs-shadow: color-mix(in srgb, rgba(0, 0, 0, 0.45) var(--songs-night), rgba(58, 54, 40, 0.15));
 }
-.song-chrome,
-.song-float {
+.song-chrome {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
-/* The line passes behind the card: one piece down to its drawn top edge, one from its
-   drawn bottom edge. */
+/* The line passes behind the card: one piece down to its drawn top edge, one from its drawn
+   bottom edge. One pixel in the rule colour, on a whole pixel (songLayoutStyle). */
 .song-rail {
   position: absolute;
-  left: calc(var(--songs-rail-x) - 1px);
-  width: 2px;
-  background: var(--songs-rail-ink);
+  left: var(--songs-rail-x);
+  width: 1px;
+  background: var(--rule);
 }
 /* The play gesture lifts the card (--songs-hop): the line keeps meeting its edges. */
 .song-rail-top {
@@ -73,54 +55,83 @@
   top: calc(var(--songs-card-bottom) - var(--songs-hop, 0px));
   bottom: 0;
 }
+/* A 9 x 6 block on the line, above the card. */
 .song-marker {
   position: absolute;
-  left: calc(var(--songs-rail-x) - var(--songs-u) * 1.665);
-  top: calc(var(--songs-marker-y) - var(--songs-u) * 1.11);
-  width: calc(var(--songs-u) * 3.33);
-  height: calc(var(--songs-u) * 2.22);
-  background: var(--songs-signal);
+  left: calc(var(--songs-rail-x) - 4px);
+  top: calc(var(--songs-marker-y) - 3px);
+  width: 9px;
+  height: 6px;
+  background: var(--ink);
 }
 .music-song[data-rail="none"] .song-rail,
 .music-song:not([data-rail="marker"]) .song-marker {
   display: none;
 }
-.music-song .music-back > span {
+/* The two ways out (back to the shelf, on to the opened case's details) stand where the details'
+   do, 16 px apart; music-detail.css styles the buttons for both scenes. */
+.song-exits {
+  position: absolute;
+  left: var(--scene-side);
+  top: calc(var(--scene-top) + 4px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.song-exits .music-back > span {
   white-space: nowrap;
 }
-/* The other way out of the song scene: to the opened case's details, under the way back. */
-.music-song .song-details {
-  margin-top: 3em;
+/* The second way out, 16 px under the first (14 compact, 19 in large windows). */
+.song-exits .song-details {
+  margin-top: 16px;
 }
+.music-app[data-layout="compact"] .song-exits .song-details {
+  margin-top: 14px;
+}
+/* Portrait: on one line over the card's top left, which a narrow window brings close. */
+.music-app[data-layout="portrait"] .song-exits {
+  top: 146px;
+  flex-direction: row;
+}
+.music-app[data-layout="portrait"] .song-exits .song-details {
+  margin: 0 0 0 24px;
+}
+/* The column's name, bottom left, as in the details: a 34 x 5 bar from the window's edge. */
 .song-caption {
   position: absolute;
   left: 0;
-  top: calc(89% - var(--songs-u) * 0.9);
+  bottom: 22px;
   max-width: calc(var(--songs-rail-x) - var(--songs-u) * 2);
   margin: 0;
   display: flex;
   align-items: center;
-  gap: calc(var(--songs-u) * 2.2);
-  font-size: max(11px, calc(var(--songs-u) * 1.55));
-  line-height: calc(var(--songs-u) * 1.8);
+  gap: 14px;
+  font-size: 12px;
+  line-height: 1;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  white-space: nowrap;
 }
 .song-caption i {
+  display: block;
   flex: none;
-  width: calc(var(--songs-u) * 4.3);
-  height: calc(var(--songs-u) * 1.15);
+  width: 34px;
+  height: 5px;
   background: var(--ink);
 }
 .song-caption span {
   min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
+  /* Room for descenders inside the clip, outside the 12 px line box. */
+  padding: 3px 0;
+  margin: -3px 0;
+}
+.song-caption:has(span:empty) {
+  display: none;
 }
 
-/* One flat sheet: its content scrolls natively and is never part of a 3D context. */
+/* One flat pane: its content scrolls natively and is never part of a 3D context. Wide, the
+   selected song stands in a column left of the list (290 px into the 712 px pane at 1440). */
 .song-glass {
   position: absolute;
   left: var(--songs-glass-x);
@@ -129,106 +140,265 @@
   height: var(--songs-glass-h);
   transform: perspective(var(--songs-perspective)) rotateY(var(--songs-tilt));
   display: grid;
-  grid-template-columns: calc(var(--songs-side) - var(--songs-pad)) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: calc(var(--songs-side) - var(--songs-start)) minmax(0, 1fr);
+  grid-template-rows: calc(var(--songs-u) * 12) auto minmax(0, 1fr);
   grid-template-areas:
     "head head"
+    "selected list"
     "note list";
-  padding: calc(var(--songs-u) * 2.6) var(--songs-pad) var(--songs-pad);
-  border: 1px solid var(--songs-edge);
+  padding: var(--songs-start) var(--songs-end) var(--songs-end) var(--songs-start);
+  border: 1px solid var(--glass-edge);
   background:
-    linear-gradient(115deg, var(--songs-rim), transparent 34%),
-    var(--songs-glass-fill);
-  backdrop-filter: blur(calc(var(--songs-u) * 0.9)) saturate(1.06);
-  box-shadow: 0 calc(var(--songs-u) * 2.4) calc(var(--songs-u) * 6) color-mix(in srgb, var(--songs-shadow) 55%, transparent);
+    linear-gradient(115deg, var(--glass-rim), transparent 38%),
+    var(--glass-fill);
+  backdrop-filter: blur(calc(var(--songs-u) * 1.1111)) saturate(1.06);
+  box-shadow: 0 calc(var(--songs-u) * 2.6667) calc(var(--songs-u) * (7.1111 + 0.6667 * var(--music-night-mix, 0))) var(--songs-shadow);
   pointer-events: auto;
 }
-/* The pane's bevelled rim, just outside its outline. */
+/* The pane's inner rim, 7 px inside its edge. */
 .song-glass::before {
   content: "";
   position: absolute;
-  inset: calc(var(--songs-u) * -0.9);
-  border: calc(var(--songs-u) * 0.9) solid var(--songs-rim);
+  inset: calc(var(--songs-u) * 0.7778);
+  border: 1px solid var(--glass-rim);
   pointer-events: none;
 }
+/* A field of 1 px dots on the pane's right 46 %, fading in towards its near edge, under the text. */
+.song-glass::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 46%;
+  z-index: -1;
+  background-image: radial-gradient(circle, var(--line) 1px, transparent 1.6px);
+  background-size: 14px 14px;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 70%);
+  mask-image: linear-gradient(90deg, transparent, #000 70%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* The head: the column's tab (PLAYLIST, its number and the count of columns) and the count. */
 .song-head {
   grid-area: head;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: calc(var(--songs-u) * 2);
-  min-height: calc(var(--songs-u) * 3.2);
-  margin-bottom: calc(var(--songs-u) * 1.7);
-  font-size: max(10px, calc(var(--songs-u) * 1.15));
-  letter-spacing: 0.14em;
+  min-width: 0;
   white-space: nowrap;
 }
-.song-overline {
-  display: inline-flex;
-  align-items: center;
-  gap: calc(var(--songs-u) * 1.1);
+.song-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   min-width: 0;
-  padding: calc(var(--songs-u) * 0.55) calc(var(--songs-u) * 1.8) calc(var(--songs-u) * 0.55) calc(var(--songs-u) * 0.9);
-  background: var(--songs-strip);
-  box-shadow: calc(var(--songs-u) * 0.4) calc(var(--songs-u) * 0.6) calc(var(--songs-u) * 1.2) color-mix(in srgb, var(--songs-shadow) 60%, transparent);
 }
-/* Short of room, the strip's text and the count are cut with an ellipsis; they never overflow.
-   The clip stands one pixel outside the text, so a letter's soft edge is not shaved off. */
-.song-overline > span {
-  min-width: 0;
-  margin: 0 -1px;
-  padding: 0 1px;
+.song-tab-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
-.song-ring {
+.song-tab-label {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--songs-u) * 0.8889);
+  font-size: max(9px, var(--songs-u));
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.song-tab-label > span {
+  opacity: 0.72;
+}
+/* The column holds what plays (NetEase's queue, the loaded album): a dot in the playback colour. */
+.song-tab-dot {
+  display: none;
   flex: none;
-  width: calc(var(--songs-u) * 1.3);
-  height: calc(var(--songs-u) * 1.3);
-  border: 2px solid var(--muted);
+  width: calc(var(--songs-u) * 0.6667);
+  height: calc(var(--songs-u) * 0.6667);
   border-radius: 50%;
-  box-shadow: inset 0 0 0 calc(var(--songs-u) * 0.22) var(--songs-strip), inset 0 0 0 calc(var(--songs-u) * 0.65) var(--muted);
+  background: var(--state);
+}
+.music-song[data-live="true"] .song-tab-dot {
+  display: block;
+}
+.song-tab-figure {
+  display: flex;
+  align-items: flex-end;
+  gap: calc(var(--songs-u) * 0.8889);
+  margin-top: calc(var(--songs-u) * 0.5556);
+}
+.music-song[data-tab-number="false"] .song-tab-figure {
+  display: none;
+}
+.song-tab-number {
+  font-size: calc(var(--songs-u) * 5.3333);
+  line-height: 0.86;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+}
+.song-tab-number.music-rolling-number {
+  --rn-edge-fade: 0.02em;
+}
+.song-tab-total {
+  padding-bottom: calc(var(--songs-u) * 0.7778);
+  font-size: max(11px, calc(var(--songs-u) * 1.3333));
+  line-height: 1;
+  opacity: 0.72;
+}
+/* 共 N 首 in the tag's colours; under it, quietly, why the list is cut or an album's length. */
+.song-tally {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: calc(var(--songs-u) * 0.4444);
+  min-width: 0;
+  max-width: 60%;
+  margin-right: calc(var(--songs-u) * 0.2222);
 }
 .song-count {
-  flex: none;
-  padding: calc(var(--songs-u) * 0.4) calc(var(--songs-u) * 1.1);
-  border: 1px solid color-mix(in srgb, var(--ink) 62%, transparent);
+  max-width: 100%;
+  padding: calc(var(--songs-u) * 0.6667) var(--songs-u);
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: max(9px, var(--songs-u));
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.song-count-note {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: max(10px, calc(var(--songs-u) * 1.1111));
+  line-height: 1.2;
+  color: var(--muted);
+}
+
+/* The selected song: 8 px under the list's top rule, its title (at most three lines, the whole
+   title in the tooltip), artist · album, and the two steps along the column. */
+.song-selected {
+  grid-area: selected;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(var(--songs-u) * 1.1111);
+  min-width: 0;
+  padding: calc(var(--songs-u) * 0.8889) var(--songs-gap) 0 0;
+}
+/* The mask: titles change inside it and the block does not move. */
+.song-title {
+  display: grid;
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-size: max(16px, calc(var(--songs-u) * 2.4444));
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.song-title-line {
+  grid-area: 1 / 1;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.song-subtitle {
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: max(11px, calc(var(--songs-u) * 1.2222));
+  line-height: 1.4;
+  color: var(--muted);
+}
+.song-steps {
+  display: flex;
+  gap: calc(var(--songs-u) * 0.4444);
+  margin-top: calc(var(--songs-u) * 1.1111);
+}
+.song-steps button {
+  display: grid;
+  place-items: center;
+  width: max(24px, calc(var(--songs-u) * 2.8889));
+  height: max(24px, calc(var(--songs-u) * 2.8889));
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.song-steps button:not(:disabled):hover {
+  opacity: 0.65;
+}
+/* The shelf's chevrons (music-shelf.css), at the pane's scale. */
+.song-steps .chevron {
+  width: max(8.5px, calc(var(--songs-u) * 0.9444));
+  height: max(8.5px, calc(var(--songs-u) * 0.9444));
+}
+.song-steps .chevron-up {
+  transform: translateY(max(2px, calc(var(--songs-u) * 0.2222))) rotate(45deg);
+}
+.song-steps .chevron-down {
+  transform: translateY(min(-2px, calc(var(--songs-u) * -0.2222))) rotate(45deg);
+}
+.music-app .song-steps button:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: -2px;
+}
+/* What play cannot do here, or why songs cannot play: quiet, at the bottom of the side column. */
 .song-note {
   grid-area: note;
   align-self: end;
   margin: 0;
-  padding-right: calc(var(--songs-u) * 2.6);
-  font-size: max(11px, calc(var(--songs-u) * 1.3));
-  line-height: 1.75;
+  padding-right: var(--songs-gap);
+  font-size: max(10px, calc(var(--songs-u) * 1.2222));
+  line-height: 1.7;
   color: var(--muted);
 }
-.song-note::before {
-  content: "";
-  display: block;
-  width: calc(var(--songs-u) * 0.7);
-  height: calc(var(--songs-u) * 0.7);
-  margin-bottom: calc(var(--songs-u) * 0.9);
-  background: var(--ink);
-}
+
+/* The list: a rule over it and nothing else, so the pane's dots show through its rows. */
 .song-list {
   grid-area: list;
   position: relative;
   min-height: 0;
+  /* The scrollbar's 6 px reach 4 px into the padding: its 2 px bar ends at the list's edge, and
+     so does the rule over the list (the rows end 2 px short of it, their text where it was). */
+  margin-right: -4px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-  border: 1px solid var(--songs-sheet-edge);
-  background: var(--songs-sheet-fill);
-  box-shadow: calc(var(--songs-u) * -0.5) calc(var(--songs-u) * 0.8) calc(var(--songs-u) * 2.4) color-mix(in srgb, var(--songs-shadow) 42%, transparent);
+  scrollbar-gutter: stable;
+  border-top: 1px solid var(--rule);
+  border-image: linear-gradient(90deg, var(--rule) calc(100% - 4px), transparent calc(100% - 4px)) 1;
   outline: none;
 }
-/* Rows and headings have fixed heights. Under the sheet's perspective the browser paints
+/* A 2 px bar in the rule colour, from 6 px under the top rule; 6 px wide to grab. (The
+   standard scrollbar properties would turn these off in Chromium.) */
+.song-list::-webkit-scrollbar {
+  width: 6px;
+}
+.song-list::-webkit-scrollbar-track {
+  margin-top: 6px;
+  background: transparent;
+}
+.song-list::-webkit-scrollbar-thumb {
+  border-right: 4px solid transparent;
+  background: var(--rule);
+  background-clip: padding-box;
+}
+/* Rows and headings have fixed heights. Under the pane's perspective the browser paints
    whatever is rendered, however far it has scrolled away, so the list is cut into blocks
    of exactly known size and only those near the visible part are rendered at all. */
 .song-block {
@@ -238,32 +408,37 @@
 .song-row {
   position: relative;
   display: grid;
-  grid-template-columns: calc(var(--songs-u) * 3.4) minmax(0, 1fr) auto;
+  grid-template-columns: calc(var(--songs-u) * 4.4444) minmax(0, 1fr) auto;
   align-items: center;
-  gap: calc(var(--songs-u) * 1.2);
+  gap: calc(var(--songs-u) * 1.3333);
   width: 100%;
   height: var(--songs-row);
-  padding: 0 calc(var(--songs-u) * 1.8) 0 calc(var(--songs-u) * 1.9);
+  padding: 0 calc(var(--songs-u) * 1.5556 - 2px) 0 calc(var(--songs-u) * 1.7778);
   border-bottom: 1px solid var(--line);
   text-align: left;
+  color: var(--ink);
   content-visibility: auto;
   contain-intrinsic-size: auto 320px auto var(--songs-row);
-  transition:
-    background-color 0.15s,
-    color 0.15s;
+  transition: background-color 0.15s;
 }
+/* The selected row's 2 px ink bar (dashed while NetEase is switching to it). */
 .song-row::before {
   content: "";
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
-  width: calc(var(--songs-u) * 0.5);
-  background: var(--songs-signal);
+  width: 2px;
+  background: var(--ink);
   opacity: 0;
 }
 .song-row-number {
-  font-size: max(10px, calc(var(--songs-u) * 1.2));
+  display: flex;
+  align-items: center;
+  height: 11px;
+  font-size: max(10px, calc(var(--songs-u) * 1.1111));
+  line-height: 1;
+  letter-spacing: 0.04em;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -278,60 +453,74 @@
   text-overflow: ellipsis;
 }
 .song-row-copy strong {
-  font-size: max(12px, calc(var(--songs-u) * 1.5));
-  line-height: 1.3;
+  font-size: max(12px, calc(var(--songs-u) * 1.4444));
+  line-height: 1.2;
   font-weight: 500;
 }
+/* 5 px under the title; the 1.2 line keeps its descenders inside the ellipsis clip. */
 .song-row-copy small {
-  margin-top: calc(var(--songs-u) * 0.35);
-  font-size: max(10px, calc(var(--songs-u) * 1.15));
-  line-height: 1.3;
+  margin-top: calc(var(--songs-u) * 0.5556 - 0.1em);
+  font-size: max(10px, calc(var(--songs-u) * 1.1111));
+  line-height: 1.2;
   color: var(--muted);
 }
 .song-row-meta {
-  font-size: max(10px, calc(var(--songs-u) * 1.1));
+  font-size: max(10px, calc(var(--songs-u) * 1.2222));
+  line-height: 1;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.song-row:hover:not(:disabled) {
-  background: var(--songs-hover);
-}
-.song-row:hover:not(:disabled) .song-row-number,
-.song-row:hover:not(:disabled) .song-row-meta {
-  color: var(--ink);
+/* Hover: about half the selected band (the selected row keeps its own). */
+.song-row:hover:not(:disabled, .selected) {
+  background: color-mix(in srgb, var(--hl) 55%, transparent);
 }
 .music-app .song-row:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
 }
-/* Playing: the app's accent and a small level meter in place of the number. */
-.song-row.playing strong,
-.song-row.playing .song-row-meta {
-  color: var(--accent);
+/* Playing: a three-bar level meter in the playback colour instead of the number. */
+@property --song-meter-a {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 6px;
+}
+@property --song-meter-b {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 10px;
+}
+@property --song-meter-c {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 8px;
 }
 .song-row.playing .song-row-number {
   color: transparent;
   background:
-    linear-gradient(var(--accent), var(--accent)) 0 100% / 3px 55% no-repeat,
-    linear-gradient(var(--accent), var(--accent)) 6px 100% / 3px 100% no-repeat,
-    linear-gradient(var(--accent), var(--accent)) 12px 100% / 3px 70% no-repeat;
-  animation: song-level 0.9s ease-in-out infinite alternate;
+    linear-gradient(var(--state), var(--state)) 0 100% / 2px var(--song-meter-a) no-repeat,
+    linear-gradient(var(--state), var(--state)) 4px 100% / 2px var(--song-meter-b) no-repeat,
+    linear-gradient(var(--state), var(--state)) 8px 100% / 2px var(--song-meter-c) no-repeat;
+  animation:
+    song-level 700ms ease-in-out infinite,
+    song-level-b 820ms ease-in-out 120ms infinite,
+    song-level-c 940ms ease-in-out 240ms infinite;
 }
-/* Selected: the plate's white, a signal bar and a heavier title. */
+/* Selected: the light band, the ink bar and a heavier title (the playing title is heavier too). */
 .song-row.selected {
-  background: var(--songs-chosen);
+  background: var(--hl);
 }
 .song-row.selected::before {
   opacity: 1;
 }
-.song-row.selected strong {
+.song-row.selected strong,
+.song-row.playing strong {
   font-weight: 600;
 }
 /* Pending: NetEase has been asked for this song and has not answered yet. */
 .song-row.pending::before {
   opacity: 1;
-  background: repeating-linear-gradient(180deg, var(--songs-signal) 0 4px, transparent 4px 8px);
+  background: repeating-linear-gradient(180deg, var(--ink) 0 4px, transparent 4px 8px);
   animation: music-pulse 0.9s ease-in-out infinite;
 }
 .song-row.pending .song-row-meta::before {
@@ -348,195 +537,124 @@
   display: flex;
   align-items: flex-end;
   height: var(--songs-group);
-  padding: 0 calc(var(--songs-u) * 1.9) calc(var(--songs-u) * 0.8);
-  font-size: max(10px, calc(var(--songs-u) * 1.05));
-  letter-spacing: 0.16em;
+  padding: 0 calc(var(--songs-u) * 1.7778) calc(var(--songs-u) * 0.8);
+  font-size: max(9px, var(--songs-u));
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
 }
 .song-empty {
   margin: 0;
-  padding: calc(var(--songs-u) * 3) calc(var(--songs-u) * 2.4);
-  font-size: max(12px, calc(var(--songs-u) * 1.35));
-  line-height: 1.9;
+  padding: calc(var(--songs-u) * 2.4) calc(var(--songs-u) * 1.7778);
+  font-size: max(12px, calc(var(--songs-u) * 1.3333));
+  line-height: 1.8;
   color: var(--muted);
 }
 
-/* Lines and the plate hang in front of the sheet, almost facing the viewer. */
-.song-cross {
-  position: absolute;
-  background: var(--songs-cross);
-}
-.song-cross-h {
-  left: calc(var(--songs-plate-x) - var(--songs-u) * 0.9);
-  top: calc(var(--songs-cross-y) - 1px);
-  width: calc(var(--songs-cross-x) - var(--songs-plate-x) + var(--songs-u) * 2.1);
-  height: 2px;
-}
-.song-cross-v {
-  left: calc(var(--songs-cross-x) - 1px);
-  top: var(--songs-cross-top);
-  width: 2px;
-  height: calc(var(--songs-cross-bottom) - var(--songs-cross-top));
-}
-.song-plate {
-  position: absolute;
-  left: var(--songs-plate-x);
-  top: var(--songs-plate-y);
-  width: var(--songs-plate-w);
-  height: var(--songs-plate-h);
-  padding: calc(var(--songs-u) * 1.6) calc(var(--songs-u) * 2) calc(var(--songs-u) * 1.5) calc(var(--songs-u) * 2.2);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  background: var(--songs-plate-fill);
-  color: var(--songs-plate-ink);
-  box-shadow: calc(var(--songs-u) * 0.8) calc(var(--songs-u) * 1.2) calc(var(--songs-u) * 2.2) var(--songs-shadow);
-  transform: perspective(calc(var(--songs-u) * 150)) rotateY(-5deg);
-}
-.song-plate-caption {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: max(10px, calc(var(--songs-u) * 1.1));
-  line-height: 1.4;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--songs-plate-muted);
-}
-/* The mask: titles change inside it and the plate does not move. */
-.song-plate-title {
-  display: grid;
-  align-items: center;
-  height: calc(var(--songs-u) * 5.8);
-  margin: calc(var(--songs-u) * 0.3) 0 calc(var(--songs-u) * 0.2);
-  overflow: hidden;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-.song-plate-line {
-  grid-area: 1 / 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: calc(var(--songs-u) * 4.3);
-  line-height: 1.2;
-}
-.song-plate-line[data-size="m"] {
-  font-size: calc(var(--songs-u) * 3.1);
-}
-.song-plate-line[data-size="s"] {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: max(13px, calc(var(--songs-u) * 2.3));
-  line-height: 1.22;
-}
-.song-plate-subtitle {
-  margin: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: max(11px, calc(var(--songs-u) * 1.3));
-  line-height: 1.4;
-  color: var(--songs-plate-muted);
-}
-.song-stepper {
-  position: absolute;
-  left: calc(var(--songs-plate-x) + var(--songs-u) * 5.7);
-  top: calc(var(--songs-plate-y) + var(--songs-plate-h) + var(--songs-u) * 2.2);
-  display: flex;
-  align-items: center;
-  gap: calc(var(--songs-u) * 2.4);
-  font-size: max(11px, calc(var(--songs-u) * 1.2));
-  white-space: nowrap;
-  pointer-events: auto;
-}
-.song-stepper button {
-  padding: calc(var(--songs-u) * 0.5) 0;
-  border-bottom: 1px solid var(--line);
-}
-.song-stepper button:hover {
-  color: var(--accent);
-}
-
-/* Too narrow for a column beside the list: the plate takes the sheet's top-left corner,
-   the header moves to its right and the note goes under the list. */
+/* Too narrow for a column beside the list: the selected song (its steps at the right) goes
+   between the head and the list, and the note under the list. */
 .music-song[data-panel="stacked"] .song-glass {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   grid-template-areas:
     "head"
+    "selected"
     "list"
     "note";
-  --songs-pad: calc(var(--songs-u) * 2.2);
-  padding-top: 0;
+  --songs-start: calc(var(--songs-u) * 2.4);
+  --songs-end: calc(var(--songs-u) * 2.2);
 }
 .music-song[data-panel="stacked"] .song-head {
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
-  gap: calc(var(--songs-u) * 0.9);
-  min-height: var(--songs-head-height);
-  margin: 0 0 calc(var(--songs-u) * 1.2) max(0px, calc(var(--songs-head-inset) - var(--songs-pad)));
+  margin-bottom: calc(var(--songs-u) * 1.6);
 }
-/* The plate leaves the header little width at small windows: its two lines are cut to fit. */
-.music-song[data-panel="stacked"] .song-head > * {
-  max-width: 100%;
+/* The stacked head is narrow at small windows: the tally is cut to fit, never the tab. */
+.music-song[data-panel="stacked"] .song-tally {
+  max-width: 50%;
 }
-/* The note under the list: always when stacked, and in a wide window too short for the
-   side column to hold it under the stepper. */
+.music-song[data-panel="stacked"] .song-selected {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: calc(var(--songs-u) * 1.6);
+  row-gap: calc(var(--songs-u) * 0.6);
+  padding: 0 0 calc(var(--songs-u) * 1.6);
+}
+.music-song[data-panel="stacked"] .song-title,
+.music-song[data-panel="stacked"] .song-subtitle {
+  grid-column: 1;
+}
+.music-song[data-panel="stacked"] .song-title-line {
+  -webkit-line-clamp: 2;
+}
+.music-song[data-panel="stacked"] .song-steps {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  margin: 0;
+}
+/* The note under the list: always when stacked, and in a wide window too short for the side
+   column to hold it under the selected song. A 1 px rule ends the list above it, so a row cut by the
+   list's bottom edge does not run into the note. */
 .music-song[data-note="under"] .song-note {
   align-self: auto;
   padding: calc(var(--songs-u) * 1.2) 0 0;
+  border-top: 1px solid var(--line);
   line-height: 1.6;
 }
-.music-song[data-note="under"] .song-note::before,
-.music-song[data-panel="stacked"] .song-cross,
-.music-song[data-panel="stacked"] .song-stepper span {
-  display: none;
-}
 .music-song[data-panel="wide"][data-note="under"] .song-glass {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: calc(var(--songs-u) * 12) auto minmax(0, 1fr) auto;
   grid-template-areas:
     "head head"
+    "selected list"
     ". list"
     ". note";
-}
-.music-song[data-panel="stacked"] .song-stepper {
-  left: auto;
-  right: calc(100% - var(--songs-plate-x) - var(--songs-plate-w) + var(--songs-u) * 1.4);
-  top: calc(var(--songs-plate-y) + var(--songs-u) * 0.9);
-  gap: calc(var(--songs-u) * 0.6);
-  color: var(--songs-plate-ink);
-}
-.music-song[data-panel="stacked"] .song-stepper button {
-  min-width: calc(var(--songs-u) * 3);
-  border-bottom: 0;
-  text-align: center;
-}
-.music-song[data-panel="stacked"] .song-plate-caption {
-  padding-right: calc(var(--songs-u) * 7);
 }
 .music-app[data-layout="portrait"] .song-caption {
   display: none;
 }
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] .song-exits .song-details {
+    margin-top: 19px;
+  }
+  .music-app[data-layout="desktop"] .song-caption {
+    bottom: 28px;
+    gap: 16px;
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .song-caption i {
+    width: 40px;
+    height: 6px;
+  }
+}
+.music-app[data-layout="compact"] .song-caption {
+  bottom: 18px;
+}
 
 @keyframes song-level {
-  from {
-    background-size:
-      3px 55%,
-      3px 100%,
-      3px 70%;
+  0%,
+  100% {
+    --song-meter-a: 2.7px;
   }
-  to {
-    background-size:
-      3px 100%,
-      3px 45%,
-      3px 90%;
+  50% {
+    --song-meter-a: 6px;
+  }
+}
+@keyframes song-level-b {
+  0%,
+  100% {
+    --song-meter-b: 4.5px;
+  }
+  50% {
+    --song-meter-b: 10px;
+  }
+}
+@keyframes song-level-c {
+  0%,
+  100% {
+    --song-meter-c: 3.6px;
+  }
+  50% {
+    --song-meter-c: 8px;
   }
 }

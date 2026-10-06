@@ -13,6 +13,12 @@ export type TitleGlyph = {
 const DURATION = 460;
 const STEPS = 48;
 const IDLE_SLOTS = 64;
+// Room under each face for its descenders: the title's 1.14 line box is shorter than the
+// glyphs (a g or y reaches about 0.08 em below it) and the slot fades its last 0.08 em (the
+// design keeps 0.16 em). Faces stack with this gap between them, so the descenders of one
+// face never run into the next while a reel turns.
+const DESCENT_ROOM = 0.16;
+const descentRoom = (lineHeight: number) => lineHeight * DESCENT_ROOM;
 type Sample = { value: number[]; velocity: number[] };
 
 /** The archive's direct reel uses the same critically damped 460 ms curve. */
@@ -170,13 +176,17 @@ export function createTitleReels(visual: HTMLElement, spacer: HTMLElement) {
       face.style.letterSpacing =
         value.letterSpacing || slot.glyph.letterSpacing;
       face.style.lineHeight = `${value.height}px`;
-      face.style.height = `${value.height}px`;
+      // The line box and the room for its descenders, clipped with the face (music.css).
+      face.style.height = `${value.height + descentRoom(value.height)}px`;
       face.style.transform = `translateY(${y}px)`;
-      y += value.height;
+      y += value.height + descentRoom(value.height);
     });
     for (let index = values.length; index < slot.faces.length; index++)
       slot.faces[index].textContent = "";
-    slot.host.style.height = `${Math.max(slot.glyph.height, ...slot.values.map((value) => value.height))}px`;
+    const lineHeight = Math.max(slot.glyph.height, ...slot.values.map((value) => value.height));
+    slot.host.style.height = `${lineHeight}px`;
+    // The slot's clip reaches under the line box by the descender room.
+    slot.host.style.paddingBottom = `${descentRoom(lineHeight)}px`;
     slot.host.style.width = `${Math.max(slot.glyph.width, ...slot.values.map((value) => value.width)) + 0.3}px`;
   };
 
@@ -209,7 +219,8 @@ export function createTitleReels(visual: HTMLElement, spacer: HTMLElement) {
       viewport: new TitleTrack(
         host,
         "clip-path",
-        ([value]) => `inset(0 0 calc(100% - ${value || 0}px) 0)`,
+        // The visible line box and the descender room under it (the slot's bottom padding).
+        ([value]) => `inset(0 0 calc(100% - ${(value || 0) + descentRoom(value || 0)}px) 0)`,
       ),
       position: new TitleTrack(
         host,
@@ -244,7 +255,7 @@ export function createTitleReels(visual: HTMLElement, spacer: HTMLElement) {
     const values = [slot.values[first] || blankFace];
     const viewport = slot.viewport.sample().value[0] || slot.glyph.height;
     for (let index = first + 1; index < slot.values.length; index++) {
-      if (slot.offsets[index] >= position + viewport - 0.001) break;
+      if (slot.offsets[index] >= position + viewport + descentRoom(viewport) - 0.001) break;
       values.push(slot.values[index]);
     }
     if (

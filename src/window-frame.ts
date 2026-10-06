@@ -16,13 +16,18 @@ type FrameWindow = {
   onResized(handler: () => void): Promise<() => void>;
 };
 
-const glyph = (path: string) => `<svg viewBox="0 0 10 10" aria-hidden="true"><path d="${path}"/></svg>`;
+// The overlay design's glyphs (2026-10-05): 1 px lines, filled marks, in the ink colour.
+const glyph = (size: number, body: string) =>
+  `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">${body}</svg>`;
 const ICONS = {
-  minimize: glyph("M0 5.5h10"),
-  maximize: glyph("M.5.5h9v9h-9z"),
-  // Two overlapping windows: the front one, and the back one's visible corner.
-  restore: glyph("M.5 2.5h7v7h-7zM2.5 2.5V.5h7v7h-2"),
-  close: glyph("M.5.5l9 9M9.5.5l-9 9"),
+  // A 10 x 2 bar.
+  minimize: glyph(10, '<path class="fill" d="M0 4h10v2H0z"/>'),
+  // A 10 x 10 box and a filled 3 x 3 square over its top-left corner.
+  maximize: glyph(10, '<path d="M.5.5h9v9h-9z"/><path class="fill" d="M0 0h3v3H0z"/>'),
+  // Two overlapping windows (not in the design; drawn at its 1 px weight).
+  restore: glyph(10, '<path d="M.5 2.5h7v7h-7zM2.5 2.5V.5h7v7h-2"/>'),
+  // Two 14 px lines crossing at the centre of a 12 x 12 box.
+  close: glyph(12, '<path class="diagonal" d="M1.05 1.05l9.9 9.9M10.95 1.05l-9.9 9.9"/>'),
 } as const;
 
 export function installWindowFrame(host: HTMLElement) {

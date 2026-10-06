@@ -21,7 +21,7 @@
 //! Never read: every other table and row (play history, play counts, cached responses,
 //! cloud-disk songs, profile pages), a playlist's creator and user fields, the liked-song
 //! map, cookies and the embedded browser's storage.
-use super::netease_queue::{cover, digits, display_track, text, QueueTrack};
+use super::queue::{cover, digits, display_track, text, QueueTrack};
 use rusqlite::{types::ValueRef, Connection, OpenFlags, Statement};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;

@@ -1,0 +1,1155 @@
+/* The details (scene 2) after Claude Design's "Overlay Frame" (direction A, 2026-10-05): the two
+   ways out at the left, the document on the right (the tag row, the title, the artist, the facts,
+   the transport row and the 播放位置 timeline) and the column's name at the bottom left. Local
+   mode carries the same document over to an album, with its tabs and track list. Sizes are the
+   design's at 1440 x 900; the layouts (data-layout, viewport-layout.ts) place them, width
+   queries only size them. */
+
+/* Where the details' and the song scene's ways out and the document start. */
+.music-app {
+  --scene-top: max(calc(var(--chrome-bottom, 70px) + 40px), 17.33vh);
+  --scene-side: 40px;
+}
+.music-app[data-layout="compact"] {
+  --scene-side: 25px;
+}
+.music-app[data-layout="portrait"] {
+  --scene-side: 20px;
+}
+
+/* ---- the page ---------------------------------------------------------------------------- */
+.music-app .music-detail {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+/* Laid out while hidden: the title's reel is measured before the page fades in. */
+.music-app #music-detail[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+.music-app[data-layout="portrait"] .music-detail::before {
+  content: "";
+  position: absolute;
+  inset: 46% 0 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, var(--page-bg) 34px);
+}
+
+/* The ways out (the details' and the song scene's): words and their key, no box. */
+.music-app .music-back {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+  color: var(--ink);
+  pointer-events: auto;
+  transition: opacity 120ms ease;
+}
+.music-app .music-back:hover {
+  opacity: 0.65;
+}
+.music-app .music-back kbd {
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.music-app .music-detail button:focus-visible,
+.music-app .music-detail input:focus-visible,
+.music-app .music-song .music-back:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 4px;
+}
+.music-app .detail-exits {
+  position: absolute;
+  left: var(--scene-side);
+  top: calc(var(--scene-top) + 4px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+/* (The song scene's two stand where these do: .song-exits, song-scene.css.) */
+
+/* The column's name, bottom left: a 34 x 5 bar from the window's edge, then the name. */
+.music-app .detail-caption {
+  position: absolute;
+  left: 0;
+  bottom: 22px;
+  max-width: 40%;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.music-app .detail-caption i {
+  display: block;
+  flex: none;
+  width: 34px;
+  height: 5px;
+  background: var(--ink);
+}
+.music-app .detail-caption span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Room for descenders inside the clip, outside the 12 px line box. */
+  padding: 3px 0;
+  margin: -3px 0;
+}
+.music-app .detail-caption:has(span:empty) {
+  display: none;
+}
+
+/* ---- the document ------------------------------------------------------------------------ */
+/* Left 748 and 632 wide at 1440 (52 % and 60 px from the right), no wider elsewhere. */
+.music-app #album-detail-content {
+  position: absolute;
+  left: 52%;
+  right: max(60px, calc(48% - 632px));
+  top: var(--scene-top);
+  bottom: 40px;
+  /* 4.5 px of room on either side, outside the column, for the timeline's head at its ends. */
+  margin: 0 -4.5px;
+  padding: 0 4.5px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+  pointer-events: auto;
+  outline: none;
+}
+
+/* The tag row: QUEUE 012 (PL 05 · 012, ALBUM 001, LIVE TRACK) and / 034; previous / next. */
+.music-app .detail-tag-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  min-height: 26px;
+}
+.music-app .detail-tag-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.music-app .detail-tag-of {
+  font-variant-numeric: tabular-nums;
+}
+.music-app .detail-steps {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+.music-app .detail-step {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.music-app .detail-step:not(:disabled):hover {
+  opacity: 0.65;
+}
+/* A lone live track: the player it comes from (opens the player panel). */
+.music-app .detail-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.music-app .detail-source:hover {
+  color: var(--ink);
+}
+
+/* The title: 38 px / 1.14, balanced, 496 wide; 28 px past 34 characters (music-title.ts). The
+   probe beside it shares these rules. */
+.music-app .detail-title,
+.music-app .detail-title-probe {
+  font-size: 38px;
+  line-height: 1.14;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+.music-app .detail-title[data-long="true"],
+.music-app .detail-title-probe[data-long="true"] {
+  font-size: 28px;
+}
+.music-app .detail-title {
+  position: relative;
+  max-width: 496px;
+  margin: 14px 0 0;
+}
+.music-app .detail-title-probe {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  margin: 0;
+  visibility: hidden;
+  pointer-events: none;
+  contain: layout style paint;
+}
+.music-app #album-detail-content .music-title-translation {
+  font-size: 0.5em;
+}
+
+.music-app .detail-artist {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 0;
+  font-size: 16px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+/* 目录离线: the tag in outline. */
+.music-app .detail-badge {
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid var(--ink);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+/* The facts: two columns under a --rule line, each fact a key over its value; one may span both. */
+.music-app .detail-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 28px;
+  margin: 22px 0 0;
+  border-top: 1px solid var(--rule);
+}
+.music-app .detail-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.music-app .detail-fact[data-wide="true"] {
+  grid-column: 1 / -1;
+}
+.music-app .detail-fact dt {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+}
+.music-app .detail-fact dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* The transport row: previous | the play ring | next | stop, 48 high, 1 px dividers. */
+.music-app .detail-transport {
+  box-sizing: content-box;
+  display: flex;
+  align-items: stretch;
+  height: 48px;
+  margin-top: 22px;
+  border-bottom: 1px solid var(--line);
+}
+.music-app .detail-control {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 22px;
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.music-app .detail-control:first-child {
+  padding: 0 22px 0 4px;
+}
+.music-app .detail-control:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .music-detail .detail-control:focus-visible {
+  outline-offset: -5px;
+}
+.music-app .detail-divider {
+  display: block;
+  flex: none;
+  width: 1px;
+  margin: 12px 0;
+  background: var(--line);
+}
+.music-app .detail-stop i {
+  display: block;
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+}
+/* The player's own play / pause: a 30 px ring of the playing song's progress from 12 o'clock
+   (--state over --line, 2 px; all --line while it is unknown; a plain 1 px ink ring when a
+   press plays the album shown), a triangle or two bars. */
+.music-app .detail-ring {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 30px;
+  height: 30px;
+}
+.music-app .detail-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(var(--state) 0 var(--progress, 0%), var(--line) var(--progress, 0%) 100%);
+  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+}
+.music-app .detail-toggle[data-ring="unknown"] .detail-ring::before {
+  background: var(--line);
+}
+.music-app .detail-toggle[data-ring="plain"] .detail-ring::before {
+  background: var(--ink);
+  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
+  mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
+}
+.music-app .detail-ring .transport-glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.music-app .detail-ring .transport-play::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 3px;
+  border-left: 8px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.music-app .detail-ring .transport-pause i {
+  display: block;
+  width: 2px;
+  height: 10px;
+  background: currentColor;
+}
+.music-app .detail-ring .transport-pause,
+.music-app .detail-toggle[aria-pressed="true"] .transport-play {
+  opacity: 0;
+  transform: scale(0.7);
+}
+.music-app .detail-ring .transport-play,
+.music-app .detail-toggle[aria-pressed="true"] .transport-pause {
+  opacity: 1;
+  transform: scale(1);
+}
+.music-app.reduce-motion .detail-ring .transport-glyph {
+  transition: none;
+}
+
+/* 播放位置 and the times, then the timeline: a 1 px line, the 2 px ink fill to the position and
+   a 9 px square head; dashed, with neither, while the position is unknown. */
+.music-app .detail-timeline {
+  display: block;
+  margin-top: 18px;
+}
+.music-app .detail-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+.music-app .detail-timeline-head > span {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+}
+.music-app .detail-timeline output {
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.music-app input.detail-seek {
+  --fill: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: calc(100% + 9px);
+  height: 9px;
+  margin: 10px -4.5px 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.music-app input.detail-seek:disabled {
+  cursor: default;
+}
+.music-app input.detail-seek:focus-visible {
+  outline-offset: 2px;
+}
+/* The head's centre travels the column's width; the line and the fill stay within it. */
+.music-app input.detail-seek::-webkit-slider-runnable-track {
+  height: 9px;
+  border: 0;
+  background:
+    linear-gradient(var(--ink), var(--ink)) 4.5px 3.5px / calc((100% - 9px) * var(--fill)) 2px no-repeat,
+    linear-gradient(var(--line), var(--line)) 4.5px 4px / calc(100% - 9px) 1px no-repeat;
+}
+.music-app input.detail-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  border: 0;
+  border-radius: 0;
+  background: var(--ink);
+}
+.music-app input.detail-seek::-moz-range-track {
+  height: 1px;
+  background: var(--line);
+}
+.music-app input.detail-seek::-moz-range-progress {
+  height: 2px;
+  background: var(--ink);
+}
+.music-app input.detail-seek::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: 0;
+  border-radius: 0;
+  background: var(--ink);
+}
+.music-app input.detail-seek[data-known="false"]::-webkit-slider-runnable-track {
+  background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 9px) 4.5px 4px / calc(100% - 9px) 1px no-repeat;
+}
+.music-app input.detail-seek[data-known="false"]::-webkit-slider-thumb,
+.music-app input.detail-seek:disabled::-webkit-slider-thumb {
+  background: transparent;
+}
+.music-app input.detail-seek[data-known="false"]::-moz-range-thumb,
+.music-app input.detail-seek:disabled::-moz-range-thumb {
+  background: transparent;
+}
+
+/* Under the timeline, only when there is something to say: what the controls cannot do here,
+   and the player's warnings (a live region, always present). */
+.music-app .detail-limit,
+.music-app .detail-warning {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+  white-space: pre-line;
+}
+.music-app .detail-limit:not(:empty),
+.music-app .detail-warning:not(:empty) {
+  margin-top: 18px;
+}
+.music-app .detail-limit:not(:empty) + .detail-warning:not(:empty) {
+  margin-top: 6px;
+}
+
+/* ---- local albums: the tabs, the track list, the introduction and the credits ------------- */
+.music-app .music-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 28px;
+  height: 44px;
+  margin-top: 28px;
+  border-bottom: 1px solid var(--line);
+}
+/* Over the songs scrolled under them, the tabs take the veil. */
+.music-app #album-detail-content[data-stuck="true"] .music-tabs {
+  background: var(--veil);
+  backdrop-filter: blur(18px);
+}
+.music-app .music-tabs > button[role="tab"] {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.music-app .music-tabs > button[aria-selected="true"] {
+  font-weight: 600;
+  color: var(--ink);
+}
+.music-app .music-tabs > button > span {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.music-app .music-tabs > button[role="tab"]:focus-visible {
+  outline-offset: -4px;
+}
+.music-app .music-tab-indicator {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 1px;
+  height: 2px;
+  background: var(--ink);
+  transform-origin: left;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+/* The songs, in the song scene's row style: 48 high, the number (the playing song's level meter
+   instead, in the playback colour), title over artist, format and length. */
+.music-app .track-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px 0 16px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  color: var(--ink);
+  transition: background-color 150ms ease;
+}
+.music-app .track-row:not(:disabled):hover {
+  background: var(--hl);
+}
+.music-app .music-detail .track-row:focus-visible {
+  outline-offset: -1px;
+}
+.music-app .track-number {
+  display: flex;
+  align-items: center;
+  height: 11px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.music-app .track-number b {
+  font-weight: inherit;
+}
+.music-app .track-meter {
+  display: none;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+}
+.music-app .track-meter i {
+  display: block;
+  width: 2px;
+  height: 6px;
+  background: var(--state);
+  transform-origin: bottom;
+  animation: detail-meter 700ms ease-in-out infinite;
+}
+.music-app .track-meter i:nth-child(2) {
+  height: 10px;
+  animation-duration: 820ms;
+  animation-delay: 120ms;
+}
+.music-app .track-meter i:nth-child(3) {
+  height: 8px;
+  animation-duration: 940ms;
+  animation-delay: 240ms;
+}
+.music-app .track-row.playing .track-number b {
+  display: none;
+}
+.music-app .track-row.playing .track-meter {
+  display: flex;
+}
+/* Paused, stopped or loading: the meter keeps its bars and holds still. */
+.music-app .track-list[data-paused="true"] .track-meter i,
+.music-app.reduce-motion .track-meter i {
+  animation: none;
+}
+.music-app .track-name {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.music-app .track-name strong {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.music-app .track-row.playing .track-name strong {
+  font-weight: 600;
+}
+.music-app .track-name small {
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.music-app .track-format {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+.music-app .track-format i {
+  font-style: normal;
+}
+.music-app .track-duration {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* A search result's song: a 1 px ink outline and a 搜索结果 tag, for 1100 ms (music-track-focus.ts). */
+.music-app .track-row.search-track-hit {
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
+  animation: detail-hit-ring 1100ms ease-in-out forwards;
+}
+.music-app .track-hit-tag {
+  position: absolute;
+  left: -1px;
+  top: -15px;
+  padding: 3px 6px;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 600;
+  pointer-events: none;
+  animation: detail-hit 1100ms ease-in-out forwards;
+}
+.music-app .track-hit-tag[data-reduced="true"],
+.music-app.reduce-motion .track-row.search-track-hit {
+  animation: none;
+}
+.music-app .disc-heading {
+  padding: 20px 16px 8px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.music-app .empty-tracks {
+  padding: 24px 0;
+}
+.music-app .empty-tracks strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.music-app .empty-tracks p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--muted);
+}
+.music-app .detail-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.music-app .detail-link:hover {
+  opacity: 0.65;
+}
+.music-app .album-about {
+  padding: 24px 0 4px;
+}
+.music-app .album-about > small:first-child,
+.music-app .producer-section small {
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.music-app .album-about h3 {
+  margin: 16px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.music-app .album-about p {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.9;
+  white-space: pre-line;
+}
+.music-app .album-about .introduction-feedback {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.music-app .introduction-license {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+/* The introduction's source and query: quiet ink text (the settings panel keeps its own). */
+.music-app .album-about .text-button {
+  display: inline-flex;
+  align-items: center;
+  margin: 14px 20px 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink) !important;
+  transition: opacity 120ms ease;
+}
+.music-app .album-about .text-button:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .source-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 22px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
+}
+.music-app .source-note span {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+}
+.music-app .source-note code {
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.music-app .genre-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+.music-app .genre-tags span {
+  padding: 4px 7px;
+  border: 1px solid var(--ink);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.music-app .producer-section {
+  margin-top: 24px;
+  padding: 14px 0 18px;
+  border-top: 1px solid var(--rule);
+}
+.music-app .producer-section > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.music-app .producer-section button {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  transition: opacity 120ms ease;
+}
+.music-app .producer-section button:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .producer-section p {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.9;
+  color: var(--muted);
+}
+.music-app .producer-section dl {
+  margin: 10px 0 0;
+}
+.music-app .producer-section dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.music-app .producer-section dt {
+  font-size: 10px;
+  color: var(--muted);
+}
+.music-app .producer-section dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 500;
+}
+
+@keyframes detail-meter {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+@keyframes detail-hit {
+  0%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes detail-hit-ring {
+  0%,
+  70% {
+    outline-color: var(--ink);
+  }
+  100% {
+    outline-color: transparent;
+  }
+}
+
+/* ---- large windows: the earlier enlargement, applied to the design's proportions ---------- */
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] {
+    --scene-side: 60px;
+  }
+  .music-app[data-layout="desktop"] #album-detail-content {
+    right: max(60px, calc(48% - 733px));
+    bottom: 52px;
+  }
+  .music-app[data-layout="desktop"] .music-back {
+    gap: 16px;
+    font-size: 15px;
+  }
+  .music-app[data-layout="desktop"] .music-back kbd {
+    font-size: 10px;
+  }
+  .music-app[data-layout="desktop"] .detail-exits {
+    gap: 19px;
+  }
+  .music-app[data-layout="desktop"] .detail-tag-row {
+    min-height: 30px;
+  }
+  .music-app[data-layout="desktop"] .detail-tag-group {
+    gap: 12px;
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .detail-step {
+    width: 30px;
+    height: 30px;
+  }
+  .music-app[data-layout="desktop"] .detail-title,
+  .music-app[data-layout="desktop"] .detail-title-probe {
+    font-size: 44px;
+  }
+  .music-app[data-layout="desktop"] .detail-title[data-long="true"],
+  .music-app[data-layout="desktop"] .detail-title-probe[data-long="true"] {
+    font-size: 32px;
+  }
+  .music-app[data-layout="desktop"] .detail-title {
+    max-width: 580px;
+    margin-top: 16px;
+  }
+  .music-app[data-layout="desktop"] .detail-artist {
+    margin-top: 14px;
+    font-size: 19px;
+  }
+  .music-app[data-layout="desktop"] .detail-facts {
+    column-gap: 32px;
+    margin-top: 26px;
+  }
+  .music-app[data-layout="desktop"] .detail-fact {
+    gap: 7px;
+    padding: 13px 0;
+  }
+  .music-app[data-layout="desktop"] .detail-fact dt {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .detail-fact dd {
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .detail-transport {
+    height: 56px;
+    margin-top: 26px;
+  }
+  .music-app[data-layout="desktop"] .detail-control {
+    padding: 0 26px;
+  }
+  .music-app[data-layout="desktop"] .detail-control:first-child {
+    padding: 0 26px 0 5px;
+  }
+  .music-app[data-layout="desktop"] .detail-divider {
+    margin: 14px 0;
+  }
+  .music-app[data-layout="desktop"] .detail-ring {
+    width: 35px;
+    height: 35px;
+  }
+  .music-app[data-layout="desktop"] .detail-timeline {
+    margin-top: 21px;
+  }
+  .music-app[data-layout="desktop"] .detail-timeline-head > span {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .detail-timeline output {
+    font-size: 13px;
+  }
+  .music-app[data-layout="desktop"] input.detail-seek {
+    margin-top: 12px;
+  }
+  .music-app[data-layout="desktop"] .detail-limit,
+  .music-app[data-layout="desktop"] .detail-warning {
+    font-size: 13px;
+  }
+  .music-app[data-layout="desktop"] .detail-caption {
+    bottom: 28px;
+    gap: 16px;
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .detail-caption i {
+    width: 40px;
+    height: 6px;
+  }
+  .music-app[data-layout="desktop"] .music-tabs {
+    gap: 32px;
+    height: 50px;
+    margin-top: 32px;
+  }
+  .music-app[data-layout="desktop"] .music-tabs > button[role="tab"] {
+    font-size: 15px;
+  }
+  .music-app[data-layout="desktop"] .music-tabs > button > span {
+    font-size: 11px;
+  }
+  .music-app[data-layout="desktop"] .track-row {
+    grid-template-columns: 46px minmax(0, 1fr) auto auto;
+    gap: 14px;
+    height: 56px;
+    padding: 0 16px 0 18px;
+  }
+  .music-app[data-layout="desktop"] .track-number {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .track-name strong {
+    font-size: 15px;
+  }
+  .music-app[data-layout="desktop"] .track-name small,
+  .music-app[data-layout="desktop"] .track-format {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .track-duration {
+    font-size: 13px;
+  }
+  .music-app[data-layout="desktop"] .album-about p,
+  .music-app[data-layout="desktop"] .producer-section dl > div {
+    font-size: 14px;
+  }
+}
+
+/* ---- compact: the header's 25 px margins, smaller type ------------------------------------ */
+.music-app[data-layout="compact"] #album-detail-content {
+  right: 25px;
+  bottom: 28px;
+}
+.music-app[data-layout="compact"] .music-back {
+  gap: 12px;
+  font-size: 12px;
+}
+.music-app[data-layout="compact"] .detail-exits {
+  gap: 14px;
+}
+.music-app[data-layout="compact"] .detail-title,
+.music-app[data-layout="compact"] .detail-title-probe {
+  font-size: 28px;
+}
+.music-app[data-layout="compact"] .detail-title[data-long="true"],
+.music-app[data-layout="compact"] .detail-title-probe[data-long="true"] {
+  font-size: 24px;
+}
+.music-app[data-layout="compact"] .detail-title,
+.music-app[data-layout="compact"] .detail-artist {
+  margin-top: 10px;
+}
+.music-app[data-layout="compact"] .detail-artist {
+  font-size: 14px;
+}
+.music-app[data-layout="compact"] .detail-facts {
+  column-gap: 20px;
+  margin-top: 18px;
+}
+.music-app[data-layout="compact"] .detail-fact {
+  padding: 9px 0;
+}
+.music-app[data-layout="compact"] .detail-fact dd {
+  font-size: 11px;
+}
+.music-app[data-layout="compact"] .detail-transport {
+  height: 44px;
+  margin-top: 18px;
+}
+.music-app[data-layout="compact"] .detail-control {
+  padding: 0 18px;
+}
+.music-app[data-layout="compact"] .detail-control:first-child {
+  padding: 0 18px 0 4px;
+}
+.music-app[data-layout="compact"] .detail-ring {
+  width: 26px;
+  height: 26px;
+}
+.music-app[data-layout="compact"] .detail-timeline {
+  margin-top: 14px;
+}
+.music-app[data-layout="compact"] .detail-caption {
+  bottom: 18px;
+}
+.music-app[data-layout="compact"] .music-tabs {
+  margin-top: 22px;
+}
+.music-app[data-layout="compact"] .track-row {
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
+  gap: 10px;
+  padding: 0 10px 0 12px;
+}
+/* Short windows (700 px or less, either layout): the drawn-out case reaches up to where the
+   second way out would stand (from about 16:9 down to the compact width); both go on one line,
+   at the first one's height, which the case clears. */
+@media (max-height: 700px) {
+  .music-app:is([data-layout="desktop"], [data-layout="compact"]) .detail-exits {
+    flex-direction: row;
+    gap: 22px;
+  }
+}
+
+/* ---- portrait: the ways out on one line under the header, the document in the lower half --- */
+.music-app[data-layout="portrait"] .detail-exits {
+  top: calc(var(--chrome-bottom, 46px) + 20px);
+  flex-direction: row;
+  gap: 24px;
+}
+.music-app[data-layout="portrait"] .music-back {
+  gap: 10px;
+  font-size: 12px;
+}
+.music-app[data-layout="portrait"] #album-detail-content {
+  left: var(--scene-side);
+  right: var(--scene-side);
+  top: 50%;
+  bottom: 24px;
+}
+.music-app[data-layout="portrait"] .detail-title,
+.music-app[data-layout="portrait"] .detail-title-probe {
+  font-size: 28px;
+}
+.music-app[data-layout="portrait"] .detail-title[data-long="true"],
+.music-app[data-layout="portrait"] .detail-title-probe[data-long="true"] {
+  font-size: 22px;
+}
+.music-app[data-layout="portrait"] .detail-title,
+.music-app[data-layout="portrait"] .detail-artist {
+  margin-top: 9px;
+}
+.music-app[data-layout="portrait"] .detail-artist {
+  font-size: 14px;
+}
+.music-app[data-layout="portrait"] .detail-facts {
+  column-gap: 20px;
+  margin-top: 16px;
+}
+.music-app[data-layout="portrait"] .detail-fact {
+  padding: 9px 0;
+}
+.music-app[data-layout="portrait"] .detail-fact dd {
+  font-size: 11px;
+}
+.music-app[data-layout="portrait"] .detail-transport {
+  height: 44px;
+  margin-top: 16px;
+}
+.music-app[data-layout="portrait"] .detail-control {
+  padding: 0 16px;
+}
+.music-app[data-layout="portrait"] .detail-control:first-child {
+  padding: 0 16px 0 4px;
+}
+.music-app[data-layout="portrait"] .detail-ring {
+  width: 26px;
+  height: 26px;
+}
+.music-app[data-layout="portrait"] .detail-timeline {
+  margin-top: 14px;
+}
+.music-app[data-layout="portrait"] .detail-caption {
+  display: none;
+}
+.music-app[data-layout="portrait"] .music-tabs {
+  margin-top: 20px;
+}
+.music-app[data-layout="portrait"] .track-row {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 0 8px 0 10px;
+}
+.music-app[data-layout="portrait"] .track-format {
+  display: none;
+}
+@media (max-width: 700px) {
+  .music-app[data-layout="portrait"] .detail-title,
+  .music-app[data-layout="portrait"] .detail-title-probe {
+    font-size: 25px;
+  }
+}

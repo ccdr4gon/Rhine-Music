@@ -379,10 +379,11 @@ const transitionSource = await readFile(new URL('../src/ui-transitions.ts', impo
 const transitionModule = ts.transpileModule(transitionSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText;
-const { SurfaceTransition } = await import(`data:text/javascript;base64,${Buffer.from(transitionModule).toString('base64')}`);
+const { SurfaceTransition, DETAIL_SCENE, DETAIL_SWAP, SONG_SCENE } = await import(`data:text/javascript;base64,${Buffer.from(transitionModule).toString('base64')}`);
 
 function animationElement(hidden = false) {
-  const element = { hidden, dataset: {}, opacity: '1', transform: 'none', animations: [] };
+  const element = { hidden, dataset: {}, opacity: '1', transform: 'none', animations: [],
+    style: { visibility: '', removeProperty(name) { this[name] = ''; } } };
   element.animate = (frames, options) => {
     let resolve, reject, finished;
     let settled = false, cancelled = false;
@@ -406,32 +407,101 @@ function animationElement(hidden = false) {
   return element;
 }
 
-test('production menu transition moves right and fades before switching the detail album', async (t) => {
+test('production document swap rises and fades before switching the detail album, and returns after 70 ms', async (t) => {
   const originalComputedStyle = globalThis.getComputedStyle;
   globalThis.getComputedStyle = (element) => element;
   t.after(() => { globalThis.getComputedStyle = originalComputedStyle; });
-  const root = animationElement(), article = animationElement();
-  const transition = new SurfaceTransition(root, article, 360, 240, 'right');
+  // The details' previous / next (2026-10-05 design): only the document leaves, 170 ms, 6 px up.
+  const article = animationElement();
+  const transition = new SurfaceTransition(article, article, 250, 170, DETAIL_SWAP);
   const f = fixture();
   f.openDetail();
   f.ports.hideMenu = (done) => transition.hide(false, done);
   f.motion.select({ index: 6 }, true);
-  assert.equal(root.hidden, false, 'Retain the menu while its outgoing frames render');
-  assert.equal(root.dataset.transition, 'closing');
-  assert.equal(root.animations.at(-1).frames.at(-1).opacity, 0);
-  const destination = article.animations.at(-1).frames.at(-1).transform;
-  assert.match(destination, /^translateX\([\d.]+px\)$/);
-  assert.ok(Number(destination.match(/[\d.]+/)[0]) > 0, 'Exit moves toward screen right');
+  assert.equal(article.hidden, false, 'Retain the document while its outgoing frames render');
+  assert.equal(article.dataset.transition, 'closing');
+  // The surface is its own panel: one fade and one movement.
+  const latest = (property) => article.animations.findLast((animation) => property in animation.frames[0]);
+  assert.equal(latest('opacity').options.duration, 170);
+  assert.equal(latest('opacity').frames.at(-1).opacity, 0);
+  assert.equal(latest('transform').frames.at(-1).transform, 'translateY(-6px)', 'Exit rises 6 px');
   assert.ok(!f.events.includes('camera:return'));
   assert.deepEqual(f.detailSelections(), [], 'Do not move the album before its text exits');
   transition.finish();
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(root.hidden, true);
+  // Held: still laid out (its new content is prepared in place), invisible until it returns.
+  assert.equal(article.hidden, false);
+  assert.equal(article.style.visibility, 'hidden');
+  assert.equal(article.dataset.transition, 'closed');
   assert.equal(f.motion.phase, 'switching');
   assert.deepEqual(f.detailSelections(), [{ index: 6 }]);
   assert.equal(f.events.at(-1), 'menu:prepare');
   assert.ok(!f.events.includes('camera:return'));
+  // Back from where it went, 250 ms after a 70 ms pause, once shown again.
+  transition.show(false);
+  assert.equal(article.style.visibility, '');
+  assert.equal(latest('transform').options.duration, 250);
+  assert.equal(latest('transform').options.delay, 70);
+  assert.equal(latest('transform').frames[0].transform, 'translateY(-6px)');
+  assert.equal(latest('opacity').options.delay, 70);
+  assert.equal(latest('opacity').frames[0].opacity, '0');
+});
+
+test('production details page sinks 6 px as it fades out and rises 6 px into place', async (t) => {
+  const originalComputedStyle = globalThis.getComputedStyle;
+  globalThis.getComputedStyle = (element) => element;
+  t.after(() => { globalThis.getComputedStyle = originalComputedStyle; });
+  const root = animationElement();
+  const transition = new SurfaceTransition(root, root, 420, 200, DETAIL_SCENE);
+  transition.hide(false);
+  const latest = (property) => root.animations.findLast((animation) => property in animation.frames[0]);
+  assert.equal(latest('opacity').options.duration, 200);
+  assert.equal(latest('opacity').frames.at(-1).opacity, 0);
+  assert.equal(latest('transform').frames.at(-1).transform, 'translateY(6px)');
+  transition.finish();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(root.hidden, true, 'A page that is not held is hidden when it has left');
+  transition.show(false);
+  assert.equal(latest('transform').options.duration, 420);
+  assert.equal(latest('transform').options.delay, 0);
+  assert.equal(latest('transform').frames[0].transform, 'translateY(6px)');
+});
+
+test('production song scene: its chrome and pane rise 6 px with translate as they fade in, sink as they fade out; the section never moves', async (t) => {
+  const originalComputedStyle = globalThis.getComputedStyle;
+  globalThis.getComputedStyle = (element) => element;
+  t.after(() => { globalThis.getComputedStyle = originalComputedStyle; });
+  const section = animationElement(true), chrome = animationElement(), pane = animationElement();
+  // The pane keeps its own transform (its turn): the rise is the individual translate property.
+  pane.transform = 'perspective(1660px) rotateY(-18deg)';
+  chrome.translate = pane.translate = 'none';
+  const transition = new SurfaceTransition(section, undefined, 420, 200, SONG_SCENE, undefined, [chrome, pane]);
+  transition.show(false);
+  assert.equal(section.animations.length, 0, 'the section itself is never animated');
+  for (const target of [chrome, pane]) {
+    const [fade] = target.animations;
+    assert.equal(fade.options.duration, 420);
+    assert.deepEqual(fade.frames, [{ opacity: '0', translate: '0 6px' }, { opacity: 1, translate: '0 0' }]);
+    assert.ok(fade.frames.every((frame) => !('transform' in frame)), 'the pane\'s turn is left alone');
+  }
+  transition.finish();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(section.hidden, false);
+  transition.hide(false);
+  for (const target of [chrome, pane]) {
+    const fade = target.animations.at(-1);
+    assert.equal(fade.options.duration, 200);
+    assert.deepEqual(fade.frames.at(-1), { opacity: 0, translate: '0 6px' });
+    assert.equal(fade.frames[0].translate, '0 0', 'from where it rests');
+  }
+  // Interrupted half way: it turns back from where it got to.
+  pane.translate = '0px 3px';
+  pane.opacity = '0.5';
+  transition.show(false);
+  assert.deepEqual(pane.animations.at(-1).frames[0], { opacity: '0.5', translate: '0px 3px' });
 });
 
 test('production transition cancellation cannot complete an obsolete exit', async (t) => {
@@ -439,7 +509,7 @@ test('production transition cancellation cannot complete an obsolete exit', asyn
   globalThis.getComputedStyle = (element) => element;
   t.after(() => { globalThis.getComputedStyle = originalComputedStyle; });
   const root = animationElement(), article = animationElement();
-  const transition = new SurfaceTransition(root, article, 360, 240, 'right');
+  const transition = new SurfaceTransition(root, article, 420, 200, DETAIL_SCENE);
   let obsoleteCalls = 0;
   transition.hide(false, () => { obsoleteCalls++; });
   const oldFade = root.animations.at(-1);

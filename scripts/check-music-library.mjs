@@ -231,7 +231,41 @@ test('root selection deduplicates nested paths including filesystem roots', () =
   const root = path.resolve('music')
   assert.deepEqual(safeRootList([root, path.join(root, 'Album'), `${root}-other`, root]), [root, `${root}-other`])
   const drive = path.parse(root).root
-  assert.deepEqual(safeRootList([root, drive]), [drive])
+  assert.deepEqual(safeRootList([drive, root]), [drive])
+  // The first folder is the main folder (2026-10-06): a later folder containing it is dropped instead.
+  assert.deepEqual(safeRootList([root, drive]), [root])
+  assert.deepEqual(safeRootList([path.join(root, 'Main'), `${root}-other`, root]), [path.join(root, 'Main'), `${root}-other`])
+})
+
+test('the main folder\'s subfolders are its playlists; earlier extra folders are kept but unused', async (t) => {
+  // The owner, 2026-10-06: "Local music means choosing a main folder, and each playlist will be a
+  // subfolder." A fictional tree: loose files, nested folders, an empty and a hidden folder.
+  const { root, store, temporary } = await fixture(t, { metadataParser: async (file) => ({ common: path.basename(file) === 'Track 10.wav' ? { album: '夜航', year: 2001, title: 'Ten' } : {}, format: { duration: 1 } }) })
+  const write = async (...parts) => { await fs.mkdir(path.join(root, ...parts.slice(0, -1)), { recursive: true }); await fs.writeFile(path.join(root, ...parts), 'fixture') }
+  await write('Loose 10.wav'); await write('Loose 2.wav')
+  await write('夜航 Night', 'Track 10.wav'); await write('夜航 Night', 'Track 2.wav'); await write('夜航 Night', 'CD 2', 'Track 1.wav')
+  await write('Album 10', 'a.wav'); await write('Album 9', 'Deep', 'Deeper', 'b.wav')
+  await fs.mkdir(path.join(root, 'Empty', 'Still empty'), { recursive: true }); await write('Empty', 'notes.txt')
+  await write('.hidden', 'x.wav'); await write('夜航 Night', '._Track 2.wav')
+  await write('夜航 Night', 'download.mflac'); await write('download.qmc0'); await write('Album 10', 'download.mgg1')
+  const elsewhere = path.join(temporary, 'Earlier second folder')
+  await fs.mkdir(elsewhere); await fs.writeFile(path.join(elsewhere, 'z.wav'), 'fixture')
+  await store.updateConfig({ roots: [root, elsewhere] })
+  await store.scan()
+  const library = store.snapshot()
+  assert.deepEqual(library.playlists.map((list) => [list.name, list.main]), [[path.basename(root), true], ['Album 9', false], ['Album 10', false], ['夜航 Night', false]])
+  assert.equal(library.playlists[3].folder, path.join(root, '夜航 Night'))
+  const relative = new Map(library.albums.flatMap((album) => album.tracks.map((track) => [track.id, track.relativePath.replaceAll('\\', '/')])))
+  const songs = (list) => list.trackIds.map((id) => relative.get(id))
+  assert.deepEqual(songs(library.playlists[0]), ['Loose 2.wav', 'Loose 10.wav'])
+  assert.deepEqual(songs(library.playlists[1]), ['Album 9/Deep/Deeper/b.wav'])
+  assert.deepEqual(songs(library.playlists[3]), ['夜航 Night/CD 2/Track 1.wav', '夜航 Night/Track 2.wav', '夜航 Night/Track 10.wav'])
+  assert.equal(library.playlists.reduce((n, list) => n + list.trackIds.length, 0), 7, 'nothing from the hidden or empty folders, no `._` copy')
+  assert.equal(library.roots[0].encrypted, 3, 'QQ Music\'s encrypted downloads are counted, never read')
+  assert.deepEqual(library.roots[1], { path: elsewhere, status: 'unscanned' })
+  const ten = library.albums.flatMap((album) => album.tracks).find((track) => track.title === 'Ten')
+  assert.deepEqual([ten.album, ten.year], ['夜航', 2001], 'a song\'s own album and year tags')
+  assert.ok(store.index.albums.every((album) => album._root === root), 'the earlier second folder is not scanned')
 })
 
 test('Windows roots require a drive or UNC share and deduplicate case and separators', { skip: process.platform !== 'win32' }, () => {

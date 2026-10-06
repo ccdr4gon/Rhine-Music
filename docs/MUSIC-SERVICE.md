@@ -1,8 +1,8 @@
 # 本地音乐服务 · Rust 客户端与旧 Node 入口
 
-v0.3.0 Windows 客户端由 `src-tauri/src/server.rs` 在同一 Rust 进程中提供界面与音乐 API，关闭窗口时一并退出，不需要单独运行服务命令。API 与下文旧服务的公开数据合同保持兼容，原生实现与检查范围见 [Windows 客户端](WINDOWS.md) 和 [当前结构](architecture/overview.md)。
+v0.3.0 Windows 客户端由 `src-tauri/src/local_music/connector/server.rs` 在同一 Rust 进程中提供界面与音乐 API，关闭窗口时一并退出，不需要单独运行服务命令。API 与下文旧服务的公开数据合同保持兼容，原生实现与检查范围见 [Windows 客户端](WINDOWS.md) 和 [当前结构](architecture/overview.md)。本地音乐的代码在 `src-tauri/src/local_music/`（`data/`：配置、扫描、索引、标签与在线资料；`connector/`：本机服务）和前端的 `src/local_music/`（`data/`：歌单到专辑架的列与盒子、演示歌单；`connector/`：`/api` 客户端、系统文件夹选择与播放器）。
 
-`node scripts/music-server.mjs` 保留为 macOS 旧入口和开发对照，同时提供 `dist/` 界面和本地音乐 API。该入口默认仅监听 `127.0.0.1:5173`；端口可通过 `--port 5174` 或 `PORT` 指定。以下终端命令适用于旧入口；普通 Windows 客户端使用安装包即可。修改共享前端后需重新构建。服务保持运行期间可编辑本地流派规则，下一次读取曲库就会生效。
+`node scripts/music-server.mjs` 保留为 macOS 旧入口和开发对照，同时提供 `dist/` 界面和本地音乐 API。该入口默认仅监听 `127.0.0.1:5173`；端口可通过 `--port 5174` 或 `PORT` 指定。以下终端命令适用于旧入口；普通 Windows 用户使用便携版即可。修改共享前端后需重新构建。服务仍保留本地流派规则接口（界面不再编辑，专辑架的列已改为主文件夹的歌单）。
 
 ```sh
 npm ci
@@ -12,22 +12,28 @@ node scripts/music-server.mjs
 
 ## 数据与文件权限
 
-Windows 客户端的默认数据目录为 `%LOCALAPPDATA%\io.github.ccdr4gon.rhine-music\`；旧 Node 入口的默认索引目录是仓库旁边的 `music-data-v3/`。两者均可通过 `MUSIC_DATA_DIR` 覆盖。首次运行默认无音乐目录，请在界面选择或填写并保存自己的音乐文件夹。`MUSIC_ROOTS` 也能提供首次根目录，多个目录按系统路径分隔符分隔（Windows 为分号，macOS 为冒号）；已有 `config.json` 优先，更新程序不会更换已保存的音乐目录。
+Windows 客户端默认把数据写在程序旁的 `data/`；旧 Node 入口的默认索引目录是仓库旁边的 `music-data-v3/`。两者均可通过 `MUSIC_DATA_DIR` 覆盖。首次运行默认无音乐目录，请在界面选择或填写并保存自己的音乐主文件夹。`MUSIC_ROOTS` 也能提供首次目录，按系统路径分隔符分隔（Windows 为分号，macOS 为冒号），第一个是主文件夹；已有 `config.json` 优先，更新程序不会更换已保存的音乐目录。
 
-Windows 使用带盘符的绝对路径（如 `D:\Music`），也接受 UNC 共享路径（如 `\\server\share\Music`，需要当前用户有读取权限）。界面每行一个目录，不加引号；JSON 中反斜杠需转义，例如 `{ "roots": ["D:\\Music"] }`。相同盘符/目录的大小写、斜杠差异和父子目录会去重。跨系统迁移时重新配置根目录，不直接复用旧系统路径。
+2026-10-06 起本地音乐只有一个主文件夹（用户原话：“Local music means choosing a main folder, and each playlist will be a subfolder.”）。`config.json` 的 `roots` 仍是数组：第一个是主文件夹，只有它被扫描、显示和读取；旧版本保存的其余目录保留在数组中，但不再扫描或显示（界面只提到它们的数量）。在界面选择新的主文件夹时，它成为第一个目录，其余旧目录仍跟在后面。
+
+Windows 使用带盘符的绝对路径（如 `D:\Music`），也接受 UNC 共享路径（如 `\\server\share\Music`，需要当前用户有读取权限）。界面填写一个目录，不加引号（Windows 客户端也可用系统文件夹选择，一次选一个）；JSON 中反斜杠需转义，例如 `{ "roots": ["D:\\Music"] }`。相同盘符/目录的大小写、斜杠差异和父子目录会去重：主文件夹总是保留在第一位，后面与它相同、在它里面或包含它的目录被去掉。跨系统迁移时重新选择主文件夹，不直接复用旧系统路径。
 
 Windows PowerShell 可用 `$env:MUSIC_ROOTS = 'D:\Music;E:\Albums'` 和 `$env:MUSIC_DATA_DIR = 'D:\RhineMusicData'` 设置环境变量，再运行 `node scripts/music-server.mjs`。运行 npm 命令时可使用 `npm.cmd`，不需要放宽 PowerShell 执行策略。双击启动、日志和停止服务的方法见 [README](../README.md)。
 
-- `config.json`：根目录、是否在扫描后补充在线资料、可选的本机 Beefweb 地址。
+- `config.json`：音乐目录（第一个是主文件夹）、是否在扫描后补充在线资料、可选的本机 Beefweb 地址。
 - `library-index.json`：自动扫描缓存。记录真实文件的引用、尺寸/修改时间、元数据、封面与在线来源，不复制歌曲。
-- `genre-rules.json`：展示分类、别名和 `albumOverrides` 人工覆盖。扫描不修改这个文件。通过 API 更新时保留一份 `.backup`。
+- `genre-rules.json`：流派归并、别名和 `albumOverrides` 人工覆盖（仍由 API 维护，界面不再使用）。扫描不修改这个文件。通过 API 更新时保留一份 `.backup`。
 - `artwork/`：从歌曲内嵌图片提取的原始封面缓存，不裁切或拉伸。文件夹封面直接读取原文件。
 
-每个配置根目录下直属的音频文件各为一个单曲专辑，以歌曲 title（缺失时文件名）展示，ID 由该音频路径决定。子文件夹仍每个含音频的文件夹为一个专辑；扫描递归进入子文件夹，跳过符号链接和隐藏子目录。多张 CD 若在同一文件夹中，优先按 disc 标签、再按 `1-01` 这样的文件名前缀排序。不同子文件夹暂分别视为专辑。移动单曲文件或专辑文件夹会建立新 ID；当前版本尚未自动识别迁移。重扫时按专辑 ID 匹配缓存，旧根目录合辑由新单曲条目替换，不将旧合辑的介绍或分类自动分发。
+**歌单。** 主文件夹的每个直接子文件夹是一个歌单，以文件夹名命名；其中任意深度的音频都是这个歌单的歌，按它们在主文件夹中的相对路径自然排序（逐级比较文件夹名与文件名，数字按大小，不区分大小写）。直接放在主文件夹里的音频组成一个以主文件夹命名的歌单，排在最前（`main: true`）；其余歌单按名称自然排序。没有音频的文件夹没有歌单。`GET /api/library` 的 `playlists` 给出每个歌单的 `id`（由文件夹路径决定）、`name`、`folder`、`main` 与按顺序排列的 `trackIds`；它由已索引歌曲的路径得出，不另外读取文件。界面把每个歌单作为专辑架的一列，每首歌一个盒子。
 
-启动时先能读取缓存，随后后台扫描。未改动的音频不再解析标签。可读根目录内删除的专辑会移出当前列表；根目录断开或扫描访问失败保留原索引并标记离线。人工分类保留。子文件夹专辑优先 `cover`、`folder`、`front` 命名的 JPG/PNG/WebP，其次其他图片，最后使用第一份可用内嵌封面。根目录单曲优先各自音频的内嵌封面，其次与音频同名的图片，不共享根目录的任意封面。
+**专辑记录。** 索引内部仍按专辑记录保存：主文件夹里直接放的每个音频各为一条记录，以歌曲 title（缺失时文件名）展示，ID 由该音频路径决定；子文件夹中每个含音频的文件夹为一条记录。专辑记录提供封面和专辑介绍、在线资料的身份。扫描递归进入子文件夹，跳过符号链接（包括 Windows 的目录联接）、名称以 `.` 开头的文件和文件夹（包括 macOS 的 `._` 副本），Windows 客户端还跳过带“隐藏”或“系统”属性的文件夹（旧 Node 入口无法读取这些属性，只按名称跳过）。QQ 音乐的加密下载（`.mflac`、`.mgg`、`.qmc*` 及其编号变体）不当作音频、不读取、不解密，只在主文件夹的扫描结果中计数（`roots[0].encrypted`）。多张 CD 若在同一文件夹中，优先按 disc 标签、再按 `1-01` 这样的文件名前缀排序。移动歌曲文件或文件夹会建立新 ID；当前版本尚未自动识别迁移。重扫时按专辑 ID 匹配缓存。
 
-API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件路径；文件读取再次检查实际位置仍在配置的根目录内。服务只绑定回环地址，并拒绝跨站 Origin、陌生 Host 和非 JSON 写入。勿在公网反向代理本服务。
+每首歌在 `tracks` 中除原有字段外还给出它自己的 `album` 与 `year` 标签（有时才有），用于歌曲详情；一条专辑记录里的歌可以来自不同专辑。
+
+启动时先能读取缓存，随后后台扫描。未改动的音频不再解析标签。主文件夹内删除的歌曲会移出当前列表；主文件夹断开或扫描访问失败保留原索引并标记离线。每首歌的封面来自它的专辑记录：子文件夹优先 `cover`、`folder`、`front` 命名的 JPG/PNG/WebP，其次其他图片，最后使用第一份可用内嵌封面；主文件夹里直接放的歌优先各自音频的内嵌封面，其次与音频同名的图片，不共享主文件夹的任意封面。
+
+API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件路径；只提供主文件夹中的歌曲和封面，文件读取再次检查实际位置仍在主文件夹内。服务只绑定回环地址，并拒绝跨站 Origin、陌生 Host 和非 JSON 写入。勿在公网反向代理本服务。
 
 ## API
 
@@ -35,18 +41,18 @@ API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件
 
 | 方法与路径 | 功能 |
 | --- | --- |
-| `GET /api/library` | 当前真实库、归并后的流派、根目录和扫描/补全状态；不虚构演示音乐 |
-| `POST /api/library/scan` | `{ "roots": ["/absolute/path"] }` 可选；保存目录并扫描，返回 202，轮询 GET 读取完成结果；并发请求合并 |
+| `GET /api/library` | 主文件夹的专辑记录与歌曲、`playlists`（歌单）、归并后的流派、目录（第一个是主文件夹）和扫描/补全状态；不虚构演示音乐 |
+| `POST /api/library/scan` | `{ "roots": ["/absolute/path"] }` 可选（第一个是主文件夹）；保存目录并扫描主文件夹，返回 202，轮询 GET 读取完成结果；并发请求合并 |
 | `GET /api/audio/:trackId` | 原始音频，支持单一 HTTP Range 与 HEAD，用于跳转播放 |
 | `GET /api/artwork/:albumId` | 原比例封面图片；URL `v` 参数随封面变化更新 |
-| `GET/POST /api/genre-rules` | 获取或保存完整 `{version:1,genres:[{id,name,aliases:[]}],albumOverrides:{}}` |
-| `GET/POST /api/config` | 配置 `roots`、`onlineEnabled`、`musicBrainzContact`、`foobarBaseUrl`；响应还给出 `musicBrainzConfigured` |
+| `GET/POST /api/genre-rules` | 获取或保存完整 `{version:1,genres:[{id,name,aliases:[]}],albumOverrides:{}}`（界面不再使用） |
+| `GET/POST /api/config` | 配置 `roots`（第一个是主文件夹）、`onlineEnabled`、`musicBrainzContact`、`foobarBaseUrl`；响应还给出 `musicBrainzConfigured` |
 | `POST /api/library/enrich` | 明确请求 MusicBrainz 补全；可选 `{ "albumIds": ["album-..."] }`；返回 202 |
 | `POST /api/library/introductions` | 独立查询/更新百科专辑介绍，无需 MusicBrainz 配置；`{ "albumIds": ["album-..."], "force": true }` 均可省略；返回 202 |
 | `GET /api/foobar/status` | 是否保存过本机桥接地址；不是实际连接成功证明 |
 | `GET/POST /api/foobar/*` | 原样代理到本机 Beefweb `/api/*`，例如 `GET /api/foobar/player` |
 
-默认规则可将 `Mandopop`、`国语流行音乐`、`华语流行音乐` 归入“华语流行”。人工 `albumOverrides` 优先，其次对原始流派应用别名。未归并的来源分类保留原名；无信息归入“未分类”。原始标签完整保留，不反写音乐文件。
+默认规则可将 `Mandopop`、`国语流行音乐`、`华语流行音乐` 归入“华语流行”。人工 `albumOverrides` 优先，其次对原始流派应用别名。未归并的来源分类保留原名；无信息归入“未分类”。专辑记录的 `genreId` 仍按这些规则给出，但 2026-10-06 起专辑架的列是歌单，界面不再按流派分列。原始标签完整保留，不反写音乐文件。
 
 ## 音频能力
 
@@ -92,7 +98,7 @@ MUSICBRAINZ_CONTACT='your-project-contact' node scripts/music-server.mjs
 
 以下说明既有检查脚本的用途，不表示这些脚本在 V0.2.0 发布时全部重新运行；本次检查范围见 [发布检查](RELEASE-V0.2.0.md)。
 
-`node --test scripts/check-music-library.mjs` 使用临时合成 WAV 和元数据 fixture，验证实际 WAV 解析、字节范围、增删与断盘保留、缓存、封面优先、人工覆盖、并发扫描和含糊匹配。测试不会读取或改写用户歌曲。
+`node --test scripts/check-music-library.mjs` 使用临时合成 WAV 和元数据 fixture，验证实际 WAV 解析、字节范围、增删与断盘保留、缓存、封面优先、人工覆盖、并发扫描、含糊匹配，以及主文件夹的歌单（虚构的嵌套文件夹、散放文件、空文件夹、隐藏文件夹与加密下载）和旧版本的其余目录保留不用。测试不会读取或改写用户歌曲。`scripts/check-desktop-contract.mjs` 在同一批合成文件上比较 Rust 与 Node 两个服务的公开 JSON（包括 `playlists` 的顺序）。
 
 `node --experimental-strip-types --test scripts/check-music-player.mjs` 使用受控 Audio 和可推进时钟，验证两路独立音量、过渡静音门、快速开关与音量变化、恢复和迟到播放 Promise 的取消。测试不播放真实声音、不启动服务。
 

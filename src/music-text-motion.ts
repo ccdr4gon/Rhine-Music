@@ -8,14 +8,41 @@ type SelectionText = {
   number: number;
   total: number;
   code: number;
+  codeTotal: number;
   genreIndex: number;
   genresTotal: number;
-  genre: string;
-  genreName: string;
-  format: string;
   artist: string;
-  meta: string;
+  /** The shelf's two facts (the album and the song count, or a local album's year and songs). */
+  factA: string;
+  factB: string;
 };
+
+const motion = {
+  duration: 460,
+  motionBlur: false,
+  animated: false,
+  // Hidden browse text is prepared before the camera finishes its return.
+  pauseOffscreen: false,
+};
+
+/**
+ * One number on the shelf's 460 ms digit reel, padded to `digits` (the song scene's tab). It
+ * rolls only when `animated` is passed with a new value.
+ */
+export function setupRollingNumber(element: HTMLElement, digits: number) {
+  element.classList.add("music-rolling-number");
+  const reel = createRollingNumber(element, {
+    ...motion,
+    value: 1,
+    locales: "en-US",
+    format: { minimumIntegerDigits: digits, useGrouping: false },
+  });
+  return {
+    update(value: number, animated: boolean) {
+      reel.update({ value, animated, direction: "auto" });
+    },
+  };
+}
 
 /** Keep the original archive's per-glyph reels alive across selection changes. */
 export function setupMusicTextMotion(root: HTMLElement) {
@@ -23,13 +50,6 @@ export function setupMusicTextMotion(root: HTMLElement) {
     const element = root.querySelector<HTMLElement>(`#${id}`)!;
     element.classList.add(`music-rolling-${kind}`);
     return element;
-  };
-  const motion = {
-    duration: 460,
-    motionBlur: false,
-    animated: false,
-    // Hidden browse text is prepared before the camera finishes its return.
-    pauseOffscreen: false,
   };
   const pendingWraps = new Set<() => () => void>();
   let wrappingFrame = 0;
@@ -51,17 +71,10 @@ export function setupMusicTextMotion(root: HTMLElement) {
       locales: "en-US",
       format: { minimumIntegerDigits: digits, useGrouping: false },
     });
-  const text = (id: string) =>
-    createRollingText(host(id, "text"), {
-      ...motion,
-      text: "",
-      transition: "direct",
-      stagger: "none",
-      direction: "up",
-    });
   const wrappingText = (id: string) => {
     // Auxiliary metadata keeps its native block width. Reels only own the
-    // inner single-line span; longer artist lists retain ordinary line wraps.
+    // inner single-line span; longer artist lists retain ordinary line wraps
+    // (a fact of the shelf's data row ends in an ellipsis instead, music.css).
     const element = root.querySelector<HTMLElement>(`#${id}`)!;
     const reel = document.createElement("span");
     const plain = document.createElement("span");
@@ -154,15 +167,14 @@ export function setupMusicTextMotion(root: HTMLElement) {
     number: number("selection-number"),
     total: number("selection-total"),
     code: number("selection-code-number", 3),
+    codeTotal: number("selection-code-total", 3),
     genreIndex: number("genre-index"),
     genresTotal: number("genre-total"),
   };
   const texts = {
-    genre: text("selection-genre"),
-    genreName: text("genre-name"),
-    format: text("selection-format"),
     artist: wrappingText("selection-artist"),
-    meta: wrappingText("selection-meta"),
+    factA: wrappingText("selection-fact-a"),
+    factB: wrappingText("selection-fact-b"),
   };
   const controllers = [...Object.values(numbers), ...Object.values(texts)];
   let enabled = false;
@@ -198,6 +210,10 @@ export function setupMusicTextMotion(root: HTMLElement) {
         direction: axis === "lane" ? direction : "auto",
       });
       numbers.code.update({ value: value.code, direction });
+      numbers.codeTotal.update({
+        value: value.codeTotal,
+        direction: axis === "lane" ? direction : "auto",
+      });
       numbers.genreIndex.update({
         value: value.genreIndex,
         direction: axis === "lane" ? direction : "auto",

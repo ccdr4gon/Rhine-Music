@@ -1,5 +1,5 @@
-import type { MusicLibrary } from "./music-types";
-import { escapeHtml as esc } from "./html";
+import type { MusicLibrary } from "../music-types";
+import { escapeHtml as esc } from "../html";
 
 export type MediaAction = "toggle" | "previous" | "next" | "stop" | "seek";
 export interface ExternalMediaSource {
@@ -15,8 +15,17 @@ export interface ExternalMediaSource {
   duration?: number;
   capabilities: Record<MediaAction, boolean>;
   warning?: string;
-  /** "netease" when the source is NetEase Cloud Music (either connection kind). */
-  player?: "netease";
+  /**
+   * The player the source belongs to (music-sources.ts): "netease" for NetEase Cloud Music
+   * (either connection kind), "qqmusic" for QQ Music's media session.
+   */
+  player?: "netease" | "qqmusic";
+  /**
+   * The app id Windows reports for the media session (its AppUserModelId), when it has one: the
+   * same for every session of that player and across restarts, unlike `id`. A player Rhine does
+   * not know by name is remembered by it (SourceLink).
+   */
+  app?: string;
 }
 export interface MediaSnapshot { sources: ExternalMediaSource[]; warning?: string }
 export interface MediaPort {
@@ -37,13 +46,72 @@ export const nativeMediaPort: MediaPort = {
 
 /** The player that is connected by default: its display name and how to recognise its sources. */
 export interface PreferredPlayer { name: string; match(source: ExternalMediaSource): boolean }
+/** A player Rhine knows by name (music-sources.ts), by its `player` mark in the snapshot. */
+export interface PlayerModule extends PreferredPlayer {
+  id: NonNullable<ExternalMediaSource["player"]>;
+  /** Its sources as its module shows them (QQ Music's under its own name); as listed when absent. */
+  show?(source: ExternalMediaSource): ExternalMediaSource;
+}
+
+/**
+ * A source as it is remembered across restarts (`playerLink` in the preferences; the owner,
+ * 2026-10-06): a player Rhine knows by its module id; any other by the app id of its media
+ * session, with the name it was listed under (to say what is awaited). Never a source id, which
+ * lasts one session, and never anything the player plays.
+ */
+export type SourceLink = { player: string } | { app: string; name: string };
+const APP_ID_LIMIT = 512, NAME_LIMIT = 200;
+const appId = (app: unknown): app is string => typeof app === "string" && app.length > 0 && app.length <= APP_ID_LIMIT;
+/**
+ * At most `limit` UTF-16 units, never ending in the first half of a character: JSON would carry
+ * the half as "\udXXX", which the native side (serde_json in save_preferences) refuses, and with
+ * it every later save of the preferences.
+ */
+const clip = (text: string, limit: number) =>
+  text.slice(0, text.length > limit && /[\uD800-\uDBFF]/.test(text[limit - 1]) ? limit - 1 : limit);
+
+/** How a source is remembered: by its player's module, else by its session's app id; without either, it cannot be. */
+export function sourceLink(source: ExternalMediaSource, players: readonly PlayerModule[] = []): SourceLink | undefined {
+  const player = players.find(player => player.match(source));
+  if (player) return { player: player.id };
+  return appId(source.app) ? { app: source.app, name: clip(source.name.trim() || source.app, NAME_LIMIT) } : undefined;
+}
+
+/**
+ * A saved link, checked: undefined while nothing was ever connected (or what is saved cannot be
+ * read), null after the user disconnected. main.rs (`remembers_source`) accepts the same when it
+ * decides whether a plain start resumes the player skin.
+ */
+export function readSourceLink(value: unknown, players: readonly PlayerModule[]): SourceLink | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { player, app, name } = value as Record<string, unknown>;
+  if (typeof player === "string") return players.some(known => known.id === player) ? { player } : undefined;
+  if (!appId(app)) return undefined;
+  return { app, name: typeof name === "string" && name.trim() ? clip(name.trim(), NAME_LIMIT) : app };
+}
+
+/** What the connection remembers, and from where (music-sources.ts playerLinks). */
+export interface SourceLinks {
+  /** The players Rhine knows by name: a source of theirs is remembered by its module. */
+  players?: readonly PlayerModule[];
+  /** The default link while nothing was ever connected (NetEase, AGENTS.md 2026-10-04). */
+  fallback?: PreferredPlayer;
+  /** What an earlier session remembered (readSourceLink): undefined while nothing was ever connected, null after a disconnect. */
+  remembered?: SourceLink | null;
+  /** Told the source to remember each time it changes, to be saved with the preferences. */
+  remember?(link: SourceLink | null): void;
+}
 
 /**
  * Selection belongs to the user. A missing session never transfers its controls to another
- * player. With a preferred player, that player is the default link: it is connected when the
- * user has selected nothing, and connected again when it was the connected player and comes
- * back as a new session. It never replaces another player the user selected, never returns
- * after the user disconnected, and never carries the global media-key consent over.
+ * player. The connection remembers the source it was last connected to, also across restarts
+ * (`links.remembered`), and that source is the default link: it is connected when it is found
+ * while nothing is connected, and connected again when it comes back as a new session (only when
+ * exactly one session is its own: never a guess between two). Selecting another source replaces
+ * it; a disconnect forgets it, and then nothing is connected by itself until the user selects a
+ * source. While nothing was ever connected, the fallback (NetEase) is the default link. A new
+ * connection never carries the global media-key consent over.
  */
 export class ExternalMediaConnection {
   sources: ExternalMediaSource[] = [];
@@ -54,22 +122,44 @@ export class ExternalMediaConnection {
   error = "";
   busy = false;
   private refreshTask?: Promise<void>;
-  /** The user disconnected: nothing is connected by default until they select a source again. */
-  private optedOut = false;
-  /** The connected source, present or lost, is the preferred player. */
-  private preferredSelected = false;
-  constructor(private readonly port: MediaPort, readonly preferred?: PreferredPlayer) {}
+  /**
+   * The source to connect by itself: the one last connected, also in an earlier session;
+   * undefined while nothing was ever connected (the fallback is the default link then); null once
+   * the user disconnected, or connected a source that cannot be remembered.
+   */
+  private link: SourceLink | null | undefined;
+  private linked?: PreferredPlayer;
+  constructor(private readonly port: MediaPort, private readonly links: SourceLinks = {}) {
+    this.link = links.remembered;
+    this.linked = this.linkedPlayer();
+  }
 
   get selected(): ExternalMediaSource | undefined {
     return this.disconnected ? undefined : this.sources.find(source => source.id === this.selectedId);
   }
+  /** The default link: the remembered source, or the fallback while nothing was ever connected. */
+  get preferred(): PreferredPlayer | undefined {
+    return this.linked;
+  }
+  /** The source remembered for the next start (what `remember` was last told). */
+  get remembered(): SourceLink | null | undefined {
+    return this.link;
+  }
+  /** The default link is a source the user was connected to, rather than the fallback. */
+  get remembers(): boolean {
+    return !!this.link;
+  }
   /** The default link is in force: the preferred player is, or will be, the connected one. */
   get followsPreferred(): boolean {
-    return !!this.preferred && !this.optedOut && (this.selectedId === null || this.preferredSelected);
+    return !!this.preferred;
   }
   /** ... and it is not there now: it will be connected by itself as soon as it is found. */
   get awaitsPreferred(): boolean {
     return this.followsPreferred && (this.selectedId === null || this.disconnected);
+  }
+  /** ... but it is there more than once (two sessions of one app): the user has to pick one. */
+  get ambiguous(): boolean {
+    return this.awaitsPreferred && this.sources.filter(source => this.preferred!.match(source)).length > 1;
   }
   select(id: string): boolean {
     const source = this.sources.find(source => source.id === id);
@@ -78,8 +168,8 @@ export class ExternalMediaConnection {
     this.disconnected = false;
     this.allowGlobalMediaKeys = false;
     this.error = "";
-    this.optedOut = false;
-    this.preferredSelected = !!this.preferred?.match(source);
+    // It replaces the remembered source; one that cannot be remembered leaves none to connect by itself.
+    this.setLink(sourceLink(source, this.links.players) ?? null);
     return true;
   }
   disconnect(): void {
@@ -87,8 +177,23 @@ export class ExternalMediaConnection {
     this.disconnected = false;
     this.allowGlobalMediaKeys = false;
     this.error = "";
-    this.optedOut = true;
-    this.preferredSelected = false;
+    this.setLink(null);
+  }
+  private setLink(link: SourceLink | null): void {
+    if (JSON.stringify(link) === JSON.stringify(this.link)) return;
+    this.link = link;
+    this.linked = this.linkedPlayer();
+    this.links.remember?.(link);
+  }
+  private linkedPlayer(): PreferredPlayer | undefined {
+    const link = this.link;
+    if (link === undefined) return this.links.fallback;
+    if (link === null) return undefined;
+    if ("player" in link) {
+      return this.links.players?.find(player => player.id === link.player)
+        ?? { name: link.player, match: source => source.player === link.player };
+    }
+    return { name: link.name, match: source => source.app === link.app };
   }
   setGlobalMediaKeys(allowed: boolean): void {
     this.allowGlobalMediaKeys = allowed && this.selected?.kind === "netease";
@@ -120,17 +225,25 @@ export class ExternalMediaConnection {
   /** The default link. A new connection: the global media-key consent is asked for again. */
   private connectPreferred(): void {
     if (!this.awaitsPreferred) return;
-    const source = this.sources.find(source => this.preferred!.match(source));
-    if (!source) return;
+    const found = this.sources.filter(source => this.preferred!.match(source));
+    // Two sessions of the one player: never a guess between them.
+    if (found.length !== 1) return;
+    const [source] = found;
     this.selectedId = source.id;
     this.disconnected = false;
     this.allowGlobalMediaKeys = false;
     this.error = "";
-    this.preferredSelected = true;
+    // Remembered from now on (the fallback becomes NetEase itself; a name it is listed under anew is kept).
+    const link = sourceLink(source, this.links.players);
+    if (link) this.setLink(link);
   }
   can(action: MediaAction): boolean {
+    return !this.busy && this.offers(action);
+  }
+  /** Whether the player offers the action, also while another control is still on its way. */
+  offers(action: MediaAction): boolean {
     const source = this.selected;
-    if (!source || this.busy || !source.capabilities[action]) return false;
+    if (!source || !source.capabilities[action]) return false;
     if (source.kind === "netease" && !this.allowGlobalMediaKeys) return false;
     return action !== "seek" || typeof source.duration === "number" && Number.isFinite(source.duration) && source.duration > 0;
   }
@@ -185,12 +298,21 @@ export function mediaTime(value?: number): string {
   const seconds = Math.floor(value);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
-export function mediaConnectionLabel(connection: ExternalMediaConnection): string {
+/** A player's name after a word of Chinese: a space before a Latin one (「等待 QQ音乐…」). */
+export const spacedName = (name: string) => /^[A-Za-z0-9]/.test(name) ? ` ${name}` : name;
+/**
+ * `playback`: the state to show when a better reading than the session's is known (NetEase's own).
+ * While a remembered source is awaited, the words are only that it is awaited: nothing asks the
+ * user to choose (the 播放器 panel still can change it).
+ */
+export function mediaConnectionLabel(connection: ExternalMediaConnection, playback?: ExternalMediaSource["playback"]): string {
   const source = connection.selected;
-  if (source) return `${source.name} · ${mediaPlaybackLabel(source)}`;
+  if (source) return `${source.name} · ${mediaPlaybackLabel({ ...source, playback: playback ?? source.playback })}`;
   const preferred = connection.awaitsPreferred ? connection.preferred!.name : "";
+  if (connection.ambiguous) return `${preferred}有多个媒体会话，请在“播放器”中选择要连接的一个`;
   if (connection.disconnected) return preferred ? `${preferred}已断开，再次出现时会自动重新连接` : "来源已断开，请重新选择播放器";
   if (connection.selectedId) return "暂时无法读取播放器，正在重试";
+  if (preferred && connection.remembers) return `等待${spacedName(preferred)}…`;
   return preferred ? `未发现${preferred}；它出现后会自动连接，也可以选择其他播放器` : "选择播放器后显示当前曲目";
 }
 

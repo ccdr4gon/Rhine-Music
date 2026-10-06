@@ -162,6 +162,104 @@ fn root_singles_nested_albums_incremental_and_disconnected_library() {
     assert!(s.file(&id, true).is_none());
 }
 
+/// The owner, 2026-10-06: "Local music means choosing a main folder, and each playlist will be a
+/// subfolder." A fictional tree with nested folders, loose files, an empty and a hidden folder.
+#[test]
+fn main_folder_subfolders_are_playlists_and_earlier_folders_stay_unused() {
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("主文件夹 Main");
+    wav(&main.join("Loose 10.wav"));
+    wav(&main.join("Loose 2.wav"));
+    tagged_wav(&main.join("夜航 Night").join("Track 10.wav"));
+    wav(&main.join("夜航 Night").join("Track 2.wav"));
+    wav(&main.join("夜航 Night").join("CD 2").join("Track 1.wav"));
+    wav(&main.join("Album 10").join("a.wav"));
+    wav(&main.join("Album 9").join("Deep").join("Deeper").join("b.wav"));
+    // Not playlists: a folder without audio, a hidden folder; not songs: a `._` copy and
+    // QQ Music's encrypted downloads (counted only).
+    fs::create_dir_all(main.join("Empty").join("Still empty")).unwrap();
+    fs::write(main.join("Empty").join("notes.txt"), b"no audio").unwrap();
+    wav(&main.join(".hidden").join("x.wav"));
+    wav(&main.join("夜航 Night").join("._Track 2.wav"));
+    fs::write(main.join("夜航 Night").join("download.mflac"), b"encrypted").unwrap();
+    fs::write(main.join("download.qmc0"), b"encrypted").unwrap();
+    fs::write(main.join("Album 10").join("download.mgg1"), b"encrypted").unwrap();
+    #[cfg(windows)]
+    {
+        let marked = main.join("Marked hidden");
+        wav(&marked.join("y.wav"));
+        assert!(std::process::Command::new("attrib")
+            .arg("+h")
+            .arg(&marked)
+            .status()
+            .unwrap()
+            .success());
+        // A folder marked system only (no hidden mark) is skipped as well.
+        let system = main.join("Marked system");
+        wav(&system.join("s.wav"));
+        assert!(std::process::Command::new("attrib")
+            .arg("+s")
+            .arg(&system)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let elsewhere = temp.path().join("Earlier second folder");
+    wav(&elsewhere.join("Old").join("z.wav"));
+    let mut s = Store::open(temp.path().join("索引")).unwrap();
+    s.update_config(&json!({"roots":[&elsewhere]})).unwrap();
+    s.scan_sync().unwrap();
+    let old_track = library::text(&s.index["albums"][0]["tracks"][0]["id"]).to_owned();
+    // An earlier version's two folders: the first is the main folder, the second stays saved.
+    s.update_config(&json!({"roots":[&main, &elsewhere]})).unwrap();
+    s.scan_sync().unwrap();
+    let snapshot = s.snapshot();
+    let lists = snapshot["playlists"].as_array().unwrap();
+    let names: Vec<_> = lists.iter().map(|p| library::text(&p["name"])).collect();
+    assert_eq!(names, ["主文件夹 Main", "Album 9", "Album 10", "夜航 Night"]);
+    assert_eq!(lists.iter().map(|p| p["main"] == true).collect::<Vec<_>>(), [true, false, false, false]);
+    assert_eq!(lists[0]["folder"], json!(main));
+    assert_eq!(lists[3]["folder"], json!(main.join("夜航 Night")));
+    assert_eq!(
+        lists[3]["id"],
+        format!("playlist-{}", library::hash(main.join("夜航 Night").to_string_lossy().as_bytes()))
+    );
+    let path_of = |id: &Value| {
+        snapshot["albums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|a| a["tracks"].as_array().unwrap())
+            .find(|t| t["id"] == *id)
+            .map(|t| library::text(&t["relativePath"]).replace('\\', "/"))
+            .unwrap()
+    };
+    let songs = |list: &Value| list["trackIds"].as_array().unwrap().iter().map(path_of).collect::<Vec<_>>();
+    assert_eq!(songs(&lists[0]), ["Loose 2.wav", "Loose 10.wav"]);
+    assert_eq!(songs(&lists[1]), ["Album 9/Deep/Deeper/b.wav"]);
+    assert_eq!(
+        songs(&lists[3]),
+        ["夜航 Night/CD 2/Track 1.wav", "夜航 Night/Track 2.wav", "夜航 Night/Track 10.wav"]
+    );
+    let all = lists.iter().map(|p| p["trackIds"].as_array().unwrap().len()).sum::<usize>();
+    assert_eq!(all, 7, "every song once; nothing from the hidden or empty folders");
+    assert_eq!(snapshot["roots"][0]["encrypted"], 3);
+    assert_eq!(snapshot["roots"][1]["path"], json!(elsewhere.to_string_lossy()));
+    assert_eq!(snapshot["roots"][1]["status"], "unscanned");
+    // A song's own tags for its details; never written back.
+    let tagged = snapshot["albums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|a| a["tracks"].as_array().unwrap())
+        .find(|t| t["title"] == "测试曲目")
+        .unwrap();
+    assert_eq!((tagged["album"].clone(), tagged["year"].clone()), (json!("夜航"), json!(2001)));
+    // The earlier second folder is neither shown nor served.
+    assert!(s.file(&old_track, false).is_none());
+    assert!(s.index["albums"].as_array().unwrap().iter().all(|a| a["_root"] == json!(main.to_string_lossy())));
+}
+
 #[test]
 fn configuration_and_rules_reject_invalid_changes_without_clobbering_files() {
     let temp = tempfile::tempdir().unwrap();
@@ -182,6 +280,15 @@ fn configuration_and_rules_reject_invalid_changes_without_clobbering_files() {
         json!(["/Music", "/Music/Album", "/Music"])
     };
     assert_eq!(library::safe_roots(&roots).unwrap().len(), 1);
+    // The first folder is the main folder: a later one containing it is dropped, not the main one.
+    let main_first = if cfg!(windows) {
+        json!(["D:\\Music\\Main", "d:/Music", "E:\\Old", "e:/old/inner"])
+    } else {
+        json!(["/Music/Main", "/Music", "/Old", "/Old/inner"])
+    };
+    let kept = library::safe_roots(&main_first).unwrap();
+    assert_eq!(kept.len(), 2);
+    assert!(kept[0].ends_with("Main"));
     let file = s.data_dir.join("genre-rules.json");
     let before = fs::read(&file).unwrap();
     assert!(s

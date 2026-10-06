@@ -28,6 +28,131 @@ type Candidate = {
 };
 type TitleLayout = { size: number; height: number; glyphs: TitleGlyph[] };
 
+/** A measuring copy of a title (its main line and translation) inside a probe. */
+function createCandidate(probe: HTMLElement): Candidate {
+  const element = document.createElement("span");
+  element.className = "music-title-candidate";
+  const main = document.createElement("span");
+  main.className = "music-title-main";
+  const translation = document.createElement("span");
+  translation.className = "music-title-translation";
+  element.append(main, translation);
+  probe.append(element);
+  return { root: element, main, translation, size: 0 };
+}
+
+function fillCandidate(candidate: Candidate, text: string) {
+  const parts = albumTitleParts(text);
+  if (candidate.main.textContent !== parts.main)
+    candidate.main.textContent = parts.main;
+  if (candidate.translation.textContent !== parts.translation)
+    candidate.translation.textContent = parts.translation;
+  candidate.translation.hidden = !parts.translation;
+}
+
+let sharedSegmenter: Intl.Segmenter | null | undefined;
+let sharedCanvas: CanvasRenderingContext2D | undefined;
+
+/**
+ * The glyphs of a candidate as the browser wrapped them (one read pass over native grapheme
+ * boxes; the reel renderer consumes these positions directly). With `overflow`, two lines,
+ * the second ending in an ellipsis.
+ */
+function snapshotTitle(
+  candidate: Candidate,
+  budget: number,
+  overflow: boolean,
+): TitleLayout {
+  sharedSegmenter ??= typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+  sharedCanvas ??= document.createElement("canvas").getContext("2d")!;
+  const segmenter = sharedSegmenter, canvas = sharedCanvas;
+  const glyphs: TitleGlyph[] = [];
+  let y = 0;
+  for (const kind of ["main", "translation"] as const) {
+    const element = candidate[kind];
+    if (element.hidden || !element.firstChild?.textContent) continue;
+    const style = getComputedStyle(element);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+    const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const elementRect = element.getBoundingClientRect();
+    const node = element.firstChild;
+    const source = node.textContent!;
+    let offset = 0;
+    const segments = segmenter
+      ? [...segmenter.segment(source)].map((part) => ({
+          text: part.segment,
+          index: part.index,
+        }))
+      : [...source].map((character) => {
+          const index = offset;
+          offset += character.length;
+          return { text: character, index };
+        });
+    const range = document.createRange();
+    const lines: TitleGlyph[][] = [];
+    let firstTop: number | undefined;
+    for (const segment of segments) {
+      range.setStart(node, segment.index);
+      range.setEnd(node, segment.index + segment.text.length);
+      const rect = range.getBoundingClientRect();
+      firstTop ??= rect.top;
+      const line = Math.max(
+        0,
+        Math.round((rect.top - firstTop) / lineHeight),
+      );
+      const row = (lines[line] ||= []);
+      if (!rect.width) continue;
+      row.push({
+        key: `${kind}:${line}:${row.length}`,
+        text: segment.text,
+        kind,
+        x: rect.left - elementRect.left,
+        y: 0,
+        width: rect.width,
+        height: lineHeight,
+        font,
+        letterSpacing: style.letterSpacing,
+      });
+    }
+    const visible = overflow ? lines.slice(0, 2) : lines;
+    if (kind === "translation") y += Number.parseFloat(style.marginTop) || 0;
+    visible.forEach((row, line) => {
+      // A clamped tag retains native wrapping, replacing only the last face
+      // that would overflow with an ellipsis. The full name stays accessible.
+      if (lines.length > visible.length && line === visible.length - 1) {
+        canvas.font = font;
+        const spacing = Number.parseFloat(style.letterSpacing) || 0;
+        const width = canvas.measureText("…").width + spacing;
+        while (
+          row.length &&
+          row.at(-1)!.x + row.at(-1)!.width + width > elementRect.width
+        )
+          row.pop();
+        const x = row.length ? row.at(-1)!.x + row.at(-1)!.width : 0;
+        row.push({
+          key: `${kind}:${line}:${row.length}`,
+          text: "…",
+          kind,
+          x,
+          y: 0,
+          width,
+          height: lineHeight,
+          font,
+          letterSpacing: style.letterSpacing,
+        });
+      }
+      for (const glyph of row) {
+        glyph.y = y + line * lineHeight;
+        glyphs.push(glyph);
+      }
+    });
+    y += visible.length * lineHeight;
+  }
+  return { size: candidate.size, height: Math.min(y, budget), glyphs };
+}
+
 function sameLayout(a: TitleLayout | undefined, b: TitleLayout) {
   return (
     !!a &&
@@ -55,6 +180,7 @@ export function setupMusicTitleLayout(root: HTMLElement) {
   const title = root.querySelector<HTMLElement>("#selection-title")!;
   const callout = root.querySelector<HTMLElement>(".album-callout")!;
   const navigation = root.querySelector<HTMLElement>(".music-navigation")!;
+  const hints = root.querySelector<HTMLElement>(".music-keyhint");
   const spacer = document.createElement("span");
   spacer.className = "music-title-layout";
   spacer.setAttribute("aria-hidden", "true");
@@ -72,11 +198,6 @@ export function setupMusicTitleLayout(root: HTMLElement) {
   callout.append(probe);
   const candidates: Candidate[] = [];
   const cache = new Map<string, TitleLayout>();
-  const segmenter =
-    typeof Intl.Segmenter === "function"
-      ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-      : undefined;
-  const canvas = document.createElement("canvas").getContext("2d")!;
   let text = "",
     displayed = "",
     enabled = false,
@@ -92,27 +213,14 @@ export function setupMusicTitleLayout(root: HTMLElement) {
   const ensureCandidate = (index: number) => {
     let candidate = candidates[index];
     if (candidate) return candidate;
-    const element = document.createElement("span");
-    element.className = "music-title-candidate";
-    const main = document.createElement("span");
-    main.className = "music-title-main";
-    const translation = document.createElement("span");
-    translation.className = "music-title-translation";
-    element.append(main, translation);
-    probe.append(element);
-    candidate = { root: element, main, translation, size: 0 };
+    candidate = createCandidate(probe);
     candidates.push(candidate);
     return candidate;
   };
 
   const stageCandidate = (index: number, size: number) => {
     const candidate = ensureCandidate(index);
-    const parts = albumTitleParts(text);
-    if (candidate.main.textContent !== parts.main)
-      candidate.main.textContent = parts.main;
-    if (candidate.translation.textContent !== parts.translation)
-      candidate.translation.textContent = parts.translation;
-    candidate.translation.hidden = !parts.translation;
+    fillCandidate(candidate, text);
     if (candidate.size !== size) {
       candidate.size = size;
       candidate.root.style.fontSize = `${size}px`;
@@ -126,98 +234,6 @@ export function setupMusicTitleLayout(root: HTMLElement) {
     candidate.main.getBoundingClientRect().height <=
       candidate.size * lineRatio * 2 + 1;
 
-  const snapshot = (
-    candidate: Candidate,
-    budget: number,
-    overflow: boolean,
-  ): TitleLayout => {
-    const glyphs: TitleGlyph[] = [];
-    let y = 0;
-    for (const kind of ["main", "translation"] as const) {
-      const element = candidate[kind];
-      if (element.hidden || !element.firstChild?.textContent) continue;
-      const style = getComputedStyle(element);
-      const lineHeight = Number.parseFloat(style.lineHeight);
-      const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-      const elementRect = element.getBoundingClientRect();
-      const node = element.firstChild;
-      const source = node.textContent!;
-      let offset = 0;
-      const segments = segmenter
-        ? [...segmenter.segment(source)].map((part) => ({
-            text: part.segment,
-            index: part.index,
-          }))
-        : [...source].map((character) => {
-            const index = offset;
-            offset += character.length;
-            return { text: character, index };
-          });
-      const range = document.createRange();
-      const lines: TitleGlyph[][] = [];
-      let firstTop: number | undefined;
-      // One read pass over native grapheme boxes; the reel renderer consumes
-      // these positions directly and never measures another glyph subtree.
-      for (const segment of segments) {
-        range.setStart(node, segment.index);
-        range.setEnd(node, segment.index + segment.text.length);
-        const rect = range.getBoundingClientRect();
-        firstTop ??= rect.top;
-        const line = Math.max(
-          0,
-          Math.round((rect.top - firstTop) / lineHeight),
-        );
-        const row = (lines[line] ||= []);
-        if (!rect.width) continue;
-        row.push({
-          key: `${kind}:${line}:${row.length}`,
-          text: segment.text,
-          kind,
-          x: rect.left - elementRect.left,
-          y: 0,
-          width: rect.width,
-          height: lineHeight,
-          font,
-          letterSpacing: style.letterSpacing,
-        });
-      }
-      const visible = overflow ? lines.slice(0, 2) : lines;
-      if (kind === "translation") y += Number.parseFloat(style.marginTop) || 0;
-      visible.forEach((row, line) => {
-        // A clamped tag retains native wrapping, replacing only the last face
-        // that would overflow with an ellipsis. The full name stays accessible.
-        if (lines.length > visible.length && line === visible.length - 1) {
-          canvas.font = font;
-          const spacing = Number.parseFloat(style.letterSpacing) || 0;
-          const width = canvas.measureText("…").width + spacing;
-          while (
-            row.length &&
-            row.at(-1)!.x + row.at(-1)!.width + width > elementRect.width
-          )
-            row.pop();
-          const x = row.length ? row.at(-1)!.x + row.at(-1)!.width : 0;
-          row.push({
-            key: `${kind}:${line}:${row.length}`,
-            text: "…",
-            kind,
-            x,
-            y: 0,
-            width,
-            height: lineHeight,
-            font,
-            letterSpacing: style.letterSpacing,
-          });
-        }
-        for (const glyph of row) {
-          glyph.y = y + line * lineHeight;
-          glyphs.push(glyph);
-        }
-      });
-      y += visible.length * lineHeight;
-    }
-    return { size: candidate.size, height: Math.min(y, budget), glyphs };
-  };
-
   const measure = (
     width: number,
     budget: number,
@@ -228,8 +244,13 @@ export function setupMusicTitleLayout(root: HTMLElement) {
     // Extra probes from a previous long tag stay dormant for ordinary titles.
     for (const candidate of candidates) candidate.root.style.display = "none";
     const first = stageCandidate(0, base);
-    if (fits(first, budget, lineRatio)) return snapshot(first, budget, false);
-    const min = Math.min(base, innerWidth <= 700 ? 18 : 20);
+    if (fits(first, budget, lineRatio)) return snapshotTitle(first, budget, false);
+    // The design's floor for long titles is 28 px (below it the two lines end in an ellipsis),
+    // where two lines of it fit; a smaller window keeps the earlier floor so the title is not cut.
+    const floor = innerWidth <= 700 ? 18 : budget >= 28 * lineRatio * 2 ? 28 : 20;
+    // Nor larger than lets the two lines fit the room (a very long title in the smallest
+    // windows), down to 14 px: the box is capped at the room and would cut the second line.
+    const min = Math.min(base, floor, Math.max(14, budget / (lineRatio * 2)));
     const coarse = Array.from({ length: 8 }, (_, index) =>
       stageCandidate(index + 1, base - ((base - min) * (index + 1)) / 8),
     );
@@ -238,7 +259,7 @@ export function setupMusicTitleLayout(root: HTMLElement) {
     const fitIndex = coarse.findIndex((candidate) =>
       fits(candidate, budget, lineRatio),
     );
-    if (fitIndex < 0) return snapshot(coarse.at(-1)!, budget, true);
+    if (fitIndex < 0) return snapshotTitle(coarse.at(-1)!, budget, true);
     const low = coarse[fitIndex].size;
     const high = fitIndex ? coarse[fitIndex - 1].size : base;
     const fine = Array.from({ length: 16 }, (_, index) =>
@@ -247,7 +268,7 @@ export function setupMusicTitleLayout(root: HTMLElement) {
     const selected =
       fine.find((candidate) => fits(candidate, budget, lineRatio)) ||
       fine.at(-1)!;
-    return snapshot(selected, budget, false);
+    return snapshotTitle(selected, budget, false);
   };
 
   const layout = () => {
@@ -264,10 +285,17 @@ export function setupMusicTitleLayout(root: HTMLElement) {
     }
     const width = title.getBoundingClientRect().width;
     if (!width) return;
-    const nextBottomGap =
-      root.getBoundingClientRect().bottom -
-      navigation.getBoundingClientRect().top +
-      28;
+    // The right column ends above what lies under it. In portrait that is the navigation (the
+    // counter and the ruler, across the width; a lone live track has none: where its top would
+    // be). Elsewhere the navigation sits at the bottom left, beside the column, and the column
+    // ends 24 px above the centred key hints (their layout box: the intro's reveal moves them).
+    const navigationBox = navigation.getBoundingClientRect();
+    const rootBox = root.getBoundingClientRect();
+    const nextBottomGap = root.dataset.layout !== "portrait" && hints?.offsetHeight
+      ? root.clientHeight - hints.offsetTop + 24
+      : rootBox.bottom -
+        (navigationBox.height ? navigationBox.top : rootBox.bottom - 130) +
+        28;
     if (bottomGap !== nextBottomGap) {
       bottomGap = nextBottomGap;
       root.style.setProperty("--callout-bottom", `${bottomGap}px`);
@@ -278,9 +306,11 @@ export function setupMusicTitleLayout(root: HTMLElement) {
       if (element === title || element === probe) return sum;
       const style = getComputedStyle(element);
       if (style.display === "none") return sum;
+      // A child that grows into the room left (the shelf's playlist list) counts at its least.
+      const grows = Number.parseFloat(style.flexGrow) > 0;
       return (
         sum +
-        element.getBoundingClientRect().height +
+        (grows ? Number.parseFloat(style.minHeight) || 0 : element.getBoundingClientRect().height) +
         Number.parseFloat(style.marginTop) +
         Number.parseFloat(style.marginBottom)
       );
@@ -385,6 +415,99 @@ export function setupMusicTitleLayout(root: HTMLElement) {
       probe.remove();
       cache.clear();
       title.innerHTML = albumTitleMarkup(text);
+    },
+  };
+}
+
+/** Titles longer than this many characters take the smaller size (the design's 34). */
+const LONG_TITLE = 34;
+
+/**
+ * The details' title (Claude Design, 2026-10-05): 38 px, 28 px past 34 characters, balanced,
+ * on the same 460 ms glyph reels as the shelf's title, measured in a probe beside it (sizes
+ * come from CSS: .detail-title and .detail-title-probe share them). A title set while the
+ * document is away (previous / next) is held blank and rolls in when the document returns;
+ * any other change is set in place, as the page fades in with it.
+ */
+export function setupDetailTitle(title: HTMLElement) {
+  const spacer = document.createElement("span");
+  spacer.className = "music-title-layout";
+  spacer.setAttribute("aria-hidden", "true");
+  const visual = document.createElement("span");
+  visual.className = "music-title-rolling";
+  visual.setAttribute("aria-hidden", "true");
+  title.replaceChildren(spacer, visual);
+  const reels = createTitleReels(visual, spacer);
+  const probe = document.createElement("div");
+  probe.className = "detail-title-probe";
+  probe.setAttribute("aria-hidden", "true");
+  probe.inert = true;
+  title.after(probe);
+  const candidate = createCandidate(probe);
+  candidate.root.style.display = "block";
+  let text = "",
+    held = false,
+    animateNext = false,
+    scheduled = 0,
+    appliedKey = "",
+    fontsVersion = 0;
+  const layout = () => {
+    scheduled = 0;
+    const long = String([...text].length > LONG_TITLE);
+    if (title.dataset.long !== long) title.dataset.long = probe.dataset.long = long;
+    if (!text) {
+      reels.render([], 0, false);
+      appliedKey = "";
+      animateNext = false;
+      return;
+    }
+    // Not laid out yet: the resize observer asks again.
+    const width = title.clientWidth;
+    if (!width) return;
+    if (probe.style.width !== `${width}px`) probe.style.width = `${width}px`;
+    fillCandidate(candidate, text);
+    const style = getComputedStyle(probe);
+    candidate.size = Number.parseFloat(style.fontSize);
+    const key = JSON.stringify([text, width, held, style.font, style.letterSpacing, fontsVersion]);
+    if (key === appliedKey && !animateNext) return;
+    const result = snapshotTitle(candidate, Infinity, false);
+    // Held: the new title's height (nothing below it moves when it rolls in), no glyphs.
+    reels.render(held ? [] : result.glyphs, result.height, animateNext && !held);
+    animateNext = false;
+    appliedKey = key;
+  };
+  const schedule = () => {
+    if (!scheduled) scheduled = requestAnimationFrame(layout);
+  };
+  new ResizeObserver(schedule).observe(title);
+  window.addEventListener("resize", schedule);
+  const fontsChanged = () => {
+    fontsVersion++;
+    schedule();
+  };
+  document.fonts.addEventListener("loadingdone", fontsChanged);
+  void document.fonts.ready.then(fontsChanged);
+  return {
+    /** The title, set in place (no reel). */
+    set(next: string) {
+      if (next !== text) {
+        text = next;
+        title.title = next;
+        title.setAttribute("aria-label", next);
+      }
+      schedule();
+    },
+    /** The document is away: show nothing until reveal(). */
+    hold() {
+      held = true;
+      schedule();
+    },
+    /** The document is back: the held title rolls in (or is set, without motion). */
+    reveal(animated: boolean) {
+      if (!held) return;
+      held = false;
+      animateNext = animated;
+      schedule();
     },
   };
 }

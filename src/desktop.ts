@@ -17,7 +17,3 @@ export function saveDesktopPreferences(preferences: unknown): void {
 export async function flushDesktopPreferences(): Promise<void> {
   await preferenceWrites;
 }
-export async function chooseMusicFolders(initialDirectory?: string): Promise<string[]> {
-  if (!isDesktop || !window.__TAURI__) return [];
-  return window.__TAURI__.core.invoke<string[]>("choose_music_folders", { initialDirectory });
-}

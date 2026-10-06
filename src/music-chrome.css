@@ -1,0 +1,480 @@
+/* The overlay's chrome in every scene (Claude Design "Overlay Frame", 2026-10-05): the
+   wordmark, the top-right text row (or its menu form, music-app.ts fitChrome), the now-playing
+   slot with the playback dot, previous / next and the play ring, the status line for what is
+   out of the ordinary, and the toast. Sizes are the design's at 1440 x 900. */
+
+/* The playback colour: green while the player plays, orange while it is paused or stopped,
+   muted when nothing is loaded or the state is unknown (never an invented state). */
+.music-app {
+  --state: var(--muted);
+}
+.music-app[data-playback="playing"] {
+  --state: var(--playing);
+}
+.music-app[data-playback="paused"] {
+  --state: var(--paused);
+}
+
+.music-app .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- header ------------------------------------------------------------------------------ */
+.music-app .music-header {
+  position: absolute;
+  z-index: 6;
+  left: 40px;
+  right: 40px;
+  top: 40px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  column-gap: 32px;
+  row-gap: 12px;
+  /* Only the wordmark and the row take the pointer: the picture between them stays the scene's. */
+  pointer-events: none;
+}
+.music-app .music-identity,
+.music-app .music-topnav {
+  pointer-events: auto;
+}
+.music-app .music-identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.music-app .music-brand {
+  display: block;
+  flex-shrink: 0;
+}
+.music-app .music-brand strong {
+  display: block;
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+/* The row: right 40, top 44, 24 high, 22 apart, 12 px. Text only; every item a button. */
+.music-app .music-topnav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  height: 24px;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.music-app .topnav-modes,
+.music-app .minimal-transport {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+}
+.music-app .topnav-theme {
+  display: flex;
+  align-items: center;
+}
+.music-app .music-topnav button {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  color: var(--ink);
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.music-app .music-topnav button:not(:disabled):hover {
+  opacity: 0.65;
+}
+.music-app .topnav-menu-only,
+.music-app .topnav-menu-value,
+.music-app .music-topnav .topnav-menu-button {
+  display: none;
+}
+.music-app .topnav-divider {
+  display: block;
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+}
+
+/* Now playing: the song that plays (not the selection), or the status while there is none. */
+.music-app .now-playing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.music-app[data-now="none"] .now-playing {
+  display: none;
+}
+.music-app .now-dot {
+  display: block;
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state);
+}
+.music-app[data-now-tone="muted"] .now-dot,
+.music-app[data-now-tone="working"] .now-dot {
+  background: var(--muted);
+}
+.music-app[data-now-tone="working"] .now-dot {
+  animation: music-pulse 1.3s ease-in-out infinite;
+}
+.music-app[data-now-tone="warn"] .now-dot {
+  background: var(--paused);
+}
+
+/* Previous / next: a 2 x 11 bar and a 9 x 11 triangle, muted; ink under the pointer. */
+.music-app .music-topnav .transport-skip {
+  position: relative;
+  justify-content: center;
+  gap: 1px;
+  width: 12px;
+  color: var(--muted);
+}
+.music-app .music-topnav .transport-skip::after {
+  content: "";
+  position: absolute;
+  inset: -3px -9px;
+}
+.music-app .music-topnav .transport-skip:not(:disabled):hover {
+  opacity: 1;
+  color: var(--ink);
+}
+.music-app .skip-bar {
+  display: block;
+  flex: none;
+  width: 2px;
+  height: 11px;
+  background: currentColor;
+}
+.music-app .skip-tri {
+  display: block;
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 5.5px solid transparent;
+  border-bottom: 5.5px solid transparent;
+}
+.music-app .skip-left {
+  border-right: 9px solid currentColor;
+}
+.music-app .skip-right {
+  border-left: 9px solid currentColor;
+}
+
+/* The play ring: a plain 1 px ink ring when a press plays the selection (or nothing is
+   loaded); otherwise the playing song's progress from 12 o'clock, 2 px, --state over --line,
+   all --line while the position is unknown. A triangle or two bars; words only in the title.
+   The header's ring (30 px) and the shelf's (42 px, music-shelf.css) share it. */
+.music-app .play-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--ink);
+}
+.music-app .music-topnav #play-pause {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  color: var(--ink);
+}
+.music-app .play-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(var(--state) 0 var(--progress, 0%), var(--line) var(--progress, 0%) 100%);
+  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+}
+.music-app .play-ring[data-ring="unknown"]::before {
+  background: var(--line);
+}
+.music-app .play-ring[data-ring="plain"]::before {
+  background: var(--ink);
+  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
+  mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
+}
+.music-app .play-ring .transport-glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.music-app .play-ring .transport-play::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 3px;
+  border-left: 8px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.music-app .play-ring .transport-pause i {
+  display: block;
+  width: 2px;
+  height: 10px;
+  background: currentColor;
+}
+.music-app .play-ring .transport-pause,
+.music-app .play-ring[aria-pressed="true"] .transport-play {
+  opacity: 0;
+  transform: scale(0.7);
+}
+.music-app .play-ring .transport-play,
+.music-app .play-ring[aria-pressed="true"] .transport-pause {
+  opacity: 1;
+  transform: scale(1);
+}
+.music-app.reduce-motion .play-ring .transport-glyph {
+  transition: none;
+}
+
+/* ---- the menu form: now · previous · play · next | 菜单, the rest in a list below ------------ */
+.music-app[data-chrome="menu"] .minimal-transport {
+  order: 1;
+}
+.music-app[data-chrome="menu"] .topnav-divider {
+  order: 2;
+}
+.music-app[data-chrome="menu"] .music-topnav .topnav-menu-button {
+  order: 3;
+  display: inline-flex;
+  gap: 7px;
+}
+.music-app .topnav-menu-button i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  background: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+.music-app .topnav-menu-button[aria-expanded="true"] i {
+  background: transparent;
+}
+.music-app[data-chrome="menu"] .topnav-modes {
+  position: absolute;
+  z-index: 12;
+  right: 0;
+  top: calc(100% + 10px);
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  width: 212px;
+  font-size: 12px;
+  background: var(--page-bg);
+  border-top: 1px solid var(--ink);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.14);
+}
+.music-app[data-chrome="menu"][data-chrome-menu="open"] .topnav-modes {
+  display: flex;
+}
+.music-app[data-chrome="menu"] .topnav-modes > button,
+.music-app[data-chrome="menu"] .topnav-theme {
+  width: 100%;
+  height: 40px;
+  padding: 0 14px;
+  justify-content: flex-start;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.music-app[data-chrome="menu"] .topnav-modes > :last-child {
+  border-bottom: 0;
+}
+.music-app[data-chrome="menu"] .topnav-modes button:focus-visible {
+  outline-offset: -3px;
+}
+/* Keyboard focus in the header (the row and the menu list) and on the shelf's counter steps: the thin
+   ink ring of the three scenes, not the panels' 2 px accent (the design never uses the accent). */
+.music-app .music-header :is(button, a):focus-visible,
+.music-app .album-stepper > button:focus-visible {
+  outline: 1px solid var(--ink);
+}
+.music-app[data-chrome="menu"] .topnav-menu-only {
+  display: inline;
+}
+.music-app[data-chrome="menu"] .topnav-menu-value {
+  display: inline;
+  margin-left: auto;
+  padding-left: 12px;
+  font-style: normal;
+  color: var(--muted);
+}
+.music-app[data-chrome="menu"] #topnav-source {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+.music-app[data-chrome="menu"] .topnav-menu-square {
+  display: block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border: 1px solid var(--ink);
+}
+/* Where even the menu form does not fit beside the wordmark, it takes its own line. */
+.music-app[data-chrome-stack="true"] .music-header {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.music-app[data-chrome-stack="true"] .music-topnav {
+  align-self: flex-end;
+  margin-top: 0;
+}
+
+/* ---- status line (only what is out of the ordinary while a song is in the slot) ---------- */
+.music-app .library-status {
+  position: absolute;
+  z-index: 3;
+  left: 40px;
+  top: calc(var(--chrome-bottom, 70px) + 14px);
+  max-width: calc(100% - 80px);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  line-height: 1.6;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+}
+.music-app .library-status > i {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.music-app .library-status.working > i {
+  animation: music-pulse 1.3s ease-in-out infinite;
+}
+
+/* ---- toast: under the row, clear of the shelf's key hints ---------------------------------- */
+.music-app #music-toast {
+  position: absolute;
+  z-index: 50;
+  top: calc(var(--chrome-bottom, 70px) + 14px);
+  right: 40px;
+  max-width: 360px;
+  padding: 10px 14px;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.6;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+  transition:
+    opacity 200ms ease,
+    transform 200ms ease;
+}
+.music-app #music-toast.visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---- sizes ---------------------------------------------------------------------------------- */
+/* Large windows keep the earlier enlargement, applied to the design's proportions. */
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] .music-header {
+    left: 60px;
+    right: 60px;
+    top: 52px;
+  }
+  .music-app[data-layout="desktop"] .music-brand strong {
+    font-size: 39px;
+  }
+  .music-app[data-layout="desktop"] .music-topnav {
+    gap: 26px;
+    height: 28px;
+    margin-top: 5px;
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .music-topnav button {
+    height: 28px;
+  }
+  .music-app[data-layout="desktop"] .music-topnav #play-pause {
+    width: 35px;
+    height: 35px;
+  }
+  .music-app[data-layout="desktop"] .library-status {
+    left: 60px;
+  }
+  .music-app[data-layout="desktop"] #music-toast {
+    right: 60px;
+  }
+}
+.music-app[data-layout="compact"] .music-header {
+  left: 25px;
+  right: 25px;
+  top: 26px;
+  column-gap: 24px;
+}
+.music-app[data-layout="compact"] .music-brand strong {
+  font-size: 25px;
+}
+.music-app[data-layout="compact"] .music-topnav,
+.music-app[data-layout="portrait"] .music-topnav {
+  gap: 14px;
+  margin-top: 0;
+  font-size: 11px;
+}
+.music-app[data-layout="compact"] .music-topnav #play-pause,
+.music-app[data-layout="portrait"] .music-topnav #play-pause {
+  width: 26px;
+  height: 26px;
+}
+.music-app[data-layout="compact"] .library-status {
+  left: 25px;
+}
+.music-app[data-layout="compact"] #music-toast {
+  right: 25px;
+}
+.music-app[data-layout="portrait"] .music-header {
+  left: 20px;
+  right: 20px;
+  top: 22px;
+  column-gap: 20px;
+}
+.music-app[data-layout="portrait"] .music-brand strong {
+  font-size: 24px;
+}
+.music-app[data-layout="portrait"] .library-status {
+  left: 20px;
+  max-width: calc(100% - 40px);
+}
+.music-app[data-layout="portrait"] #music-toast {
+  left: 20px;
+  right: 20px;
+  max-width: none;
+}
