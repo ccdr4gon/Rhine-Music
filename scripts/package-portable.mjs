@@ -38,7 +38,9 @@ export async function packagePortable(project) {
     // Use an allowlist. Never package an existing user's portable data/cache.
     await copyFile(path.join(root, 'src-tauri/target/release/rhine-music.exe'), path.join(folder, 'Rhine Music.exe'));
     await cp(dist, path.join(folder, 'web'), { recursive: true, dereference: false });
-    for (const name of ['LICENSE', 'NOTICE.md', '启动音乐播放器.cmd', '启动播放器皮肤.cmd']) {
+    // The program, its interface and the licences: no launcher scripts (there are no modes to
+    // pick at start any more, only sources, chosen in the window; the owner, 2026-10-06).
+    for (const name of ['LICENSE', 'NOTICE.md']) {
       await copyFile(path.join(root, name), path.join(folder, name));
     }
     await writeFile(path.join(folder, '使用说明.txt'), [
@@ -49,9 +51,8 @@ export async function packagePortable(project) {
       '第一次运行会在程序旁创建 data，保存设置、索引、封面缓存和 WebView 界面缓存。',
       '搬移时先关闭程序，再搬走整个文件夹；更新时保留自己的 data。',
       '音乐文件仍在原位置，只读使用；换电脑或盘符后可重新选择音乐文件夹。',
-      '播放器皮肤模式：双击 启动播放器皮肤.cmd，或在界面内点击连接播放器。',
-      '连上的播放器会被记住：在皮肤模式中退出后，下次直接双击 Rhine Music.exe 会回到皮肤模式并自动连接它；点“断开连接”后不再自动连接。',
-      '启动音乐播放器.cmd 总是打开本地音乐，启动播放器皮肤.cmd 总是打开播放器皮肤。',
+      '音乐来源在窗口右上角选择：“本地音乐”显示并播放音乐主文件夹里的歌；“播放器”列出正在运行的播放器（网易云音乐、QQ音乐及其他提供 Windows 媒体会话的播放器），选择一个即显示它正在播放的歌。',
+      '上次选择的来源会被记住：下次双击 Rhine Music.exe 直接打开它，上次连接的播放器会自动重新连接；第一次运行打开本地音乐。点“断开连接”后不再自动连接播放器。',
       '需要系统已有 Microsoft Edge WebView2 Runtime；本程序不会自动下载安装组件。',
       '请放在可写文件夹，不要在压缩包或只读目录里直接运行。',
       '需要单独存放数据时，可用绝对路径的 MUSIC_DATA_DIR 环境变量覆盖。',

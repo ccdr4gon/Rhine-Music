@@ -480,7 +480,7 @@ fn read_source(entry: &mut Entry) -> Source {
     if let Err(error) = result {
         source.warning = Some(error);
     }
-    // Marked (and, for QQ Music, named) by the module of the player it belongs to, if any.
+    // Marked (and, for QQ Music and NetEase, named) by the module of the player it belongs to, if any.
     player_source(&entry.app, source)
 }
 

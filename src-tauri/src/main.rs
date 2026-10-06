@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use rhine_music::{library::Store, server::Service};
+use rhine_music::{app_server::Service, library::Store};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -41,8 +41,8 @@ async fn media_control(
     .map_err(|error| error.to_string())?
 }
 
-/// Read only after the user switches on the queue in player-skin mode. `source` asks for the
-/// playlist the queue came from as well: set only while playlist columns are switched on.
+/// Read only after the user switches on the queue while NetEase is the current source. `source`
+/// asks for the playlist the queue came from as well: set only while playlist columns are on.
 #[tauri::command]
 async fn netease_queue(
     stamp: Option<String>,
@@ -56,7 +56,7 @@ async fn netease_queue(
 }
 
 /// The playlists the user created in NetEase, from its local database. Asked for only while
-/// playlist columns are switched on in player-skin mode (which needs the queue shown).
+/// playlist columns are switched on with NetEase as the current source (which needs the queue shown).
 #[tauri::command]
 async fn netease_playlists(
     stamp: Option<String>,
@@ -144,21 +144,28 @@ fn option(name: &str) -> Option<String> {
     args.windows(2).find(|a| a[0] == name).map(|a| a[1].clone())
 }
 
-/// Whether a start opens the player skin (`?mode=external`) rather than local music. `--skin`
-/// and `--local` (the two launchers) decide, `--skin` first, as when they are forwarded to a
-/// running window. A plain start resumes the player skin when the last session was in it and a
-/// source is remembered there, so that the source is connected again without being chosen (the
-/// owner, 2026-10-06); otherwise it opens local music, as before. The page keeps both in its
-/// preferences (`playerMode`, `playerLink`; src/music-app.ts).
-fn opens_skin(args: &[String], preferences: &serde_json::Value) -> bool {
-    if args.iter().any(|arg| arg == "--skin") {
-        return true;
+/// Whether a start opens a player rather than 本地音乐 (the owner, 2026-10-06: no modes, only
+/// sources; what was chosen last opens at the next start without asking): the source chosen last
+/// was a player (`source`, which the page saves on every load, or, until the page has replaced
+/// it, the mode an earlier build saved, `playerMode`) and that player is remembered (`playerLink`),
+/// so that it is connected again without being chosen. Anything else opens 本地音乐: the first
+/// start ever, 本地音乐 chosen last, a player after 断开连接, or a player that cannot be remembered.
+/// The page keeps both in its preferences (src/music-app.ts).
+fn opens_player(preferences: &serde_json::Value) -> bool {
+    let player = match preferences.get("source") {
+        Some(source) => source.as_str() == Some("player"),
+        None => preferences.get("playerMode").and_then(serde_json::Value::as_str) == Some("external"),
+    };
+    player && preferences.get("playerLink").is_some_and(remembers_source)
+}
+
+/// The page a start opens: the player (`?source=player`, music-sources.ts pageSource) or 本地音乐.
+fn entry_url(origin: &str, preferences: &serde_json::Value) -> String {
+    if opens_player(preferences) {
+        format!("{origin}/?source=player")
+    } else {
+        origin.to_owned()
     }
-    if args.iter().any(|arg| arg == "--local") {
-        return false;
-    }
-    preferences.get("playerMode").and_then(serde_json::Value::as_str) == Some("external")
-        && preferences.get("playerLink").is_some_and(remembers_source)
 }
 
 /// A remembered source as the page saves it (`readSourceLink` in
@@ -223,19 +230,10 @@ fn main() {
         return;
     }
     let application = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        // A second start brings the window that is open to the front, as it is: the source shown
+        // there stays (it is changed in the window itself).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
-                if args.iter().any(|arg| arg == "--skin" || arg == "--local") {
-                    if let Ok(mut url) = window.url() {
-                        url.set_path("/");
-                        url.set_query(if args.iter().any(|arg| arg == "--skin") {
-                            Some("mode=external")
-                        } else {
-                            None
-                        });
-                        let _ = window.navigate(url);
-                    }
-                }
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -308,13 +306,8 @@ fn main() {
                 "Object.defineProperty(window, '__RHINE_DESKTOP__', {{ value: true }}); try {{ const session = '{}'; if (sessionStorage.getItem('rhine-desktop-session') !== session) {{ const saved = JSON.parse({}); if (saved) localStorage.setItem('rhine-music-preferences', JSON.stringify(saved)); sessionStorage.setItem('rhine-desktop-session', session); }} }} catch (error) {{ console.error('无法恢复播放器偏好', error); }}",
                 uuid::Uuid::new_v4(), serde_json::to_string(&preferences.to_string())?
             );
-            let skin = opens_skin(&std::env::args().collect::<Vec<_>>(), &preferences);
+            let entry = entry_url(&origin, &preferences);
             app.manage(DesktopState { directory: data_dir, preferences: Mutex::new(preferences) });
-            let entry = if skin {
-                format!("{origin}/?mode=external")
-            } else {
-                origin
-            };
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(entry.parse()?))
                 .data_directory(webview_data)
                 .title("Rhine Music")
@@ -361,16 +354,9 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    fn args(list: &[&str]) -> Vec<String> {
-        std::iter::once("Rhine Music.exe")
-            .chain(list.iter().copied())
-            .map(String::from)
-            .collect()
-    }
-
     #[test]
-    fn a_plain_start_resumes_the_player_skin_only_with_a_remembered_source() {
-        let skin = |link: Value| json!({ "theme": "night", "playerMode": "external", "playerLink": link });
+    fn a_plain_start_opens_the_player_chosen_last_only_while_it_is_remembered() {
+        let player = |link: Value| json!({ "theme": "night", "source": "player", "playerLink": link });
         for link in [
             json!({ "player": "netease" }),
             json!({ "player": "qqmusic" }),
@@ -378,7 +364,7 @@ mod tests {
             json!({ "app": "fictional.exe" }),
             json!({ "app": "x".repeat(512) }),
         ] {
-            assert!(opens_skin(&args(&[]), &skin(link.clone())), "{link}");
+            assert!(opens_player(&player(link.clone())), "{link}");
         }
         // Nothing remembered: the user disconnected (null), or a link this version cannot read.
         for link in [
@@ -394,35 +380,62 @@ mod tests {
             json!("netease"),
             json!(["netease"]),
         ] {
-            assert!(!opens_skin(&args(&[]), &skin(link.clone())), "{link}");
+            assert!(!opens_player(&player(link.clone())), "{link}");
         }
-        // Never connected in the player skin (no link at all).
-        assert!(!opens_skin(&args(&[]), &json!({ "playerMode": "external" })));
-        // The last session was local music, older preferences have no mode, or there are none.
+        // A player chosen last that was never connected (no link at all).
+        assert!(!opens_player(&json!({ "source": "player" })));
+        // 本地音乐 chosen last, a value this version does not know, or nothing saved: 本地音乐.
         for preferences in [
-            json!({ "playerMode": "local", "playerLink": { "player": "netease" } }),
+            json!({ "source": "local", "playerLink": { "player": "netease" } }),
+            json!({ "source": "PLAYER", "playerLink": { "player": "netease" } }),
+            json!({ "source": true, "playerLink": { "player": "netease" } }),
+            json!({ "source": null, "playerLink": { "player": "netease" } }),
             json!({ "playerLink": { "player": "netease" } }),
-            json!({ "playerMode": "EXTERNAL", "playerLink": { "player": "netease" } }),
-            json!({ "playerMode": true, "playerLink": { "player": "netease" } }),
+            json!({ "theme": "day" }),
             Value::Null,
             json!([]),
         ] {
-            assert!(!opens_skin(&args(&[]), &preferences), "{preferences}");
+            assert!(!opens_player(&preferences), "{preferences}");
         }
     }
 
     #[test]
-    fn the_launchers_arguments_win_over_the_saved_mode() {
-        let remembered = json!({ "playerMode": "external", "playerLink": { "player": "qqmusic" } });
-        let local = json!({ "playerMode": "local" });
-        assert!(opens_skin(&args(&["--skin"]), &local));
-        assert!(opens_skin(&args(&["--skin"]), &Value::Null));
-        assert!(!opens_skin(&args(&["--local"]), &remembered));
-        // Both given: the player skin, as when they are forwarded to a running window.
-        assert!(opens_skin(&args(&["--local", "--skin"]), &local));
-        // Anything else is not a mode.
-        assert!(opens_skin(&args(&["--data-dir", "x"]), &remembered));
-        assert!(!opens_skin(&args(&["skin", "--Skin"]), &local));
+    fn the_first_start_ever_opens_local_music() {
+        // No preferences file (or an unreadable one: main reads it as null), or one of an earlier
+        // version without a source.
+        for preferences in [Value::Null, json!({}), json!({ "theme": "night", "intro": false })] {
+            assert!(!opens_player(&preferences), "{preferences}");
+            assert_eq!(entry_url("http://127.0.0.1:5177", &preferences), "http://127.0.0.1:5177");
+        }
+    }
+
+    #[test]
+    fn an_earlier_builds_mode_is_read_until_the_page_saves_the_source() {
+        // Saved by a build with modes: the player skin with a remembered player opens that player.
+        let skin = json!({ "playerMode": "external", "playerLink": { "player": "qqmusic" } });
+        assert!(opens_player(&skin));
+        assert_eq!(entry_url("http://127.0.0.1:5177", &skin), "http://127.0.0.1:5177/?source=player");
+        for preferences in [
+            json!({ "playerMode": "local", "playerLink": { "player": "netease" } }),
+            json!({ "playerMode": "EXTERNAL", "playerLink": { "player": "netease" } }),
+            json!({ "playerMode": true, "playerLink": { "player": "netease" } }),
+            json!({ "playerMode": "external", "playerLink": null }),
+            json!({ "playerMode": "external" }),
+        ] {
+            assert!(!opens_player(&preferences), "{preferences}");
+        }
+        // Once the page has saved the source, it decides, whatever an earlier mode says.
+        assert!(!opens_player(&json!({ "source": "local", "playerMode": "external", "playerLink": { "player": "netease" } })));
+        assert!(opens_player(&json!({ "source": "player", "playerMode": "local", "playerLink": { "player": "netease" } })));
+    }
+
+    #[test]
+    fn the_entry_is_the_player_page_or_local_music() {
+        let origin = "http://127.0.0.1:5180";
+        let player = json!({ "source": "player", "playerLink": { "app": "Fictional.Player_0abc!App", "name": "Fictional Player" } });
+        let local = json!({ "source": "local", "playerLink": { "player": "netease" } });
+        assert_eq!(entry_url(origin, &player), "http://127.0.0.1:5180/?source=player");
+        assert_eq!(entry_url(origin, &local), origin);
     }
 
     #[test]

@@ -571,6 +571,11 @@
   gap: 14px;
   background: var(--page-bg);
 }
+/* A switch of the source loads the page again: the cover stays under the header (z-index 6), an
+   open 播放器 panel and the toasts, so they never leave (music-app.ts switchSource). */
+.music-app[data-switching="true"] #music-loading {
+  z-index: 5;
+}
 #music-loading strong {
   font-size: 11px;
   letter-spacing: 3px;

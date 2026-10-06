@@ -23,6 +23,9 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  // A source module's own stylesheet (`import "./music-boot.css"`) is Vite's: the checks load
+  // it as an empty module, so the module that imports it can be tested.
+  if (url.startsWith(sourceRoot) && new URL(url).pathname.endsWith('.css')) return { format: 'module', source: '', shortCircuit: true };
   if (!url.startsWith(sourceRoot) || !new URL(url).pathname.endsWith('.ts')) return nextLoad(url, context);
   const source = await readFile(new URL(url), 'utf8');
   const { outputText, diagnostics } = ts.transpileModule(source, {

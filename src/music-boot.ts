@@ -1,11 +1,15 @@
 import "./music-boot.css";
+import { MUSIC_INTRO } from "./motion";
 
 // Begin at the first live 3D frame; keep the authored camera/wave timebase.
-const START_TIME = 21.92;
-// End in the preview hold, before the reference begins its second extraction.
-const END_TIME = 27.12;
+const START_TIME = MUSIC_INTRO.start;
+// End in the preview hold, before the reference begins its second extraction (about 4.2 s
+// after the start: one wave, and the pull back MUSIC_INTRO.lead earlier than the film's).
+const END_TIME = MUSIC_INTRO.end;
 const REVEAL_DURATION = 720;
 const REVEAL_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+// Keys that only change another key: pressed alone, they do not end the opening.
+const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "NumLock", "ScrollLock", "Fn"]);
 const ease = (value: number) => {
   const t = Math.max(0, Math.min(1, value));
   return t * t * (3 - 2 * t);
@@ -19,7 +23,14 @@ export interface MusicBootFrame {
 export interface MusicBootOptions {
   onStart?: () => void;
   onComplete?: (reason: "complete" | "skip") => void;
+  /** A press ended the fade-in before its time: the page's own fades (the shelf's) end with it. */
+  onRevealCut?: () => void;
   reduced?: boolean | (() => boolean);
+  /**
+   * Whether the opening plays (the 「开场动画」 setting; on unless false). Off, start() goes
+   * straight to the shelf the way the skip button and reduced motion do.
+   */
+  intro?: boolean | (() => boolean);
   album?: () => { title: string; artist?: string } | null | undefined;
 }
 type SavedSibling = {
@@ -59,22 +70,78 @@ export class MusicBoot {
     this.root.appendChild(this.skipButton);
     this.parent.appendChild(this.root);
     this.skipButton.addEventListener("click", () => this.skip());
-    this.root.addEventListener("keydown", (event) => {
-      event.stopPropagation();
-      if (this.revealing) {
-        event.preventDefault();
-        return;
-      }
-      if (event.key === "Escape" || event.key === "Enter") {
-        event.preventDefault();
-        this.skip();
-      } else if (event.key === "Tab") {
-        event.preventDefault();
-        this.skipButton.focus({ preventScroll: true });
-      }
+    // Any press ends the opening (the owner, 2026-10-06), as 跳过进场 does: the pointer pressed
+    // anywhere on it (the window's own title bar lies above this layer and keeps working), or a
+    // key. During the fade-in that follows, the same press shows the whole page at once. The
+    // press does nothing else: the page beneath stays inert until then, and the key is kept from it.
+    this.root.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || event.button !== 0 || !this.active) return;
+      this.swallowClick();
+      this.end();
     });
+    document.addEventListener("keydown", this.onKey, true);
+    document.addEventListener("keyup", this.onKeyUp, true);
   }
   get active() { return this.running || this.revealing; }
+  // The key that ended the opening (or was kept from the page during it), while it is held down:
+  // by its code, or by its name when it comes without one (keys sent by some tools).
+  private heldKey = "";
+  private readonly onKey = (event: KeyboardEvent) => {
+    if (!this.active || this.disposed) {
+      // Held past the end, its repeats do not reach the page either; a fresh press of it does.
+      if (this.heldKey && (event.code || event.key) === this.heldKey) {
+        if (event.repeat) {
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+        this.heldKey = "";
+      }
+      return;
+    }
+    // The window's own title bar keeps its keys (window-frame.ts).
+    if ((event.target as Element | null)?.closest?.(".window-bar")) return;
+    event.stopPropagation();
+    // A modifier alone, or a shortcut with Ctrl, Alt or the Windows key, ends nothing.
+    if (MODIFIER_KEYS.has(event.key) || event.ctrlKey || event.altKey || event.metaKey) return;
+    event.preventDefault();
+    this.heldKey = event.code || event.key;
+    if (!event.repeat) this.end();
+  };
+  private readonly onKeyUp = (event: KeyboardEvent) => {
+    if (!this.heldKey || (event.code || event.key) !== this.heldKey) return;
+    this.heldKey = "";
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  /**
+   * The click of the press that ended the opening: kept from the page. A tap's click is aimed
+   * after the finger lifts, when the page may already be shown (the fade-in cut short, or
+   * reduced motion), and it would act on the control there.
+   */
+  private swallowClick() {
+    const done = () => {
+      clearTimeout(timer);
+      document.removeEventListener("click", swallow, true);
+      document.removeEventListener("pointercancel", done, true);
+    };
+    const swallow = (event: Event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      done();
+    };
+    const timer = setTimeout(done, 1000);
+    document.addEventListener("click", swallow, true);
+    document.addEventListener("pointercancel", done, true);
+  }
+  /** A press: the opening is skipped while it runs, and its fade-in completed while that runs. */
+  private end() {
+    if (this.running) this.skip();
+    else if (this.revealing) {
+      this.completeReveal();
+      this.options.onRevealCut?.();
+    }
+  }
 
   start(nowSeconds = performance.now() / 1000, forceMotion = false) {
     if (this.disposed) return;
@@ -103,7 +170,9 @@ export class MusicBoot {
     this.skipButton.hidden = false;
     this.options.onStart?.();
     const reduced = typeof this.options.reduced === "function" ? this.options.reduced() : this.options.reduced;
-    if (reduced && !forceMotion) { this.skip(); return; }
+    const intro = typeof this.options.intro === "function" ? this.options.intro() : this.options.intro ?? true;
+    // Skipped before any frame of the opening is drawn: the shelf is the first picture.
+    if ((reduced || !intro) && !forceMotion) { this.skip(); return; }
     this.skipButton.focus({ preventScroll: true });
   }
   replay(nowSeconds = performance.now() / 1000) { this.start(nowSeconds, true); }
@@ -115,7 +184,7 @@ export class MusicBoot {
     if (this.endpointRendered) { this.finish("complete"); return; }
     const appTime = Math.min(END_TIME, Math.max(START_TIME, nowSeconds - this.startedAt));
     this.endpointRendered = appTime === END_TIME;
-    const phase = appTime >= 25.68 ? "select" : "array";
+    const phase = appTime + MUSIC_INTRO.lead >= 25.68 ? "select" : "array";
     this.root.dataset.phase = phase;
     this.root.dataset.appTime = String(appTime);
     return {
@@ -221,6 +290,8 @@ export class MusicBoot {
     if (this.running) this.finish("skip", false);
     if (this.revealing) this.completeReveal(false);
     this.disposed = true;
+    document.removeEventListener("keydown", this.onKey, true);
+    document.removeEventListener("keyup", this.onKeyUp, true);
     this.root.remove();
   }
 }

@@ -1,6 +1,6 @@
 # 本地音乐服务 · Rust 客户端与旧 Node 入口
 
-v0.3.0 Windows 客户端由 `src-tauri/src/local_music/connector/server.rs` 在同一 Rust 进程中提供界面与音乐 API，关闭窗口时一并退出，不需要单独运行服务命令。API 与下文旧服务的公开数据合同保持兼容，原生实现与检查范围见 [Windows 客户端](WINDOWS.md) 和 [当前结构](architecture/overview.md)。本地音乐的代码在 `src-tauri/src/local_music/`（`data/`：配置、扫描、索引、标签与在线资料；`connector/`：本机服务）和前端的 `src/local_music/`（`data/`：歌单到专辑架的列与盒子、演示歌单；`connector/`：`/api` 客户端、系统文件夹选择与播放器）。
+v0.3.0 Windows 客户端在同一 Rust 进程中提供界面与音乐 API（页面与资源由来源模块之外的 `src-tauri/src/app_server.rs` 提供，`/api/` 路由在 `src-tauri/src/local_music/connector/api.rs`，2026-10-06 拆开，响应逐字节不变），关闭窗口时一并退出，不需要单独运行服务命令。API 与下文旧服务的公开数据合同保持兼容，原生实现与检查范围见 [Windows 客户端](WINDOWS.md) 和 [当前结构](architecture/overview.md)。本地音乐的代码在 `src-tauri/src/local_music/`（`data/`：配置、扫描、索引、标签与在线资料；`connector/`：本地音乐的 `/api/` 路由）和前端的 `src/local_music/`（`data/`：歌单到专辑架的列与盒子、演示歌单；`connector/`：`/api` 客户端、系统文件夹选择与播放器）。
 
 `node scripts/music-server.mjs` 保留为 macOS 旧入口和开发对照，同时提供 `dist/` 界面和本地音乐 API。该入口默认仅监听 `127.0.0.1:5173`；端口可通过 `--port 5174` 或 `PORT` 指定。以下终端命令适用于旧入口；普通 Windows 用户使用便携版即可。修改共享前端后需重新构建。服务仍保留本地流派规则接口（界面不再编辑，专辑架的列已改为主文件夹的歌单）。
 

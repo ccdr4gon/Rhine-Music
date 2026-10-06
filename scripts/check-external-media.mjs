@@ -217,17 +217,28 @@ test('the player modules: NetEase is the only default link while nothing was con
   assert.equal(shown.name, 'QQ音乐');
   assert.deepEqual({ ...shown, name: 'QQMusic.exe' }, qq('q'));
   assert.equal(playerSource(qq('q', { name: 'QQ音乐' })).name, 'QQ音乐');
-  // Everyone else exactly as listed, NetEase included (its name stays the one Windows gives).
-  for (const other of [netease('n'), neteaseWindow('w'), source('s'), source('x', { name: 'QQMusic.exe' })])
+  // NetEase's media session under its own name too (the owner, 2026-10-06: "show 网易云音乐 instead"),
+  // every other field the session's own; its window-title fallback and everyone else exactly as listed.
+  const neteaseShown = playerSource(netease('n'));
+  assert.equal(neteaseShown.name, '网易云音乐');
+  assert.deepEqual({ ...neteaseShown, name: 'cloudmusic.exe' }, netease('n'));
+  assert.equal(playerSource(netease('n', { app: 'CloudMusic.exe' })).name, '网易云音乐');
+  // Only its own program: another session taken for NetEase keeps the name Windows gives it.
+  for (const other of [netease('o', { name: 'NetEase.CloudMusic', app: 'NetEase.CloudMusic' }), netease('p', { name: 'Some NetEase Client', app: 'Vendor.NeteaseClient!App' })])
+    assert.equal(playerSource(other), other);
+  for (const other of [neteaseWindow('w'), source('s'), source('x', { name: 'QQMusic.exe' })])
     assert.equal(playerSource(other), other);
   // The native side marks and names QQ Music's session with the same words.
   const { readFileSync } = await import('node:fs');
   const native = readFileSync(new URL('../src-tauri/src/qq_music/mod.rs', import.meta.url), 'utf8');
   assert.match(native, new RegExp(`pub const PLAYER: &str = "${QQ_MUSIC_PLAYER.id}";`));
   assert.match(native, new RegExp(`pub const NAME: &str = "${QQ_MUSIC_NAME}";`));
-  assert.match(readFileSync(new URL('../src-tauri/src/netease_music/mod.rs', import.meta.url), 'utf8'), new RegExp(`pub const PLAYER: &str = "${NETEASE_PLAYER.id}";`));
+  // And NetEase's, under the name the page lists it by (2026-10-06).
+  const neteaseNative = readFileSync(new URL('../src-tauri/src/netease_music/mod.rs', import.meta.url), 'utf8');
+  assert.match(neteaseNative, new RegExp(`pub const PLAYER: &str = "${NETEASE_PLAYER.id}";`));
+  assert.match(neteaseNative, new RegExp(`pub const NAME: &str = "${NETEASE_PLAYER.name}";`));
   // ... and every session it lists goes through the module of its player (media::player_source): the
-  // mark that gates NetEase's features and QQ Music's name. The Windows-only reader has no unit test.
+  // mark that gates NetEase's features, and QQ Music's and NetEase's names. The Windows-only reader has no unit test.
   const windowsMedia = readFileSync(new URL('../src-tauri/src/media/windows_media.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const readStart = windowsMedia.indexOf('\nfn read_source(entry: &mut Entry) -> Source {\n');
   assert.ok(readStart >= 0, 'the native side reads each session in read_source');
@@ -239,16 +250,19 @@ test('the player modules: NetEase is the only default link while nothing was con
   assert.match(app, /new ExternalMediaConnection\(playerMediaPort\(nativeMediaPort\), playerLinks\(preferences\.playerLink, /);
 });
 
-test('the registry\'s port only renames QQ Music\'s sources: controls and errors pass through unchanged', async () => {
+test('the registry\'s port only renames QQ Music\'s and NetEase\'s media sessions: the window fallback, controls and errors pass through unchanged', async () => {
   const { playerMediaPort } = await import('../src/music-sources.ts');
   const calls = [];
   let fail;
   const port = playerMediaPort({
-    async snapshot() { if (fail) throw fail; return { sources: [qq('q1'), netease('n1'), source('a')], warning: 'one warning' }; },
+    async snapshot() { if (fail) throw fail; return { sources: [qq('q1'), netease('n1', { app: 'cloudmusic.exe' }), neteaseWindow('w1'), source('a')], warning: 'one warning' }; },
     async control(...args) { calls.push(args); return 'sent'; },
   });
   const snapshot = await port.snapshot();
-  assert.deepEqual(snapshot.sources.map(item => item.name), ['QQ音乐', 'cloudmusic.exe', 'Player a']);
+  // NetEase's session is listed as 网易云音乐 (the owner, 2026-10-06), not as Windows names it.
+  assert.deepEqual(snapshot.sources.map(item => item.name), ['QQ音乐', '网易云音乐', '网易云音乐（窗口标题）', 'Player a']);
+  const listed = snapshot.sources[1];
+  assert.deepEqual([listed.id, listed.player, listed.kind, listed.app, listed.title], ['n1', 'netease', 'smtc', 'cloudmusic.exe', '当前曲目']);
   assert.equal(snapshot.warning, 'one warning');
   assert.equal(await port.control('q1', 'seek', 12, false), 'sent');
   await port.control('n1', 'toggle', undefined, true);
@@ -273,7 +287,7 @@ test('QQ Music is listed like any player: connected by itself only once the user
   const both = app([qq('q1'), netease('n1')]);
   await both.connection.refresh();
   assert.equal(both.connection.selected.id, 'n1');
-  assert.match(mediaSourcesMarkup(both.connection), /<strong>QQ音乐<\/strong>.*<em>连接<\/em>.*<strong>cloudmusic\.exe<\/strong>.*已连接 · 默认/);
+  assert.match(mediaSourcesMarkup(both.connection), /<strong>QQ音乐<\/strong>.*<em>连接<\/em>.*<strong>网易云音乐<\/strong>.*已连接 · 默认/);
   // Picked by the user: connected under its name, and NetEase appearing does not replace it.
   // From now on it is the remembered source, the default link instead of NetEase (2026-10-06).
   const { connection, calls, set } = app([qq('q1')]);
@@ -613,7 +627,7 @@ test('a long name is clipped between characters, so the preferences stay readabl
   assert.doesNotMatch(JSON.stringify(readSourceLink({ app: 'A!B', name: whole }, PLAYER_MODULES)), half);
 });
 
-test('a saved link is read as main.rs reads it, and the app saves the mode and the link where main.rs looks', async () => {
+test('a saved link is read as main.rs reads it, and the app saves the source and the link where main.rs looks', async () => {
   const { readFileSync } = await import('node:fs');
   for (const value of [{ player: 'netease' }, { player: 'qqmusic' }, { app: 'fictional.exe' }, { app: 'x'.repeat(512) }, { app: 'A!B', name: '  Named  ' }])
     assert.ok(readSourceLink(value, PLAYER_MODULES), JSON.stringify(value));
@@ -632,19 +646,27 @@ test('a saved link is read as main.rs reads it, and the app saves the mode and t
   links.remember(null);
   assert.deepEqual(told, [null]);
   assert.equal(playerLinks('garbage', () => {}).remembered, undefined);
-  // main.rs decides a plain start from the same keys and the same module ids (its unit tests cover the rest).
+  // main.rs decides a plain start from the same keys and the same module ids (its unit tests cover
+  // the rest): the source chosen last (an earlier build's mode until the page has saved one) and the
+  // remembered player; the page it opens is the one pageSource reads as a player. No argument decides.
   const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(main, /preferences\.get\("playerMode"\)\.and_then\(serde_json::Value::as_str\) == Some\("external"\)/);
-  assert.match(main, /preferences\.get\("playerLink"\)\.is_some_and\(remembers_source\)/);
+  assert.match(main, /let player = match preferences\.get\("source"\) \{\n\s*Some\(source\) => source\.as_str\(\) == Some\("player"\),\n\s*None => preferences\.get\("playerMode"\)\.and_then\(serde_json::Value::as_str\) == Some\("external"\),\n\s*\};\n\s*player && preferences\.get\("playerLink"\)\.is_some_and\(remembers_source\)/);
   assert.match(main, /player == rhine_music::netease_music::PLAYER \|\| player == rhine_music::qq_music::PLAYER/);
   assert.match(main, /app\.encode_utf16\(\)\.count\(\) <= 512/);
-  assert.match(main, /let skin = opens_skin\(&std::env::args\(\)\.collect::<Vec<_>>\(\), &preferences\);/);
+  assert.match(main, /let entry = entry_url\(&origin, &preferences\);/);
+  const entry = main.match(/format!\("\{origin\}\/(\?[^"]+)"\)/);
+  assert.ok(entry, 'main.rs opens a player at an address of its own');
+  const { pageSource } = await import('../src/music-sources.ts');
+  assert.equal(pageSource(entry[1]), 'player', 'the address main.rs opens is the page of a player');
+  assert.doesNotMatch(main, /"--skin"|"--local"|mode=external/, 'no launcher argument decides any more');
   assert.deepEqual(PLAYER_MODULES.map(player => player.id), ['netease', 'qqmusic'], 'the module ids main.rs accepts');
-  // The page saves both under those keys: its mode on every load and on a switch, the link when it changes.
+  // The page saves both under those keys: its source on every load where it changed (dropping an
+  // earlier build's mode) and on a switch, the link when it changes.
   const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(app, /if \(preferences\.playerMode !== \(externalMode \? "external" : "local"\)\) \{\n  preferences\.playerMode = externalMode \? "external" : "local";\n  save\("rhine-music-preferences", preferences\);\n\}/);
-  assert.match(app, /preferences\.playerMode = external \? "external" : "local";\n  savePrefs\(\);/);
-  assert.match(app, /playerLinks\(preferences\.playerLink, \(link\) => \{\n    preferences\.playerLink = link;\n    save\("rhine-music-preferences", preferences\);/);
+  assert.match(app, /const earlierMode = Object\.hasOwn\(preferences, "playerMode"\);\ndelete \(preferences as Record<string, unknown>\)\.playerMode;\nif \(preferences\.source !== currentSource \|\| earlierMode\) \{\n  preferences\.source = currentSource;\n  save\("rhine-music-preferences", preferences\);\n\}/);
+  assert.match(app, /preferences\.source = next;\n  savePrefs\(\);/);
+  assert.match(app, /function rememberPlayer\(link: SourceLink \| null\) \{\n  preferences\.playerLink = link;\n  save\("rhine-music-preferences", preferences\);\n\}/);
+  assert.equal(app.match(/playerLinks\(preferences\.playerLink, rememberPlayer\)/g)?.length, 2, 'the connection and the chooser remember alike');
   // The native side gives each session's app id, never inventing one for the window-title fallback.
   const windowsMedia = readFileSync(new URL('../src-tauri/src/media/windows_media.rs', import.meta.url), 'utf8');
   assert.match(windowsMedia, /app: \(!entry\.app\.is_empty\(\)\)\.then\(\|\| entry\.app\.clone\(\)\),/);
@@ -1290,7 +1312,7 @@ test('the playlists status: what is waiting for NetEase, what the limits cut, an
 
 test('following survives a rebuilt shelf: the playing song of the new queue, never a browse-only column by default', async () => {
   const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
-  const block = app.slice(app.indexOf('if (externalMode && records.length && records[selected]?.id !== previousId) {'), app.indexOf('// A column opens where it was left'));
+  const block = app.slice(app.indexOf('if (playerCurrent && records.length && records[selected]?.id !== previousId) {'), app.indexOf('// A column opens where it was left'));
   assert.ok(block.length > 200, 'the block is in applyLibrary');
   // The playing song is asked of the queue just read, not of the last poll's key.
   assert.match(block, /const key = netease\.playingKey\(\);/);
@@ -1345,21 +1367,36 @@ test('the module folders keep their dependency rules', async () => {
     }
   }
   assert.ok(seen > 100, 'the imports were read');
-  // Rust: local music never uses the players; NetEase and QQ Music never use each other or local music.
+  // Rust: local music never uses the players, nor the page's server that hands it its routes (only
+  // the shared HTTP plumbing, crate::http); NetEase and QQ Music never use each other, local music or
+  // the page's server.
   const rust = fileURLToPath(new URL('../src-tauri/src/', import.meta.url));
   const banned = {
-    local_music: /crate::(media|netease_music|qq_music)\b/,
-    netease_music: /crate::(local_music|qq_music|library|metadata|online|server)\b/,
-    qq_music: /crate::(local_music|netease_music|library|metadata|online|server)\b/,
+    local_music: /crate::(media|netease_music|qq_music|app_server)\b/,
+    netease_music: /crate::(local_music|qq_music|library|metadata|online|app_server|http)\b/,
+    qq_music: /crate::(local_music|netease_music|library|metadata|online|app_server|http)\b/,
   };
   // Code only: a comment may point at another module.
   const code = text => text.split('\n').filter(line => !/^\s*\/\//.test(line)).join('\n');
   for (const [folder, pattern] of Object.entries(banned))
     for (const file of readdirSync(path.join(rust, folder), { recursive: true }).map(String).filter(file => file.endsWith('.rs')))
       assert.doesNotMatch(code(readFileSync(path.join(rust, folder, file), 'utf8')), pattern, `${folder}/${file}`);
+  // The page's server is outside the source modules (2026-10-06: it serves the page for every
+  // source) and reads no player; the local music's /api routes are the one source it reaches.
+  for (const file of ['app_server.rs', 'http.rs']) {
+    const text = code(readFileSync(path.join(rust, file), 'utf8'));
+    assert.doesNotMatch(text, /crate::(media|netease_music|qq_music)\b/, file);
+    assert.doesNotMatch(text, /\b(netease|qqmusic|qq_music|cloudmusic)\b/i, file);
+  }
+  assert.match(code(readFileSync(path.join(rust, 'app_server.rs'), 'utf8')), /if route\.starts_with\("\/api\/"\) \{\n\s*return api::respond\(request, &route, url\.query\(\), get, post, &input, store\);/,
+    'every /api/ route goes to the local music');
+  assert.ok(!existsSync(path.join(rust, 'local_music', 'connector', 'server.rs')), 'the page is no longer served from the local music');
   // The shared media code uses QQ Music only to mark and name its sessions (media::player_of and
   // media::player_source): nothing QQ-specific is read or sent from the shared worker.
   const qqUses = new Set([...code(readFileSync(path.join(rust, 'media.rs'), 'utf8')).matchAll(/crate::qq_music::[\w:]+/g)].map(match => match[0]));
   assert.deepEqual([...qqUses].sort(), ['crate::qq_music::PLAYER', 'crate::qq_music::connector::is_app', 'crate::qq_music::data::now_playing']);
+  // NetEase's the same way: recognised, marked and named there (2026-10-06), nothing else of it.
+  const neteaseUses = new Set([...code(readFileSync(path.join(rust, 'media.rs'), 'utf8')).matchAll(/crate::netease_music::[\w:]+/g)].map(match => match[0]));
+  assert.deepEqual([...neteaseUses].sort(), ['crate::netease_music::NAME', 'crate::netease_music::PLAYER', 'crate::netease_music::connector::is_app', 'crate::netease_music::connector::is_program']);
   assert.doesNotMatch(code(readFileSync(path.join(rust, 'media', 'windows_media.rs'), 'utf8')), /qq_music|qqmusic/i, 'media/windows_media.rs');
 });

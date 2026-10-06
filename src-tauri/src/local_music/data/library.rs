@@ -234,11 +234,9 @@ pub struct Store {
     pub enrich: Value,
     pub introductions: Value,
 }
-pub struct AllowedFile {
-    pub path: PathBuf,
-    pub root: PathBuf,
-    pub mime: String,
-}
+// A file the library may serve (its real path must stay inside `root`), and the media types of
+// served files: shared with the page's server (crate::http), under their earlier paths here.
+pub use crate::http::{mime, AllowedFile};
 impl Store {
     pub fn open(data_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
@@ -897,34 +895,6 @@ pub fn extension(p: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase()
-}
-pub fn mime(p: &Path) -> &'static str {
-    match extension(p).as_str() {
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "m4a" | "mp4" => "audio/mp4",
-        "aac" => "audio/aac",
-        "ogg" | "opus" => "audio/ogg",
-        "aiff" | "aif" => "audio/aiff",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "glb" => "model/gltf-binary",
-        "gltf" => "model/gltf+json",
-        "ico" => "image/x-icon",
-        "pdf" => "application/pdf",
-        "txt" => "text/plain; charset=utf-8",
-        "webmanifest" => "application/manifest+json",
-        _ => "application/octet-stream",
-    }
 }
 struct Entry {
     folder: PathBuf,

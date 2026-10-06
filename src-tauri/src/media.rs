@@ -81,11 +81,21 @@ pub fn player_of(app: &str) -> Option<&'static str> {
 }
 
 /// A media session's source as its player's module shows it: marked with `player_of`, and
-/// QQ Music's under its own name (its now-playing model, `qq_music::data`). Every other
-/// source keeps the name Windows gives it, NetEase's included, as before.
+/// QQ Music's and NetEase's own program's under their own names (QQ Music's now-playing model,
+/// `qq_music::data`; `netease_music::NAME` for `cloudmusic.exe`). Every other source, another
+/// session taken for NetEase included, keeps the name Windows gives it.
 pub fn player_source(app: &str, source: Source) -> Source {
     match player_of(app) {
         Some(crate::qq_music::PLAYER) => crate::qq_music::data::now_playing(source),
+        Some(crate::netease_music::PLAYER) => Source {
+            name: if crate::netease_music::connector::is_program(app) {
+                crate::netease_music::NAME.into()
+            } else {
+                source.name.clone()
+            },
+            player: Some(crate::netease_music::PLAYER.into()),
+            ..source
+        },
         player => Source {
             player: player.map(Into::into),
             ..source
@@ -165,7 +175,7 @@ mod tests {
         }
     }
     #[test]
-    fn qq_musics_session_is_named_and_marked_while_other_names_stay_as_windows_gives_them() {
+    fn qq_music_and_netease_sessions_get_their_names_others_keep_windows_names() {
         let qq = player_source("QQMusic.exe", listed("QQMusic.exe"));
         assert_eq!((qq.name.as_str(), qq.player.as_deref()), ("QQ音乐", Some("qqmusic")));
         assert_eq!((qq.title.as_str(), qq.playback.as_str()), ("Fictional Song", "playing"));
@@ -173,13 +183,25 @@ mod tests {
         assert!(!qq.capabilities.previous && !qq.capabilities.stop && !qq.capabilities.seek);
         // Its app id stays with it: what a remembered source is recognised by after a restart.
         assert_eq!(qq.app.as_deref(), Some("QQMusic.exe"));
-        // NetEase keeps the name Windows gives (unchanged); its mark is what gates its features.
+        // NetEase is listed as 网易云音乐 (2026-10-06), not by its app id; its mark is what
+        // gates its features, and the song, state and controls stay the session's own.
         let netease = player_source("cloudmusic.exe", listed("cloudmusic.exe"));
         assert_eq!(
             (netease.name.as_str(), netease.player.as_deref()),
-            ("cloudmusic.exe", Some("netease"))
+            ("网易云音乐", Some("netease"))
         );
         assert_eq!(netease.app.as_deref(), Some("cloudmusic.exe"));
+        assert_eq!(
+            (netease.title.as_str(), netease.playback.as_str()),
+            ("Fictional Song", "playing")
+        );
+        assert!(netease.capabilities.toggle && netease.capabilities.next);
+        // Another session taken for NetEase is marked, but keeps the name Windows gives it.
+        let other = player_source("NetEase.CloudMusic", listed("NetEase.CloudMusic"));
+        assert_eq!(
+            (other.name.as_str(), other.player.as_deref()),
+            ("NetEase.CloudMusic", Some("netease"))
+        );
         // A helper process or any other player is neither named nor marked.
         for app in ["QQMusicExternal.exe", "Chrome"] {
             let other = player_source(app, listed(app));

@@ -15,16 +15,16 @@ pause
 exit /b 1
 
 :portable
-start "" "Rhine Music.exe" --local
+start "" "Rhine Music.exe"
 goto done
 :installed
-start "" "rhine-music.exe" --local
+start "" "rhine-music.exe"
 goto done
 :release
-start "" "src-tauri\target\release\rhine-music.exe" --local
+start "" "src-tauri\target\release\rhine-music.exe"
 goto done
 :debug
-start "" "src-tauri\target\debug\rhine-music.exe" --local
+start "" "src-tauri\target\debug\rhine-music.exe"
 :done
 popd
 exit /b 0

@@ -54,6 +54,8 @@ import {
   columnStrength,
   idleWave,
   cinematicField,
+  musicIntroWave,
+  MUSIC_INTRO,
   INSPECTION_LIFT,
   PLAY_GESTURE,
   playHop,
@@ -1598,8 +1600,12 @@ export class ArchiveScene {
     const musicIntro = Boolean(musicLibrary && cinematic?.musicIntro);
     // Music stops before the film's second extraction/inspection shot. The
     // last 400 ms hold the exact interactive pose instead of cutting to it.
-    const shot = musicIntro ? Math.min(cinematic!.time, 27.12) : cinematic?.time ?? 29.1;
-    const introSettle = musicIntro ? ease((shot - 25.3) / 1.42) : 0;
+    const shot = musicIntro ? Math.min(cinematic!.time, MUSIC_INTRO.end) : cinematic?.time ?? 29.1;
+    // The music opening has one wave and takes the film's last phase (the pull back, the
+    // browsing view forming, the lift) MUSIC_INTRO.lead earlier: `late` is the film time that
+    // phase reads. The film keeps its own times (late = shot).
+    const late = musicIntro ? shot + MUSIC_INTRO.lead : shot;
+    const introSettle = musicIntro ? ease((late - 25.3) / 1.42) : 0;
     if (cinematic) {
       this.scanTime = shot;
       this.scanBlend = 1;
@@ -1634,7 +1640,7 @@ export class ArchiveScene {
       this.rail.value = musicIntro ? -2.17 - chosen.z : 0;
       this.rail.velocity = 0;
       this.lift.value = musicIntro
-        ? THREE.MathUtils.lerp(extraction(shot), previewLift, introSettle)
+        ? THREE.MathUtils.lerp(extraction(late), previewLift, introSettle)
         : extraction(shot);
       this.lift.velocity = 0;
       this.shoulder.value = selectedRow;
@@ -1693,10 +1699,11 @@ export class ArchiveScene {
     // `played`: with the play gesture's waves. The selected case has its hop instead.
     const field = (row: number, lane: number, played = true) => {
       if (musicIntro) {
-        // Recenter the authored wave on whichever album the library selected.
-        // The same looping cells, resting shoulders and lane weights are used
-        // on both sides of the handoff, so no rows pop or change altitude.
-        const opening = cinematicField(row - selectedRow + 12, lane - selectedLane + 2, shot);
+        // The opening's one wave (musicIntroWave), centred on whichever album the library
+        // selected: the film's outward scan, leaving the resting shelf behind it. The same
+        // looping cells, resting shoulders and lane weights are used on both sides of the
+        // handoff, so no rows pop or change altitude.
+        const opening = musicIntroWave(row - selectedRow, lane - selectedLane, shot);
         const resting = settlingWave(row - selectedRow, 26.56) * columnStrength(lane, selectedLane);
         return THREE.MathUtils.lerp(opening, resting, introSettle);
       }
@@ -1955,7 +1962,8 @@ export class ArchiveScene {
     // The label vertical edge constrains height; the file base is occluded.
     // Do not calibrate field of view from the visible fragment of a file.
     const orbit = ease((shot - 22.6) / 1.6);
-    const settle = ease((shot - 24.25) / 2.25);
+    // The music opening's pull back starts while the orbit still turns (MUSIC_INTRO.lead).
+    const settle = ease((late - 24.25) / 2.25);
     const navigationOrbit = musicLibrary && !cinematic
       ? this.musicCamera.navigation(this.columnCamera.velocity / COLUMN_SPACING,
           this.rail.velocity / ROW_SPACING, detail, dt, this.reduced)
@@ -2016,7 +2024,10 @@ export class ArchiveScene {
         .lerp(new THREE.Vector3(-0.277, 0.238, 0.931), detail)
         .normalize();
     }
-    if (cinematic) {
+    // The film's camera turns aside as its scan returns, then carries the selected column in
+    // from the right (frames 760-785). The music opening has no returning scan: its camera goes
+    // straight on to the shelf.
+    if (cinematic && !musicIntro) {
       const pan = ease((shot - 25.4) / 0.95);
       const right = new THREE.Vector3()
         .crossVectors(new THREE.Vector3(0, 1, 0), viewDirection)
@@ -2026,7 +2037,7 @@ export class ArchiveScene {
         -2.05 * (1 - pan) * ease((shot - 24.2) / 0.8),
       );
     }
-    if (cinematic && shot >= 25.05 && shot <= 27.3) {
+    if (cinematic && !musicIntro && shot >= 25.05 && shot <= 27.3) {
       // Frames 760–785: the camera carries the same physical column from the
       // right into the selected position while the neighboring crests subside.
       const pan = ease((shot - 25.4) / 1.05);

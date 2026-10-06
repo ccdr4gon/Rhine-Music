@@ -1,5 +1,5 @@
 //! NetEase Cloud Music keeps a local SQLite database, `Library/webdb.dat`. Only after the
-//! user switches on playlist columns in player-skin mode (which needs NetEase's queue
+//! user switches on playlist columns with NetEase as the current source (which needs NetEase's queue
 //! shown), read from it the playlists the user created (the liked-songs playlist included),
 //! so that each can be shown as a column.
 //! Collected playlists are not read. Exactly this is read:

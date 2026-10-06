@@ -49,7 +49,7 @@ export interface PreferredPlayer { name: string; match(source: ExternalMediaSour
 /** A player Rhine knows by name (music-sources.ts), by its `player` mark in the snapshot. */
 export interface PlayerModule extends PreferredPlayer {
   id: NonNullable<ExternalMediaSource["player"]>;
-  /** Its sources as its module shows them (QQ Music's under its own name); as listed when absent. */
+  /** Its sources as its module shows them (QQ Music's and NetEase's under their own names); as listed when absent. */
   show?(source: ExternalMediaSource): ExternalMediaSource;
 }
 
@@ -80,7 +80,7 @@ export function sourceLink(source: ExternalMediaSource, players: readonly Player
 /**
  * A saved link, checked: undefined while nothing was ever connected (or what is saved cannot be
  * read), null after the user disconnected. main.rs (`remembers_source`) accepts the same when it
- * decides whether a plain start resumes the player skin.
+ * decides whether a plain start opens the player that was the current source.
  */
 export function readSourceLink(value: unknown, players: readonly PlayerModule[]): SourceLink | null | undefined {
   if (value === null) return null;

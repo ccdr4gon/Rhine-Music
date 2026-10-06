@@ -25,8 +25,7 @@
     "license": "MIT",
     "licenseFile": "../LICENSE",
     "resources": {
-      "../dist/": "web/",
-      "../启动播放器皮肤.cmd": "启动播放器皮肤.cmd"
+      "../dist/": "web/"
     },
     "icon": ["icons/icon.ico", "icons/32x32.png", "icons/128x128.png"],
     "copyright": "Copyright (c) 2026 RonaldDeng and LBEILC; desktop adaptation by ccdr4gon",

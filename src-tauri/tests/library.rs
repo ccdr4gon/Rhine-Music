@@ -1,9 +1,10 @@
 use id3::TagLike;
 use rhine_music::{
+    app_server::Service,
+    http::parse_range,
     library::{self, Store},
     metadata,
     online::{assess_candidate, normalize_name, Provider},
-    server::{parse_range, Service},
 };
 use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Arc, time::Duration};

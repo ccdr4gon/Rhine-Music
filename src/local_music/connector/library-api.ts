@@ -2,7 +2,7 @@ import type { MusicLibrary } from "../../music-types";
 
 /**
  * The local music service's API on 127.0.0.1: the Windows client's own (src-tauri
- * local_music/connector/server.rs), or `npm run music` in a browser. A failed call keeps the
+ * app_server.rs, its /api routes in local_music/connector/api.rs), or `npm run music` in a browser. A failed call keeps the
  * service's own error text, or names the status it failed with.
  */
 async function request<T>(url: string, body?: unknown): Promise<T> {

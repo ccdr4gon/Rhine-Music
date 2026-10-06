@@ -23,7 +23,7 @@ export interface NeteasePreferences {
  * Rhine asked of it; the app keeps the shelf, the selection, the page and the poll.
  */
 export interface NeteaseSessionHost {
-  /** The connection to the external players; undefined outside the player skin. */
+  /** The connection to the external players; undefined unless a player is the current source. */
   readonly media: ExternalMediaConnection | undefined;
   readonly preferences: NeteasePreferences;
   /** A case of the shelf: its record ID, and its column's (genre) ID. */
@@ -64,7 +64,7 @@ const PLAYLIST_REFRESH_MS = 30_000;
 const QUEUE_JUMP_TIMEOUT_MS = 6000;
 
 /**
- * NetEase in the player skin, between two polls: its saved queue and the user's playlists (each
+ * NetEase as the current source, between two polls: its saved queue and the user's playlists (each
  * read only with its switch on), what its debugging port reports, the song Rhine asked it to
  * play, whether the shelf follows the song it plays, and seeking. Moved out of music-app.ts
  * (2026-10-06) without changing what is read, sent or shown.

@@ -155,13 +155,25 @@ test('Explorer launcher never falls back to the legacy browser service when the 
     env: { ...process.env, RHINE_TEST_LAUNCHER: command },
   })
   await fs.writeFile(script, "import {writeFileSync} from 'node:fs'; writeFileSync('legacy-was-started.txt', 'unexpected')")
-  for (const name of ['启动音乐播放器.cmd', '启动播放器皮肤.cmd']) {
+  // One launcher (2026-10-06: no modes, only sources; the player-skin launcher is gone).
+  for (const name of ['启动音乐播放器.cmd']) {
     const command = path.join(projectDir, name)
     await fs.copyFile(path.join(PROJECT_DIR, name), command)
     const failure = run(command)
     assert.equal(failure.status, 1, failure.stderr + failure.stdout)
     await assert.rejects(fs.access(path.join(projectDir, 'legacy-was-started.txt')), { code: 'ENOENT' })
   }
+})
+
+test('the one Windows launcher starts the client as it is: no mode argument, no second launcher', async () => {
+  // The client opens the source chosen last by itself (main.rs opens_player): there is nothing to
+  // pass, and the player-skin launcher with its --skin / --local is gone (the owner, 2026-10-06).
+  const text = await fs.readFile(path.join(PROJECT_DIR, '启动音乐播放器.cmd'), 'utf8')
+  const starts = text.split(/\r?\n/).filter((line) => line.startsWith('start '))
+  assert.equal(starts.length, 4)
+  for (const line of starts) assert.match(line, /^start "" "[^"]+\.exe"$/, line)
+  assert.doesNotMatch(text, /--skin|--local/)
+  await assert.rejects(fs.access(path.join(PROJECT_DIR, '启动播放器皮肤.cmd')), { code: 'ENOENT' })
 })
 
 test('browser launch uses the platform opener and passes Windows URLs as data', () => {

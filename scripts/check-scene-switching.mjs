@@ -214,7 +214,7 @@ test('clicking the selected case opens its details; it never plays or pauses', (
   assert.match(select, /if \(lifted && \(presentation\.phase === "archive" \|\| songScene\)\) return showDetails\(\);/);
   assert.doesNotMatch(select, /togglePlayback|controlExternal|player\?\./, 'no playback from a click on a case');
   // A live card without a queue opens its details too (the check comes before the queue's).
-  assert.ok(select.indexOf('return showDetails()') < select.indexOf('if (externalMode && !netease.shownQueue()) return;'));
+  assert.ok(select.indexOf('return showDetails()') < select.indexOf('if (playerCurrent && !netease.shownQueue()) return;'));
 });
 
 test('the desktop window draws its own title bar: no title, three buttons, the top edge drags it', () => {

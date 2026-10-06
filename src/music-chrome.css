@@ -96,6 +96,16 @@
 .music-app .music-topnav button:not(:disabled):hover {
   opacity: 0.65;
 }
+/* The two sources, 播放器 and 本地音乐 (2026-10-06: one app, one current source): the current one
+   in ink and demibold like the chosen theme word, the other muted (music-theme-switch.css). */
+.music-app .music-topnav .topnav-source {
+  color: var(--muted);
+  font-weight: 400;
+}
+.music-app .music-topnav .topnav-source[aria-pressed="true"] {
+  color: var(--ink);
+  font-weight: 600;
+}
 .music-app .topnav-menu-only,
 .music-app .topnav-menu-value,
 .music-app .music-topnav .topnav-menu-button {

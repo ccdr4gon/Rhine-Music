@@ -1,4 +1,4 @@
-use rhine_music::{library::Store, server::Service};
+use rhine_music::{app_server::Service, library::Store};
 use serde_json::json;
 use std::{
     fs,

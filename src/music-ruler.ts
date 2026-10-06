@@ -54,7 +54,7 @@ function approach(state: Spring, target: number, seconds: number, instant: boole
 
 /**
  * A bounded, reusable ruler; the selected tick itself grows, with no overlay. `noun` names what a
- * tick selects (专辑, or 歌曲 in the player skin).
+ * tick selects (专辑, or 歌曲 with a player as the current source).
  */
 export function setupMusicRuler(host: HTMLElement, noun = "专辑") {
   const events = new AbortController();

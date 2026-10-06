@@ -11,7 +11,7 @@
     "desktop:portable": "node scripts/build-desktop.mjs",
     "desktop:prepare": "npm run build && node scripts/desktop-resources.mjs",
     "check:desktop": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
-    "check:media": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-external-media.mjs scripts/check-lane-labels.mjs",
+    "check:media": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-external-media.mjs scripts/check-lane-labels.mjs scripts/check-music-sources.mjs",
     "check:rendering": "node --import ./scripts/register-check-typescript.mjs --test scripts/check-multisampling.mjs scripts/check-thin-coverage.mjs scripts/check-thin-face-geometry.mjs scripts/check-cover-filtering.mjs scripts/check-cover-tint.mjs scripts/check-frame-pacing.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-quality.mjs && npm run check:viewport",
     "start:legacy": "node scripts/launch-music.mjs",
     "check:launcher": "node --test scripts/check-music-launcher.mjs",
@@ -26,7 +26,7 @@
     "format": "prettier --write src scripts index.html package.json tsconfig.json",
     "preview": "vite preview --host 127.0.0.1",
     "music": "node scripts/music-server.mjs",
-    "check:music": "node --test scripts/check-music-library.mjs scripts/check-album-introductions.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-scene.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-music-player.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-motion.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-camera.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-lighting.mjs && node scripts/check-music-presentation.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-model.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-wheel-navigation.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-song-pose.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-song-list.mjs scripts/check-scene-switching.mjs scripts/check-local-playlists.mjs"
+    "check:music": "node --test scripts/check-music-library.mjs scripts/check-album-introductions.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-scene.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-music-player.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-motion.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-camera.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-lighting.mjs && node scripts/check-music-presentation.mjs && node --import ./scripts/register-check-typescript.mjs scripts/check-music-model.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-wheel-navigation.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-song-pose.mjs && node --import ./scripts/register-check-typescript.mjs --test scripts/check-song-list.mjs scripts/check-scene-switching.mjs scripts/check-local-playlists.mjs scripts/check-music-intro.mjs"
   },
   "dependencies": {
     "@kitlangton/rolling-number": "0.4.1",

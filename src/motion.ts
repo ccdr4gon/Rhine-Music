@@ -122,6 +122,40 @@ export function cinematicField(
   );
 }
 
+/**
+ * The music opening's timing (music-boot.ts, scene.ts), in the film's seconds. It begins at the
+ * film's first live 3D frame and has one wave (musicIntroWave; the owner, 2026-10-06: two waves
+ * were too many). The film waits for its returning scan before it pulls back onto the selection;
+ * without that scan the music opening takes the film's last phase (the pull back onto the shelf,
+ * the browsing view forming, the selected case's lift) `lead` seconds earlier, while the camera
+ * is still finishing its orbit, so it never stops between the two. It ends `lead` earlier as well,
+ * after the same 400 ms hold on the resting shelf. The film's own times are unchanged.
+ */
+const MUSIC_INTRO_LEAD = 1;
+export const MUSIC_INTRO = { start: 21.92, lead: MUSIC_INTRO_LEAD, end: 27.12 - MUSIC_INTRO_LEAD } as const;
+
+/**
+ * The music opening's one wave. Ahead of its crest it is the film's outward scan (archiveWave's
+ * first packet, recentred so that the selected case stands where the film's row 12, lane 2
+ * does); behind the crest the shelf settles into its resting shape, the selected column's
+ * shoulders (settlingWave at 26.56, columnStrength) and the other columns' lower ones, so the
+ * one scan leaves the selection standing where the film needed a second scan to bring it.
+ * `row` and `lane` count from the selected case. Flat before the scan, exactly the resting
+ * shelf once it has faded. Each row the scan passes rises to its crest once and then only
+ * settles; the rows behind where it starts take their resting height as the shelf appears.
+ */
+export function musicIntroWave(row: number, lane: number, time: number) {
+  const t = time - 22;
+  if (t <= 0) return 0;
+  const rest = settlingWave(row, 26.56) * columnStrength(lane, 0);
+  if (t >= 2.8) return rest;
+  const distance = row + 12 + lane * 0.65 - (3 + t * 19);
+  const crest = bell(distance, 3.8);
+  const packet = 2.5 * crest - 0.58 * bell(distance - 6, 3.5);
+  const wake = distance < 0 ? 1 - crest : 0;
+  return smooth(t / 0.32) * (packet * (1 - smooth((t - 2.15) / 0.65)) + rest * wake);
+}
+
 export const INSPECTION_LIFT = 4.05;
 export const ALIGNMENT_EPSILON = 0.001;
 // Hold altitude while facing back into the slot. Descent begins only once
