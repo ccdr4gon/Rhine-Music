@@ -11,21 +11,23 @@ import { CardAppearance } from "./appearance";
 import { configureInternalOptics } from "./internal-optics";
 import { DecryptionController } from "./decryption";
 import { FramePacing } from "./frame-pacing";
-import { SharedDepthBokehPass } from "./depth-of-field";
+import { SharedDepthBokehPass, focalBoxes } from "./depth-of-field";
+import { SidePrograms } from "./side-programs";
 import { archiveColumns, columnFiles, fileAtSlot, fileLocation, musicLibrary, records, slotStride } from "./data";
 import { CoverAtlas } from "./cover-atlas";
 import { MusicSelectionLighting } from "./music-lighting";
-import { LANE_LABEL, laneLabelPose, laneLabelRange, laneLabelRest, laneLabelShare, laneLabelSlot, type LaneLabelSlots, type LaneName } from "./lane-labels";
+import { LANE_LABEL, LANE_PLANE, convexHull, laneLabelRange, laneLabelShares, laneLabelSlots, laneStepPoses, quadMatrix, type LaneBox, type LaneLabelSlots, type LaneName, type LanePlace, type LanePoint, type LaneSide } from "./lane-labels";
 import { LaneNameLayer } from "./lane-names";
 import { MUSIC_LENS, MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicLens, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor } from "./music-camera";
 import { MUSIC_CASE_ASSET } from "./music-case-asset";
-import { MUSIC_LABEL, MUSIC_MODEL, configureMusicGlass, isMusicShellSurface, musicAssemblyPart } from "./music-model";
+import { MUSIC_COVER, MUSIC_LABEL, MUSIC_MODEL, configureMusicGlass, isMusicShellSurface, musicAssemblyPart } from "./music-model";
 import { CASE_DETAIL, CASE_HARDWARE, caseDetailShader, createCaseDetailMaterial, mergeCaseDetail } from "./music-case-detail";
 import { splitThinFaces } from "./thin-face-geometry";
 import { configureThinFaceMaterial } from "./thin-face-material";
 import {
   sameCell,
   selectionCell,
+  nearestOccurrence,
   fileAtCell,
   placeCell,
   poolCell,
@@ -116,6 +118,13 @@ const SHELF_REST = {
   distance: 140,
   aim: [-1.091, -0.045, 0.481],
 } as const;
+// How the lifted case strays from its rest while the shelf is browsed, for the names to keep
+// clear of (restKeepOut): steps of up to three rows along its column (lane-labels.ts LANE_STEP:
+// the wheel's few notches; measured 2026-10-08: three notches leave the track 2.8 rows behind),
+// and the idle drift (idleWave, at most 0.102 world units) either way.
+const LANE_SWEEP = { idle: 0.1 } as const;
+// (The lifted case's own ▶, whose paths the names also kept clear of, is gone: the owner,
+// 2026-10-10, "delete the marked button, we already have a play button on the right".)
 export class ArchiveScene {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -142,6 +151,8 @@ export class ArchiveScene {
   private readonly cullSphere = new THREE.Sphere(new THREE.Vector3(), CULL_RADIUS);
   private model = new THREE.Group();
   private appearance = new CardAppearance();
+  /** Each double-sided material's program per side, kept between three's side turns (side-programs.ts). */
+  private readonly sidePrograms: SidePrograms;
   private decryption = new DecryptionController();
   private cursor = new THREE.Vector2();
   private raycaster = new THREE.Raycaster();
@@ -154,6 +165,9 @@ export class ArchiveScene {
   private coordinateOrigin: ArchiveCell = { lane: 0, row: 0 };
   private lift = { value: 0, velocity: 0 };
   private rail = { value: 0, velocity: 0 };
+  // Rows the lifted case still has to travel after relayout moved its song along its column: it
+  // goes with the rail, so it keeps its place on screen while the shelf moves under it.
+  private relayoutRows = { value: 0, velocity: 0 };
   private shoulder = { value: 12, velocity: 0 };
   private laneFocus = { value: 2, velocity: 0 };
   private columnCamera = { value: 0, velocity: 0 };
@@ -224,8 +238,8 @@ export class ArchiveScene {
   /** The shelf's camera at rest (shelfRestCamera), which the names' slots are seen with. */
   private readonly restCamera = new THREE.PerspectiveCamera();
   private readonly restProbe = new THREE.Vector3();
-  /** The names' slots for each length of name, and the view at rest they were worked out for. */
-  private readonly laneSlots = new Map<number, LaneLabelSlots>();
+  /** The names' slots, the selection bracket at rest (and the case's front face), what else they keep clear of, and the view they were worked out for. */
+  private laneSlots: { view: string; bracket: LaneBox; face: LanePoint[]; keep: LanePoint[][]; places: Record<LaneSide, LanePlace[]>; slots: LaneLabelSlots } | null = null;
   private laneSlotView = "";
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -277,6 +291,7 @@ export class ArchiveScene {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
+    this.sidePrograms = new SidePrograms(this.renderer);
     this.renderer.domElement.setAttribute(
       "aria-label",
       "三维研究档案阵列，可点击选择档案",
@@ -612,6 +627,8 @@ export class ArchiveScene {
     this.appearance.apply(this.model, 0);
     this.drawLabel(0);
     this.scene.add(this.model);
+    // The shelf's glass and the lifted case's, with their prepared materials.
+    this.sidePrograms.watch(this.scene);
     // Logical slots retain their own stride; they are not display-pool indices.
     this.model.position.copy(this.cellPosition(this.selectedCell));
     this.loaded = true;
@@ -753,7 +770,50 @@ export class ArchiveScene {
     this.shoulder = { value: location.row, velocity: 0 };
     this.laneFocus = { value: location.lane, velocity: 0 };
     this.columnCamera = { value: (location.lane - 2) * COLUMN_SPACING, velocity: 0 };
+    this.relayoutRows = { value: 0, velocity: 0 };
     await this.covers.select(records[index]);
+  }
+
+  /**
+   * The shelf's songs changed under the selection, which keeps its song: NetEase's queue moved to
+   * another playlist (its cases take other keys, and NetEase's own copy of a playlist can have a song
+   * more or less than the one saved on this PC). Nothing is emptied or built again, as
+   * refreshLibrary does (2026-10-16: "it reloads the whole scene1"): the lifted case keeps its
+   * height, print and motion, the camera stays, and the cases around it take their songs in place.
+   * The selection stands on `index`, at the place of its song nearest to where it stood. When a
+   * column before it came or went, the view moves with the selected column by whole columns, as
+   * rebaseCoordinates moves it, so that column keeps its place on screen.
+   */
+  relayout(index: number) {
+    if (!musicLibrary || !this.loaded || !records[index]) return;
+    this.pacing.invalidate();
+    const location = fileLocation(index);
+    this.selectedSlot = location.slot;
+    // The label prints the case's number on the shelf, which may have changed with it.
+    this.drawLabel(index);
+    // The lifted print is painted again only for a picture of its own.
+    if (this.covers && !this.covers.shows(records[index])) void this.covers.select(records[index]);
+    if (!this.looping) {
+      this.selectedCell = { lane: location.lane, row: location.row };
+      return;
+    }
+    const before = this.selectedCell;
+    const cell = {
+      lane: nearestOccurrence(location.lane, before.lane, archiveColumns.length),
+      row: nearestOccurrence(location.row, before.row, columnFiles(location.lane).length),
+    };
+    const lanes = cell.lane - before.lane;
+    this.selectedCell = cell;
+    // Its song moved along the column (a song more or less before it): the lifted case keeps its
+    // place on screen and goes with the shelf, which follows its new row at the rail's pace.
+    this.relayoutRows.value += cell.row - before.row;
+    if (!lanes) return;
+    this.coordinateOrigin.lane -= lanes;
+    this.laneFocus.value += lanes;
+    this.columnCamera.value += lanes * COLUMN_SPACING;
+    for (const old of this.outgoing) old.cell.lane += lanes;
+    for (const pulse of this.pulses) pulse.lane += lanes;
+    if (this.pendingPulse) this.pendingPulse.lane += lanes;
   }
 
   /**
@@ -1054,6 +1114,7 @@ export class ArchiveScene {
     this.lift = { value: MUSIC_PREVIEW_LIFT, velocity: 0 };
     const chosen = this.cellPosition(this.selectedCell);
     this.rail = { value: -2.17 - chosen.z, velocity: 0 };
+    this.relayoutRows = { value: 0, velocity: 0 };
     this.columnCamera = { value: chosen.x, velocity: 0 };
     this.shoulder = { value: this.selectedCell.row, velocity: 0 };
     this.laneFocus = { value: this.selectedCell.lane, velocity: 0 };
@@ -1103,7 +1164,17 @@ export class ArchiveScene {
     }
     this.ao.enabled = quality.aoSamples > 0;
     this.bokeh.enabled = quality.depthOfField > 0;
-    this.renderer.shadowMap.enabled = quality.shadows > 0;
+    const shadows = quality.shadows > 0;
+    if (this.renderer.shadowMap.enabled !== shadows) {
+      this.renderer.shadowMap.enabled = shadows;
+      // three makes the shadow map part of every lit material's program but does not check it
+      // before keeping one (setProgram): every material chooses again (side-programs.ts forgets
+      // what it kept, as this is outside the drawing).
+      this.scene.traverse((object) => {
+        const material = (object as THREE.Mesh).material;
+        for (const m of Array.isArray(material) ? material : material ? [material] : []) m.needsUpdate = true;
+      });
+    }
     const size = Math.min(
       quality.shadows || 1024,
       this.renderer.capabilities.maxTextureSize,
@@ -1169,13 +1240,15 @@ export class ArchiveScene {
   /**
    * The play / stop gesture (PLAY_GESTURE): the selected case hops and the selection wave
    * spreads from its place, over the shelf (also under an opened case) and along the song
-   * scene's chain. Reduced motion has neither.
+   * scene's chain. Reduced motion has neither. `hop: false` sends the wave alone (a click that
+   * plays the lifted case and opens it: the extraction is its motion); a hop already running
+   * lands as it would have.
    */
-  playGesture() {
+  playGesture({ hop = true }: { hop?: boolean } = {}) {
     if (!musicLibrary || !this.loaded || this.reduced || !records.length) return;
     const now = performance.now() / 1000;
     this.pacing.invalidate();
-    this.playStarted = now;
+    if (hop) this.playStarted = now;
     this.pulses.push({ ...this.selectedCell, time: now + PLAY_GESTURE.wave, play: true });
     this.pulses = this.pulses.slice(-6);
   }
@@ -1216,6 +1289,7 @@ export class ArchiveScene {
     } else if (this.looping && changed && this.loaded && this.lift.value + hop > 0.0001) {
       const group = this.model.clone(true);
       this.appearance.prepare(group);
+      this.sidePrograms.watch(group);
       const cover = group.children.find((child) => child.userData.albumCover) as THREE.Mesh | undefined;
       // The copy keeps the print and the index-square colour of the album it leaves with.
       const tint = (group.children.find((child) => child.userData.caseTint)?.userData.caseTint as THREE.IUniform<THREE.Vector4> | undefined)?.value;
@@ -1630,15 +1704,19 @@ export class ArchiveScene {
       this.reduced ? 35 : detailNavigation ? MUSIC_ALBUM_SWITCH_RATE : 3.7,
       dt,
     );
+    // At the rail's own rate, from rest: the two cancel (relayout).
+    damp(this.relayoutRows, 0, this.reduced ? 35 : detailNavigation ? MUSIC_ALBUM_SWITCH_RATE : 3.7, dt);
     if (detailNavigation && this.reduced) {
       this.shoulder = { value: selectedRow, velocity: 0 };
       this.laneFocus = { value: selectedLane, velocity: 0 };
       this.columnCamera = { value: chosen.x, velocity: 0 };
       this.rail = { value: -2.17 - chosen.z, velocity: 0 };
+      this.relayoutRows = { value: 0, velocity: 0 };
     }
     if (cinematic) {
       this.rail.value = musicIntro ? -2.17 - chosen.z : 0;
       this.rail.velocity = 0;
+      this.relayoutRows = { value: 0, velocity: 0 };
       this.lift.value = musicIntro
         ? THREE.MathUtils.lerp(extraction(late), previewLift, introSettle)
         : extraction(shot);
@@ -1932,7 +2010,7 @@ export class ArchiveScene {
     this.model.position.set(
       chosen.x - trackX,
       chosen.y + field(selectedRow, selectedLane, false) + this.lift.value,
-      chosen.z + entryZ + this.rail.value,
+      chosen.z + entryZ + this.rail.value - this.relayoutRows.value * ROW_SPACING,
     );
     // Extraction only changes elevation. Reframing belongs to the camera.
     this.model.rotation.set(
@@ -2261,6 +2339,33 @@ export class ArchiveScene {
     bokehUniforms.aperture.value = (lens.aperture * this.quality.depthOfField) / 100;
     bokehUniforms.focalRange.value = lens.range;
     bokehUniforms.focalLean.value = lens.lean;
+    // In the song scene the sharp large card keeps its colours to itself: without the guard
+    // the blur of everything behind its edges (the chain's cases, the background in the gaps
+    // between them) gathered them into a grey band below and beside it, which ended in
+    // straight edges at the chain's cases and read as something unseen cutting them off.
+    // The guard keeps to the boxes on screen of the cases that are the large card: the lifted
+    // case, rising into the card's place on a step, and the copies leaving that place (as sharp
+    // there as the card was; unguarded, the departing card's veil came back for the step's
+    // first 150 ms). Each holds as much as it is the large card (its song-card share, as the
+    // light has it), so the guard comes and goes with it instead of at once.
+    const guard = musicLibrary ? songProgress : 0;
+    bokehUniforms.focalGuard.value = guard;
+    const boxes = bokehUniforms.focalBoxes.value as THREE.Vector4[], weights = bokehUniforms.focalBoxWeights.value as number[];
+    const cards = guard > 0
+      ? [
+          // Every one of them keeps its whole box (2026-10-08 check: weighted by their song-card
+          // share, the boxes let go while the rising case and the departing copy were still partly
+          // sharp, and the veil came back for 120-200 ms at night on each step). The shader leaves
+          // out only samples that are sharp and nearer, so a case still out of focus in the chain
+          // hides nothing, and the guard follows its focus smoothly.
+          { group: this.model, share: 1 },
+          ...this.outgoing.map((o) => ({ group: o.group, share: 1 })),
+        ].filter((card) => card.share > 0).map((card) => ({ share: card.share, ...this.measureLiftedCase(card.group) }))
+      : [];
+    focalBoxes(cards, this.container.clientWidth, this.container.clientHeight).forEach(({ box, weight }, i) => {
+      boxes[i].fromArray(box);
+      weights[i] = weight;
+    });
     this.bokeh.exactDepth = lens.lean > 0;
     if (lens.lean > 0) {
       const slope = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
@@ -2322,13 +2427,15 @@ export class ArchiveScene {
    * same order; picking maps instance ids back through instanceSlots.
    */
   /**
-   * Write the columns' names over the picture (lane-labels.ts, lane-names.ts): each at its
-   * slot, the place its role has on the screen when the shelf rests (the selected column's
-   * across the case in front of the lifted one, the nearer column's across its own, the further
-   * column's along its edge). A name's place depends on nothing but how far its column is from
-   * the shelf's sideways track (`centre`, a fractional lane): the waves, the lifted cases, the
-   * play gesture, the idle drift and a step along a column move none of them. `shown` is how
-   * much of the browsing view is on screen; the names fade where they stand.
+   * Write the columns' names over the picture (lane-labels.ts, lane-names.ts) at their slots,
+   * worked out from the shelf at rest: the selected column's flat, facing the viewer, by the
+   * lifted case; the two beside it in perspective on a plane of their own column that faces
+   * right. A name's place depends on nothing but how far its column is from the shelf's sideways
+   * track (`centre`, a fractional lane): as the shelf slides, one fades out at its slot while the
+   * next fades in at its own, each drifting a few pixels the way the shelf slides
+   * (laneLabelShares; a swap at half a column with reduced motion). The waves, the lifted case,
+   * the play gesture, the idle drift, the wheel and a step along a column move none of them.
+   * `shown` is how much of the browsing view is on screen; the names fade where they stand.
    */
   private placeLaneLabels(centre: number, shown: number) {
     const names = this.laneNames;
@@ -2336,40 +2443,37 @@ export class ArchiveScene {
     const layer = visible ? this.laneNameLayer ??= this.createLaneNameLayer() : this.laneNameLayer;
     if (!layer) return;
     layer.begin();
-    if (visible && names) {
+    const width = visible ? this.container.clientWidth : 0, height = visible ? this.container.clientHeight : 0;
+    const slots = visible ? this.laneLabelSlots(layer, width, height) : null;
+    if (names && slots) {
       // The track's spring never quite stops: within a hundred-thousandth of a column of its
       // column (well under a hundredth of a pixel) the names stand exactly at their slots.
       const nearest = Math.round(centre);
       if (Math.abs(centre - nearest) < 1e-5) centre = nearest;
-      const width = this.container.clientWidth, height = this.container.clientHeight;
-      this.syncLaneSlotView(width, height);
-      // Portrait: the title and navigation lie over the columns nearer the lens, and the
-      // navigation over the top right, where names leave past the further column.
-      const textBelow = isPortraitViewport(width, height);
+      // Portrait: the title and navigation lie over the column nearer the lens.
+      const portrait = isPortraitViewport(width, height);
+      // A single column repeats in every lane: its name is given once, where the selection is.
+      const lone = archiveColumns.length === 1;
       const { first, last } = laneLabelRange(centre);
       for (let lane = first; lane <= last; lane++) {
         const column = wrap(lane, archiveColumns.length), name = names[column];
         if (!name) continue;
         const offset = lane - centre;
-        // A single column repeats in every lane: its name is given once, where the selection
-        // is, and fades from one lane to the next while the shelf slides sideways.
-        const lone = archiveColumns.length === 1 ? Math.max(0, 1 - 2 * Math.abs(offset)) : 1;
-        // The column the shelf is centred on is written in full; its neighbours lighter.
-        const weight = 0.92 + 0.08 * (1 - Math.min(1, Math.abs(offset)));
-        const share = laneLabelShare(offset, textBelow) * shown * lone * weight;
-        if (share <= 0.001) continue;
-        const writing = layer.writing(column, name);
-        const pose = laneLabelPose(offset, this.laneLabelSlots(writing.width), textBelow);
         // The same lane keeps its names when the shelf's coordinates are rebased.
         const key = lane + this.coordinateOrigin.lane;
-        if (pose.across.share * share > 0.001) layer.show(`${key}:across`, writing, pose.across, pose.across.share * share);
-        if (pose.along.share * share > 0.001) layer.show(`${key}:along`, writing, pose.along, pose.along.share * share);
+        for (const { role, share, dx, dy } of laneLabelShares(offset, portrait, this.reduced)) {
+          const slot = slots[role], opacity = share * shown;
+          if ((lone && role !== "selected") || !slot.shown || opacity <= 0.001) continue;
+          layer.show(`${key}:${role}`, role, column, archiveColumns.length, name, slot, dx, dy, opacity);
+        }
       }
     }
     layer.end();
   }
   private createLaneNameLayer() {
     const layer = new LaneNameLayer(this.container);
+    // A box of the overlay a name keeps clear of changed its size: the slots are worked out again.
+    layer.onChange = () => this.pacing.invalidate();
     // MiSans arriving changes how long a name is and where its baseline sits.
     document.fonts?.addEventListener("loadingdone", () => {
       layer.refresh();
@@ -2378,53 +2482,141 @@ export class ArchiveScene {
     return layer;
   }
   /**
-   * The view the names' slots are worked out for: the window's size, its layout and the fonts.
-   * Only a change of these places the shelf's camera at rest again and drops the slots.
+   * The names' slots (lane-labels.ts laneLabelSlots) for the view: the window's size, its layout,
+   * and what the layer measures from the page (the fonts, the overlay's boxes: its `version`).
+   * Only a change of these places the shelf's camera at rest again and works them out anew, from
+   * the shelf at rest: the selection bracket and the case's face (restBracket), what the names
+   * keep clear of (restKeepOut) and where the neighbours' names may be printed (lanePlaces).
+   * Null until the layer can be measured.
    */
-  private syncLaneSlotView(width: number, height: number) {
-    const compact = this.container.closest<HTMLElement>("[data-layout]")?.dataset.layout === "compact";
-    const view = `${width}x${height}:${compact}:${this.laneNameLayer?.fonts ?? 0}`;
-    if (view === this.laneSlotView) return;
+  private laneLabelSlots(layer: LaneNameLayer, width: number, height: number) {
+    const layout = this.container.closest<HTMLElement>("[data-layout]")?.dataset.layout ?? "";
+    const view = `${width}x${height}:${layout}:${layer.version}`;
+    if (this.laneSlots?.view === view) return this.laneSlots.slots;
+    const page = layer.measure(view);
+    if (!page) return null;
     this.laneSlotView = view;
-    this.laneSlots.clear();
-    this.shelfRestCamera(this.restCamera, compact);
+    this.shelfRestCamera(this.restCamera, layout === "compact");
+    const { bracket, face } = this.restBracket(width, height);
+    const keep = this.restKeepOut(width, height);
+    const places = {
+      further: this.lanePlaces("further", width, height, page.type.further),
+      nearer: this.lanePlaces("nearer", width, height, page.type.nearer),
+    };
+    const slots = laneLabelSlots(bracket, { width, height, portrait: isPortraitViewport(width, height), header: page.header, avoid: page.avoid, column: page.column }, page.type, face, keep, places);
+    this.laneSlots = { view, bracket, face, keep, places, slots };
+    return slots;
   }
   /**
-   * The names' slots for a name `width` world units long (lane-labels.ts LaneLabelSlots): the
-   * places the names stood on the shelf at rest, seen with the shelf's camera at rest. Worked
-   * out once per length for the view (syncLaneSlotView).
+   * The selection bracket at rest: the box on screen (CSS px) of the lifted case's eight corners,
+   * as measureLiftedCase reads them, for the shelf at rest seen with the shelf's camera at rest
+   * (shelfRestCamera): the selected column (lane 0) come toward the lens, its selected case at
+   * the resting lift on its row's shoulder, without the idle drift, the play gesture's hop or a
+   * wave. The camera stands still while the shelf is browsed and the selected column is always
+   * in the middle, so this is the bracket of every resting shelf. With it, the case's front face
+   * (its cover and the controls on it), whose four corners are among the eight, and all eight
+   * (`corners`). `shiftZ` and `shiftY` move the case from its rest (world units: along its
+   * column, and up), for the paths it takes while the shelf is browsed (restKeepOut).
    */
-  private laneLabelSlots(width: number) {
-    let slots = this.laneSlots.get(width);
-    if (slots) return slots;
+  private restBracket(width: number, height: number, shiftZ = 0, shiftY = 0): { bracket: LaneBox; face: LanePoint[]; corners: LanePoint[] } {
     const camera = this.restCamera, probe = this.restProbe;
-    const w = this.container.clientWidth, h = this.container.clientHeight;
-    // The shelf at rest around the selected column (lane 0): every column where it stands, the
-    // selected one and those in front come toward the lens, the selected row's shoulder, the
-    // lifted case at the resting lift.
     const ahead = (lane: number) => MUSIC_COLUMN_FORWARD * THREE.MathUtils.smoothstep(1 - lane, 0, 1);
-    const caseTop = MUSIC_MODEL.center.y + MUSIC_MODEL.height / 2;
-    const depth = (row: number) => -2.17 + row * ROW_SPACING;
-    const graze = 1 - LANE_LABEL.liftGraze / MUSIC_PREVIEW_LIFT;
-    const rest = laneLabelRest({
-      eye: camera.position, depth, width: MUSIC_MODEL.width, rowSpacing: ROW_SPACING,
-      top: (lane, row) => -4.6 + settlingWave(row, 26.56) * columnStrength(lane, 0) + caseTop + LANE_LABEL.rise,
-      gap: (lane) => COLUMN_SPACING - ahead(lane) + ahead(lane - 1) - MUSIC_MODEL.width - LANE_LABEL.stand,
-      lifted: (lane) => lane === 0 ? MUSIC_PREVIEW_LIFT * graze : 0,
-      edge: (lane) => lane * COLUMN_SPACING - ahead(lane) - MUSIC_MODEL.width / 2,
-      face: (row) => depth(row) + MUSIC_MODEL.depth / 2 + LANE_LABEL.faceGap,
-      ceiling: (x, z) => this.ceiling(x, z, LANE_LABEL.margin, camera),
-    }, width);
-    const project = (x: number, y: number, z: number) => {
-      const p = probe.set(x, y, z).project(camera);
-      return { x: (p.x + 1) * w / 2, y: (1 - p.y) * h / 2 };
+    const rest = {
+      edge: (lane: number) => lane * COLUMN_SPACING - ahead(lane) - MUSIC_MODEL.width / 2,
+      base: -4.6 + settlingWave(0, 26.56) * columnStrength(0, 0) + MUSIC_PREVIEW_LIFT + shiftY,
+      depth: -2.17 + shiftZ,
     };
-    slots = {
-      selected: laneLabelSlot(rest.selected, 0, project), nearer: laneLabelSlot(rest.nearer, 0, project),
-      turning: laneLabelSlot(rest.turning, 1, project), further: laneLabelSlot(rest.further, 1, project),
+    // A point of the case (its own coordinates, from the middle of its base) on the screen.
+    const seen = (x: number, y: number, z: number): LanePoint => {
+      const p = probe.set(rest.edge(0) + MUSIC_MODEL.width / 2 + x, rest.base + y, rest.depth + z).project(camera);
+      return { x: (p.x + 1) * width / 2, y: (1 - p.y) * height / 2 };
     };
-    this.laneSlots.set(width, slots);
-    return slots;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    const corners: LanePoint[] = [];
+    for (let corner = 0; corner < 8; corner++) {
+      const { x, y } = seen(
+        MUSIC_MODEL.center.x + (corner & 1 ? 0.5 : -0.5) * MUSIC_MODEL.width,
+        MUSIC_MODEL.center.y + (corner & 2 ? 0.5 : -0.5) * MUSIC_MODEL.height,
+        MUSIC_MODEL.center.z + (corner & 4 ? 0.5 : -0.5) * MUSIC_MODEL.depth,
+      );
+      corners.push({ x, y });
+      left = Math.min(left, x); right = Math.max(right, x);
+      top = Math.min(top, y); bottom = Math.max(bottom, y);
+    }
+    // The front face (corner & 4) around its edge: bottom left, bottom right, top right, top left.
+    return { bracket: { left, top, right, bottom }, face: [corners[4], corners[5], corners[7], corners[6]], corners };
+  }
+  /**
+   * What the names keep clear of on the shelf besides the overlay, from the shelf at rest like
+   * the bracket (restBracket), as convex shapes on the screen: the lifted case (all of it: its
+   * cover and the controls on it, its top, its spine) through the idle drift (the play gesture's
+   * hop may lift its top edge behind a name above it for a quarter of a second), and the paths of
+   * the bracket's four squares (from where they stand at rest, with the idle drift either way),
+   * which are drawn over the names, through the hop and through steps of up
+   * to three rows along the column each way (the wheel's notches; lane-labels.ts LANE_STEP). In
+   * such a step the newly selected case stands at its own place on the shelf, as many rows away
+   * from where the shelf's track still is, on its own shoulder and not yet lifted, and comes
+   * back to the bracket's rest as the track catches up, rising as it comes (laneStepPoses):
+   * every pose on the way, within the fan of those poses and its rest.
+   */
+  private restKeepOut(width: number, height: number): LanePoint[][] {
+    const { idle } = LANE_SWEEP, { square } = LANE_LABEL;
+    const at = (shiftZ: number, shiftY: number) => this.restBracket(width, height, shiftZ, shiftY);
+    const rest = [at(0, idle), at(0, -idle)];
+    const steps = (way: 1 | -1) => laneStepPoses(way, MUSIC_PREVIEW_LIFT).map(({ z, y }) => at(z, y));
+    const hop = [at(0, PLAY_GESTURE.height + idle)];
+    const keep = [convexHull(rest.flatMap((b) => b.corners))];
+    const corners = ({ bracket: b }: { bracket: LaneBox }): LanePoint[] =>
+      [{ x: b.left, y: b.top }, { x: b.right, y: b.top }, { x: b.left, y: b.bottom }, { x: b.right, y: b.bottom }];
+    const around = ({ x, y }: LanePoint): LanePoint[] =>
+      [{ x: x - square, y: y - square }, { x: x + square, y: y - square }, { x: x + square, y: y + square }, { x: x - square, y: y + square }];
+    for (let corner = 0; corner < 4; corner++)
+      for (const moves of [hop, steps(1), steps(-1)]) keep.push(convexHull([...rest, ...moves].flatMap((b) => around(corners(b)[corner]))));
+    return keep;
+  }
+  /**
+   * Where the name of a column beside the selected one may be printed (lane-labels.ts
+   * LANE_PLANE): on its own column at rest (lane +1 further from the lens; lane -1 nearer, come
+   * toward the lens with the selected one), on the case in each of its rows (LANE_PLANE[role],
+   * or LANE_PLANE.portrait's in the portrait layout), standing LANE_PLANE.lift above the top
+   * edge of the case's front, from each of its `along` along that edge from its end nearer the
+   * lens, on the plane turned LANE_PLANE.turn from the cases' fronts, reading level along it. A
+   * px of the name is as large as a px of the picture there, upright; its homography takes the
+   * name's line (its top left at 0, 0, its baseline at the type's ascent) to the picture, seen
+   * with the shelf's camera at rest. On the cases' fronts a name may run to the case's far end.
+   */
+  private lanePlaces(role: LaneSide, width: number, height: number, type: { ascent: number; descent: number }): LanePlace[] {
+    const camera = this.restCamera, probe = this.restProbe;
+    const order = (isPortraitViewport(width, height) && role === "further" ? LANE_PLANE.portrait.further : null) ?? LANE_PLANE[role];
+    const lane = role === "further" ? 1 : -1;
+    const ahead = MUSIC_COLUMN_FORWARD * THREE.MathUtils.smoothstep(1 - lane, 0, 1);
+    const turn = THREE.MathUtils.degToRad(LANE_PLANE.turn);
+    const along = new THREE.Vector3(Math.cos(turn), 0, Math.sin(turn));
+    const project = (p: THREE.Vector3): LanePoint => {
+      probe.copy(p).project(camera);
+      return { x: (probe.x + 1) * width / 2, y: (1 - probe.y) * height / 2 };
+    };
+    const places: LanePlace[] = [];
+    const line = type.ascent + type.descent, size = 100;
+    for (const row of order.rows) {
+      const base = -4.6 + settlingWave(row, 26.56) * columnStrength(lane, 0);
+      const corner = new THREE.Vector3(
+        lane * COLUMN_SPACING - ahead + MUSIC_MODEL.center.x - MUSIC_MODEL.width / 2,
+        base + MUSIC_MODEL.center.y + MUSIC_MODEL.height / 2 + LANE_PLANE.lift,
+        -2.17 + row * ROW_SPACING + MUSIC_MODEL.center.z + MUSIC_MODEL.depth / 2,
+      );
+      for (const start of order.along) {
+        const origin = corner.clone().addScaledVector(along, start);
+        const foot = project(origin), head = project(origin.clone().setY(origin.y + 1));
+        // World units per px: one px of the name's height is one px of the picture.
+        const scale = 1 / Math.hypot(head.x - foot.x, head.y - foot.y);
+        const point = (u: number, v: number) => project(origin.clone().addScaledVector(along, u * scale).setY(origin.y + (type.ascent - v) * scale));
+        const matrix = quadMatrix(size, line, [point(0, 0), point(size, 0), point(size, line), point(0, line)]);
+        const reach = (MUSIC_MODEL.width * Math.abs(along.x) + 8 * ROW_SPACING * Math.abs(along.z) - start) / scale;
+        places.push({ matrix, reach, row, along: start });
+      }
+    }
+    return places;
   }
   /**
    * The shelf's camera at rest, for this window: where the music camera settles on the shelf
@@ -2451,13 +2643,6 @@ export class ArchiveScene {
     camera.lookAt(aim);
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
-  }
-  /** The highest a point at (x, z) can stand and still be `margin` CSS px below the top of the picture (seen with `camera`). */
-  private ceiling(x: number, z: number, margin: number, camera: THREE.Camera) {
-    const height = this.container.clientHeight;
-    const at = (y: number) => (1 - this.restProbe.set(x, y, z).project(camera).y) / 2 * height;
-    const ground = at(0), perUnit = at(1) - ground;
-    return perUnit < 0 ? (margin - ground) / perUnit : Infinity;
   }
   /** Cases of the shelf and of the chain can be picked; an opened album's shelf cannot. */
   private get canPick() {
@@ -2577,6 +2762,10 @@ export class ArchiveScene {
     p.value(bokeh.aperture.value);
     p.value(bokeh.focalRange.value);
     p.value(bokeh.focalLean.value);
+    p.value(bokeh.focalGuard.value);
+    const guard = this.bokeh.uniforms as Record<string, THREE.IUniform>;
+    for (const box of guard.focalBoxes.value as THREE.Vector4[]) p.values(box.toArray());
+    p.values(guard.focalBoxWeights.value as number[]);
     if (this.selectionLighting) p.values(this.selectionLighting.columnPosition.toArray());
     p.value(this.selectionLighting?.focus ?? 0);
     p.value(this.selectionLighting?.songFocus ?? 0);
@@ -2595,17 +2784,18 @@ export class ArchiveScene {
   get liftedCaseRect() {
     return this.liftedBox;
   }
-  private measureLiftedCase() {
+  /** The same box for `group`, a copy of the lifted case (the song scene's guard measures those too). */
+  private measureLiftedCase(group: THREE.Object3D = this.model) {
     const width = this.container.clientWidth, height = this.container.clientHeight;
     const { center } = MUSIC_MODEL;
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-    this.model.updateMatrixWorld();
+    group.updateMatrixWorld();
     for (let corner = 0; corner < 8; corner++) {
       const p = this.liftedCorner.set(
         center.x + (corner & 1 ? 0.5 : -0.5) * MUSIC_MODEL.width,
         center.y + (corner & 2 ? 0.5 : -0.5) * MUSIC_MODEL.height,
         center.z + (corner & 4 ? 0.5 : -0.5) * MUSIC_MODEL.depth,
-      ).applyMatrix4(this.model.matrixWorld).project(this.camera);
+      ).applyMatrix4(group.matrixWorld).project(this.camera);
       const x = (p.x + 1) * width / 2, y = (1 - p.y) * height / 2;
       left = Math.min(left, x); right = Math.max(right, x);
       top = Math.min(top, y); bottom = Math.max(bottom, y);
@@ -2622,6 +2812,18 @@ export class ArchiveScene {
   /** For a host loop that waits while the scene rests (FramePacing.nextFrameAt). */
   nextFrameAt() {
     return this.pacing.nextFrameAt();
+  }
+  /** The host waits (a timer) before its next frame (FramePacing.waited). */
+  frameWaited() {
+    this.pacing.waited();
+  }
+  /** A display frame the host passes over without an update (FramePacing.skip). */
+  skipFrame(time: number) {
+    this.pacing.skip(time);
+  }
+  /** The display's frame as measured (seconds). */
+  get displayFrame() {
+    return this.pacing.displayFrame();
   }
   /** Ends such a wait: input or a mutator needs display frames again. */
   set onWake(callback: (() => void) | undefined) {
@@ -2730,6 +2932,18 @@ export class ArchiveScene {
         names: this.laneNameLayer?.shown() ?? [],
         // The camera the names' slots are seen with (shelfRestCamera), to compare with the live one at rest.
         restCamera: this.laneSlotView ? { position: this.restCamera.position.toArray(), fieldOfView: this.restCamera.fov, view: this.laneSlotView } : null,
+        // The selection bracket at rest (restBracket), to compare with the live one (liftedCaseRect).
+        bracket: this.laneSlots?.bracket ?? null,
+        face: this.laneSlots?.face ?? null,
+        // What the names keep clear of besides the overlay (restKeepOut).
+        keep: this.laneSlots?.keep ?? null,
+        // Where the neighbours' names could have been printed (lanePlaces), in order.
+        places: this.laneSlots?.places ?? null,
+        slots: this.laneSlots?.slots ?? null,
+        // Elements the layer watches for a change of size (none left behind once detached).
+        watching: this.laneNameLayer?.watching ?? 0,
+        // What the slots were worked out from on the page: the type, the header's band, the overlay's boxes.
+        page: this.laneNameLayer?.measured ?? null,
       },
       musicPresentationReady: this.musicPresentationReady,
       musicArchiveReady: this.musicArchiveReady,

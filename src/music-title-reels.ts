@@ -142,8 +142,12 @@ const blankFace: Face = {
   width: 0,
 };
 
-/** A bounded pool of actual character reels, with no glyph DOM measurements. */
-export function createTitleReels(visual: HTMLElement, spacer: HTMLElement) {
+/**
+ * A bounded pool of actual character reels, with no glyph DOM measurements. `layered`: each glyph
+ * is a compositing layer of its own at rest too (a 3D translation), as the details' title keeps
+ * them; the shelf's glyphs are layers only while they move (a plain translation).
+ */
+export function createTitleReels(visual: HTMLElement, spacer: HTMLElement, layered = false) {
   const slots = new Map<string, Slot>();
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const height = new TitleTrack(
@@ -222,10 +226,15 @@ export function createTitleReels(visual: HTMLElement, spacer: HTMLElement) {
         // The visible line box and the descender room under it (the slot's bottom padding).
         ([value]) => `inset(0 0 calc(100% - ${(value || 0) + descentRoom(value || 0)}px) 0)`,
       ),
+      // On the shelf a plain translation: the glyph is a layer of its own only while it moves (its
+      // animation gets one), not a masked layer at rest drawn again with every frame of the scene
+      // (measured 2026-10-10). The details' title, which rests between moves, keeps its layers.
       position: new TitleTrack(
         host,
         "transform",
-        ([x, y]) => `translate3d(${x || 0}px, ${y || 0}px, 0)`,
+        layered
+          ? ([x, y]) => `translate3d(${x || 0}px, ${y || 0}px, 0)`
+          : ([x, y]) => `translate(${x || 0}px, ${y || 0}px)`,
       ),
     };
     slot.roll.set([0]);

@@ -66,7 +66,9 @@ export class MusicBoot {
     this.skipButton = document.createElement("button");
     this.skipButton.type = "button";
     this.skipButton.className = "music-boot-skip";
-    this.skipButton.textContent = "跳过进场 ↗";
+    // 跳过, a word without a box (the owner, 2026-10-17); its name says what it skips.
+    this.skipButton.textContent = "跳过";
+    this.skipButton.setAttribute("aria-label", "跳过进场");
     this.root.appendChild(this.skipButton);
     this.parent.appendChild(this.root);
     this.skipButton.addEventListener("click", () => this.skip());

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FramePacing } from '../src/frame-pacing.ts';
+import { FrameCap } from '../src/frame-cap.ts';
 
 // Drive the pacer like a host: one call per display frame, drawing what it asks.
 function run(pacing, { hz, seconds, resting = true, inputs = () => [0], start = 0 }) {
@@ -82,6 +83,7 @@ test('a host may wait until just after the slot, and waiting does not skew the d
   pacing.begin(); pacing.value(1); pacing.finish(0.5, pacing.needsDraw(), true);
   const at = pacing.nextFrameAt();
   assert.ok(Math.abs(at - (0.5 + 4.25 / 240)) < 1e-9, 'requested a quarter frame after the fourth display frame began');
+  pacing.waited();
   // The host's frame after a wait is stamped with that display frame.
   assert.equal(pacing.due(0.5 + 4 / 240), true);
   pacing.begin(); pacing.value(1); pacing.finish(0.5 + 4 / 240, pacing.needsDraw(), true);
@@ -97,4 +99,103 @@ test('a pause, a hidden page or an open viewer redraws on return', () => {
   assert.equal(pacing.due(2), true);
   pacing.begin(); pacing.value(0);
   assert.equal(pacing.needsDraw(), true);
+});
+
+// 帧率上限 (frame-cap.ts), with the music page's frame loop (music-app.ts frame() and
+// waitForFrame()) driven against a display: one animation frame per display frame; a frame asked
+// for from a timer between two display frames runs at once, stamped with the earlier one (as
+// WebView2 does: stamped), or, in an engine that does not, at the next display frame. The scene
+// rests after `motion` seconds; its slow idle drift changes the picture on every update.
+function loop({ hz, cap = 0, motion = 1, seconds = 3, stamped = true, work = 0.0015 }) {
+  const frame = 1 / hz, pacing = new FramePacing(), limit = new FrameCap();
+  limit.set(cap);
+  const after = (t) => (Math.floor(t / frame + 1e-9) + 1) * frame;
+  const atOrBefore = (t) => Math.floor(t / frame + 1e-9) * frame;
+  const windows = { motion: [0.2, motion], rest: [motion + 0.3, seconds] };
+  const counts = { motion: { wakes: 0, draws: 0 }, rest: { wakes: 0, draws: 0 } };
+  const count = (stamp, key) => {
+    for (const [name, [from, to]] of Object.entries(windows)) if (stamp >= from && stamp < to) counts[name][key]++;
+  };
+  let next = [0, 0];
+  // waitForFrame(at): a timer, or the next display frame when that is less than a display frame away.
+  const waitFor = (atMs, now, stamp) => {
+    const at = atMs / 1000;
+    if (at - now > Math.max(0.001, pacing.displayFrame())) {
+      pacing.waited();
+      next = stamped ? [at, atOrBefore(at)] : [after(at), after(at)];
+    } else next = [after(stamp), after(stamp)];
+  };
+  while (next[0] < seconds) {
+    const [now, stamp] = next;
+    count(stamp, 'wakes');
+    if (!limit.admit(stamp * 1000)) {
+      pacing.skip(stamp);
+      waitFor(limit.next, now, stamp);
+      continue;
+    }
+    if (pacing.due(stamp)) {
+      pacing.begin();
+      pacing.value(stamp);
+      const draw = pacing.needsDraw();
+      if (draw) count(stamp, 'draws');
+      pacing.finish(stamp, draw, stamp >= motion);
+    }
+    waitFor(Math.max(pacing.nextFrameAt() * 1000, limit.next), now + work, stamp);
+  }
+  const rate = (name, key) => counts[name][key] / (windows[name][1] - windows[name][0]);
+  return {
+    moving: rate('motion', 'draws'), movingWakes: rate('motion', 'wakes'),
+    resting: rate('rest', 'draws'), restingWakes: rate('rest', 'wakes'),
+    displayFrame: pacing.displayFrame(),
+  };
+}
+
+test('帧率上限: runs average no more than the cap, never closer than half an interval, and do not catch up', () => {
+  const limit = new FrameCap();
+  limit.set(90);
+  const runs = [];
+  for (let i = 0; i < 240; i++) if (limit.admit(i * 1000 / 240)) runs.push(i * 1000 / 240);
+  assert.ok(Math.abs(runs.length - 90) <= 1, `${runs.length} runs in a second on 240 Hz`);
+  const gaps = runs.slice(1).map((t, i) => t - runs[i]);
+  assert.ok(Math.min(...gaps) >= 1000 / 90 / 2 - 1, 'no two runs closer than half an interval');
+  assert.deepEqual([...new Set(gaps.map((gap) => Math.round(gap / (1000 / 240))))].sort(), [2, 3], 'alternates between two and three display frames');
+  // After a stall of 200 ms: one run, then the cap's pace again (no burst to catch up).
+  const after = [];
+  for (let t = 1200; t < 1300; t += 1000 / 240) if (limit.admit(t)) after.push(t);
+  assert.ok(after[1] - after[0] >= 1000 / 90 / 2 - 1 && after.length <= 10, after.map((t) => (t - 1200).toFixed(1)).join(' '));
+  limit.set(0);
+  assert.equal(limit.admit(1300.1), true);
+  assert.equal(limit.next, 0, 'no cap: no time to wait for');
+});
+
+test('帧率上限 against the display: moving at most the cap, resting never more often than without it', () => {
+  for (const hz of [240, 165, 144, 120, 60]) {
+    const free = loop({ hz });
+    for (const cap of [144, 120, 90, 60, 30]) {
+      const capped = loop({ hz, cap });
+      const label = `${cap} on ${hz} Hz: moving ${capped.moving.toFixed(1)}/s (${capped.movingWakes.toFixed(1)} wakes), resting ${capped.resting.toFixed(1)}/s (${capped.restingWakes.toFixed(1)} wakes); no cap ${free.moving.toFixed(1)}, ${free.resting.toFixed(1)}`;
+      assert.ok(capped.moving <= Math.min(cap, hz) * 1.02 + 1, label);
+      if (cap < hz) assert.ok(capped.moving >= cap * 0.85, label);
+      // The major finding of the review: 90 on 240 Hz rested at 90 a second, against 60 without a cap.
+      assert.ok(capped.resting <= Math.min(free.resting, cap) + 1, label);
+      // A frame held back only measures the display: the rest cadence still knows the display's frame.
+      assert.ok(Math.abs(capped.displayFrame - 1 / hz) < 1e-6, `${label}: display frame ${(capped.displayFrame * 1000).toFixed(2)} ms`);
+      // The loop does not wake on display frames it then throws away: at most twice per run, never
+      // more often than without the cap.
+      assert.ok(capped.movingWakes <= Math.max(2 * capped.moving, 1) + 1 && capped.movingWakes <= free.movingWakes + 1, label);
+      assert.ok(capped.restingWakes <= Math.max(2 * capped.resting, free.restingWakes) + 1, label);
+    }
+  }
+});
+
+test('帧率上限 in an engine whose frames asked for between display frames wait for the next one', () => {
+  for (const hz of [240, 144, 60]) {
+    const free = loop({ hz, stamped: false });
+    for (const cap of [144, 120, 90, 60, 30]) {
+      const capped = loop({ hz, cap, stamped: false });
+      const label = `${cap} on ${hz} Hz: moving ${capped.moving.toFixed(1)}/s, resting ${capped.resting.toFixed(1)}/s; no cap ${free.resting.toFixed(1)}`;
+      assert.ok(capped.moving <= Math.min(cap, hz) * 1.02 + 1, label);
+      assert.ok(capped.resting <= Math.min(free.resting, cap) + 1, label);
+    }
+  }
 });

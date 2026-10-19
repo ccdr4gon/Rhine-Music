@@ -437,7 +437,8 @@ export function setupDetailTitle(title: HTMLElement) {
   visual.className = "music-title-rolling";
   visual.setAttribute("aria-hidden", "true");
   title.replaceChildren(spacer, visual);
-  const reels = createTitleReels(visual, spacer);
+  // Its glyphs stay layers, as they always were: the details rest between moves.
+  const reels = createTitleReels(visual, spacer, true);
   const probe = document.createElement("div");
   probe.className = "detail-title-probe";
   probe.setAttribute("aria-hidden", "true");

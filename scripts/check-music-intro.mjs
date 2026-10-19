@@ -357,7 +357,8 @@ test('the setting: on by default, saved with the other preferences, in 动效与
   assert.match(change, /^if \(el\.id === "intro-setting"\) \{\n\s*preferences\.intro = el\.checked;\n\s*savePrefs\(\);\n\s*\}\n\s*$/);
   assert.equal(app.match(/boot\?\.start\(/g).length, 1, 'the opening starts only when the page starts');
   // Every earlier key is still saved (and the new one with them, in data/preferences.json too).
-  for (const key of ['theme', 'sortMode', 'quality', 'reduced', 'volume', 'songFade', 'bgm', 'bgmVolume', 'sound', 'soundVolume', 'renderQuality', 'neteaseQueue', 'neteaseControl', 'playlistColumns'])
+  // (Not neteaseControl: the switch is gone, the owner, 2026-10-09; check-external-media.mjs.)
+  for (const key of ['theme', 'sortMode', 'quality', 'reduced', 'volume', 'songFade', 'bgm', 'bgmVolume', 'sound', 'soundVolume', 'renderQuality', 'neteaseQueue', 'playlistColumns'])
     assert.match(app.slice(app.indexOf('const preferences = {'), app.indexOf('>("rhine-music-preferences", {}),')), new RegExp(`\\n\\s*${key}: `), key);
   assert.match(app, /if \(key === "rhine-music-preferences"\) saveDesktopPreferences\(value\);/);
 });

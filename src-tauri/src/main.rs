@@ -68,8 +68,7 @@ async fn netease_playlists(
     .map_err(|error| error.to_string())?
 }
 
-/// NetEase's local DevTools port; polled while its queue is shown and playing the selected
-/// song with the play button is not turned off.
+/// NetEase's local DevTools port; polled while its queue is shown.
 #[tauri::command]
 async fn netease_debug_state() -> Result<rhine_music::netease_music::connector::debug_port::DebugState, String> {
     tauri::async_runtime::spawn_blocking(rhine_music::netease_music::connector::debug_port::state)
@@ -86,10 +85,35 @@ async fn netease_debug_play(track_id: String) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
+/// One of the user's NetEase playlists, from one of its songs: NetEase's queue becomes the
+/// playlist (the owner, 2026-10-10).
+#[tauri::command]
+async fn netease_debug_play_playlist(playlist_id: String, track_id: String, name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::netease_music::connector::debug_port::play_playlist(&playlist_id, &track_id, &name)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn netease_debug_seek(track_id: String, position: f64) -> Result<f64, String> {
     tauri::async_runtime::spawn_blocking(move || {
         rhine_music::netease_music::connector::debug_port::seek(&track_id, position)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The lyrics NetEase has loaded for the song it plays; with `load`, NetEase is first asked to
+/// load them as its playing page does (the owner, 2026-10-17). Read while that song's details show.
+#[tauri::command]
+async fn netease_debug_lyrics(
+    track_id: String,
+    load: bool,
+) -> Result<rhine_music::netease_music::connector::debug_port::DebugLyrics, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rhine_music::netease_music::connector::debug_port::lyrics(&track_id, load)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -248,7 +272,9 @@ fn main() {
             netease_playlists,
             netease_debug_state,
             netease_debug_play,
+            netease_debug_play_playlist,
             netease_debug_seek,
+            netease_debug_lyrics,
             netease_debug_restart
         ])
         .on_window_event(|window, event| {
@@ -289,6 +315,10 @@ fn main() {
             ))?;
             let webview_data = data_dir.join("webview");
             std::fs::create_dir_all(&webview_data)?;
+            // WebView2 left running on this folder by the last start would keep the new window
+            // blank for half a minute: ended first, under this start's claim on the folder, which
+            // is released on exit (stale_webview.rs).
+            rhine_music::stale_webview::end_leftovers(&webview_data);
             let preferred = std::fs::read_to_string(data_dir.join("desktop-port.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<u16>(&s).ok())
@@ -308,25 +338,44 @@ fn main() {
             );
             let entry = entry_url(&origin, &preferences);
             app.manage(DesktopState { directory: data_dir, preferences: Mutex::new(preferences) });
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(entry.parse()?))
-                .data_directory(webview_data)
-                .title("Rhine Music")
-                // The page draws its own title bar (src/window-frame.ts): no native one. The
-                // window keeps its resize borders, its shadow and Windows 11's rounded corners.
-                .decorations(false)
-                .shadow(true)
-                .inner_size(1440.0, 900.0)
-                .min_inner_size(640.0, 480.0)
-                .center()
-                .initialization_script(initialization)
-                .on_navigation(move |url| url.origin().ascii_serialization() == allowed_origin)
-                .on_new_window(|url, _| {
-                    if matches!(url.scheme(), "http" | "https") {
-                        let _ = webbrowser::open(url.as_str());
+            let url: tauri::Url = entry.parse()?;
+            // WebView2 still finishing the last start's shutdown on this folder can refuse a new
+            // webview for a moment ("请求的资源在使用中", 0x800700AA): measured 2026-10-11 in 4 of
+            // 16 starts within 3 s of a close, and in 2 of 16 without ending the leftovers (one
+            // after 19 s), where Rhine then stopped. The window is tried again, after ending what
+            // is left on the folder, for up to 15 s; a failed try leaves no window behind.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                let allowed_origin = allowed_origin.clone();
+                let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.clone()))
+                    .data_directory(webview_data.clone())
+                    .title("Rhine Music")
+                    // The page draws its own title bar (src/window-frame.ts): no native one. The
+                    // window keeps its resize borders, its shadow and Windows 11's rounded corners.
+                    .decorations(false)
+                    .shadow(true)
+                    .inner_size(1440.0, 900.0)
+                    .min_inner_size(640.0, 480.0)
+                    .center()
+                    .initialization_script(initialization.clone())
+                    .on_navigation(move |url| url.origin().ascii_serialization() == allowed_origin)
+                    .on_new_window(|url, _| {
+                        if matches!(url.scheme(), "http" | "https") {
+                            let _ = webbrowser::open(url.as_str());
+                        }
+                        tauri::webview::NewWindowResponse::Deny
+                    })
+                    .build();
+                match built {
+                    Ok(_) => break,
+                    Err(error) if std::time::Instant::now() < deadline => {
+                        eprintln!("Rhine Music: 窗口未能创建，稍后重试：{error}");
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        rhine_music::stale_webview::end_more(&webview_data);
                     }
-                    tauri::webview::NewWindowResponse::Deny
-                })
-                .build()?;
+                    Err(error) => return Err(error.into()),
+                }
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -337,6 +386,8 @@ fn main() {
                 {
                     service.stop();
                 }
+                // A start right after this one need not wait for this process to end.
+                rhine_music::stale_webview::release_claim();
             }
         }),
         Err(error) => {

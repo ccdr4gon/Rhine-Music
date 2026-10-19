@@ -97,6 +97,18 @@ export class MusicPlayer {
     return { ...this.value, transport: this.transport, queue: [...this.value.queue] };
   }
 
+  /**
+   * Seconds into the loaded song now: its element's own clock (the state's currentTime is its last
+   * timeupdate). While the song before it fades out the element is still that song's: its time is not
+   * this one's, so the state's (0 for a new song) holds until this song's element plays.
+   */
+  get position(): number {
+    const audio = this.song;
+    if (audio && this.songTrackId === this.value.currentTrack?.id && this.pendingSeek === null && audio.readyState >= 1)
+      return seconds(audio.currentTime);
+    return this.value.currentTime;
+  }
+
   subscribe(listener: Listener): () => void {
     if (this.disposed) return () => {};
     this.listeners.add(listener);

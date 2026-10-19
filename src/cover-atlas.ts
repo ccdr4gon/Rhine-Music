@@ -143,15 +143,24 @@ export class CoverAtlas {
     return CoverMipTexture.revision + this.tileRect.version + this.artScale.version + this.caseTint.version;
   }
 
-  /** Visual identity only: metadata refreshes replace records without changing their print. */
+  /**
+   * Visual identity only: what the painter is given (request). Metadata refreshes replace records
+   * without changing their print, and a case whose key changed but not its picture (NetEase's queue
+   * moving to another playlist: the same songs under new keys, their pictures maybe on another of
+   * NetEase's image servers: the album's coverKey) keeps its tile.
+   */
   private keyOf(record: ArchiveRecord | undefined) {
     if (!record) return "";
     let key = this.recordKeys.get(record);
     if (key === undefined) {
-      key = JSON.stringify([record.id, record.album?.coverUrl, record.title]);
+      key = JSON.stringify([record.album?.coverKey ?? record.album?.coverUrl, record.title, record.id.startsWith("external:")]);
       this.recordKeys.set(record, key);
     }
     return key;
+  }
+  /** Whether the lifted print is this record's picture already (relayout: no need to paint it again). */
+  shows(record: ArchiveRecord | undefined) {
+    return this.selectedKey !== undefined && this.keyOf(record) === this.selectedKey;
   }
 
   private request(record: ArchiveRecord | undefined, size: number, priority = false) {

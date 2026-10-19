@@ -62,11 +62,28 @@ export function queueCover(url?: string, size = 1024): string | undefined {
 /** A queue song's box and its single track share this ID. */
 export const queueTrackKey = (track?: QueueTrack) => (track ? `netease-track:${track.id}` : "");
 
+/**
+ * A NetEase picture whatever image server it is addressed on. NetEase gives one picture on p1, p2…
+ * as it pleases: the copy of a playlist saved on this PC and NetEase's own queue of it name
+ * different servers, and so can two loads of one playlist (2026-10-16: the same pictures on other
+ * servers rebuilt the whole shelf when the queue moved to another playlist). Its path names it.
+ */
+export function queueCoverKey(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    return /^p\d+\.music\.126\.net$/i.test(parsed.hostname) ? `netease-picture:${parsed.pathname}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // One case per song: the album record of a song in the column `genreId`.
 function songAlbum(key: string, track: QueueTrack, position: number, genreId: string): MusicAlbum {
+  const coverUrl = queueCover(track.coverUrl);
   return {
     id: key, title: track.title, artist: track.artist || "歌手未提供",
-    genreId, rawGenres: [], folder: "", coverUrl: queueCover(track.coverUrl),
+    genreId, rawGenres: [], folder: "", coverUrl, coverKey: queueCoverKey(coverUrl),
     tracks: [{
       id: key, albumId: key, title: track.title, artist: track.artist,
       trackNumber: position + 1, duration: track.duration ?? 0, format: "网易云音乐",
@@ -97,14 +114,27 @@ export function queueLibrary(tracks: readonly QueueTrack[], sourceName: string):
 /** The lane ID of NetEase's play queue when it did not come from one of the user's playlists. */
 export const QUEUE_LANE = "queue";
 /**
+ * How NetEase shows the user's own liked-songs playlist, on its playlist page and in its sidebar. It
+ * stores it under the account's nickname + 喜欢的音乐 (its local database has that name), and its
+ * pages put this name in its place for the playlist that is the account's liked one (2026-10-17).
+ */
+export const LIKED_PLAYLIST_NAME = "我喜欢的音乐";
+/**
  * One shelf column when the columns are NetEase playlists. The live lane is NetEase's play
- * queue: resting on a case there can switch its song. Every other lane is a playlist as the
- * local database has it, for browsing only.
+ * queue: ▶ on a case there plays its song. Every other lane is a playlist as the local database
+ * has it: ▶ on one of its cases has NetEase play the playlist from that song, and the playlist
+ * becomes the queue (the owner, 2026-10-10; until then such a lane was only for browsing).
  */
 export interface QueueLane {
   /** The playlist's ID, or QUEUE_LANE. */
   id: string;
+  /** What Rhine shows: the playlist's name, LIKED_PLAYLIST_NAME for the liked-songs playlist. */
   name: string;
+  /**
+   * The name as NetEase stores it: what its own playlist page hands over with 播放全部 as the queue's
+   * source, so Rhine's 播放全部 hands over the same.
+   */
+  sourceName: string;
   live: boolean;
   liked: boolean;
   tracks: readonly QueueTrack[];
@@ -128,12 +158,15 @@ export function queueLanes(
     if (live) placed = true;
     else if (!playlist.tracks.length) continue;
     lanes.push({
-      id: playlist.id, name: playlist.name || (playlist.liked ? "我喜欢的音乐" : "未命名歌单"), live, liked: playlist.liked,
-      tracks: live ? queue.tracks : playlist.tracks, truncated: live ? queue.truncated : playlist.truncated,
+      id: playlist.id, name: playlist.liked ? LIKED_PLAYLIST_NAME : playlist.name || "未命名歌单", sourceName: playlist.name, live,
+      liked: playlist.liked, tracks: live ? queue.tracks : playlist.tracks, truncated: live ? queue.truncated : playlist.truncated,
     });
   }
   if (!placed && queue.tracks.length)
-    lanes.unshift({ id: QUEUE_LANE, name: queue.source?.name || "播放队列", live: true, liked: false, tracks: queue.tracks, truncated: queue.truncated });
+    lanes.unshift({
+      id: QUEUE_LANE, name: queue.source?.name || "播放队列", sourceName: queue.source?.name ?? "", live: true, liked: false,
+      tracks: queue.tracks, truncated: queue.truncated,
+    });
   return lanes;
 }
 
@@ -146,6 +179,13 @@ export const laneGenre = (lane: Pick<QueueLane, "id">) => `netease-lane:${lane.i
  */
 export const laneTrackKey = (lane: Pick<QueueLane, "id" | "live">, track?: QueueTrack) =>
   !track ? "" : lane.live ? queueTrackKey(track) : `netease-list:${lane.id}:${track.id}`;
+
+/**
+ * The song a case shows, whichever lane holds it: a playlist's case and the queue's for one song
+ * answer alike, so what follows the shelf's songs (the ruler's ticks) is unmoved when NetEase's queue
+ * moves to another playlist and the same songs take the other keys. Other keys are their own.
+ */
+export const caseSong = (key: string) => key.replace(/^netease-(?:track|list:[^:]*):/, "netease-song:");
 
 /** The shelf for playlist columns: one column per lane, one case per song in it. */
 export function laneLibrary(lanes: readonly QueueLane[]): MusicLibrary {

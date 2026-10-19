@@ -1,7 +1,7 @@
 /* The song scene (Claude Design "Overlay Frame", direction B, 2026-10-05): flat chrome around
    the large card (the ways out, a 1 px line behind the card with its marker, the column's name
-   at the bottom left) and one tilted pane of glass with the column's tab, the selected song, the
-   playlist as text and a quiet note. SongListView.setCard writes the geometry as --songs-*
+   at the bottom left) and one tilted pane of glass with the column's tab, the selected song and
+   the playlist as text (no note: the owner, 2026-10-07). SongListView.setCard writes the geometry as --songs-*
    variables on the section; the values here are its 16:9 defaults. Inside the pane lengths are
    in layout units (--songs-u: 9 px at 1440 x 900, where they are the design's pixels). The
    section itself is never faded: the pane's backdrop must stay the canvas. */
@@ -14,6 +14,7 @@
   --songs-rail-x: 22.4vw;
   --songs-card-top: 34.89vh;
   --songs-card-bottom: 66.29vh;
+  --songs-card-right: 43vw;
   --songs-marker-y: 28.22vh;
   --songs-glass-x: calc(100vw - 102.34vh);
   --songs-glass-y: 11.98vh;
@@ -46,10 +47,14 @@
   width: 1px;
   background: var(--rule);
 }
-/* The play gesture lifts the card (--songs-hop): the line keeps meeting its edges. */
+/* The play gesture lifts the card (--songs-hop): the line keeps meeting its edges. Where it would
+   cross the header's wordmark side (the wordmark and 回到当前, whose room is kept: a narrow window brings
+   the line there), it starts 12 px under the header instead; a step, 0 or that (fitChrome sets
+   --identity-right). */
 .song-rail-top {
-  top: 0;
-  height: calc(var(--songs-card-top) - var(--songs-hop, 0px));
+  --songs-rail-start: clamp(0px, calc((var(--identity-right, 0px) + 16px - var(--songs-rail-x)) * 1000), calc(var(--chrome-bottom, 0px) + 12px));
+  top: var(--songs-rail-start);
+  height: calc(var(--songs-card-top) - var(--songs-hop, 0px) - var(--songs-rail-start));
 }
 .song-rail-bottom {
   top: calc(var(--songs-card-bottom) - var(--songs-hop, 0px));
@@ -81,20 +86,21 @@
 .song-exits .music-back > span {
   white-space: nowrap;
 }
-/* The second way out, 16 px under the first (14 compact, 19 in large windows). */
-.song-exits .song-details {
-  margin-top: 16px;
-}
-.music-app[data-layout="compact"] .song-exits .song-details {
-  margin-top: 14px;
-}
-/* Portrait: on one line over the card's top left, which a narrow window brings close. */
+/* Portrait: over the card's top left, which a narrow window brings close. */
 .music-app[data-layout="portrait"] .song-exits {
   top: 146px;
-  flex-direction: row;
 }
-.music-app[data-layout="portrait"] .song-exits .song-details {
-  margin: 0 0 0 24px;
+/* 这首歌 (on to the song's details) stands over the large card's top right, ending with the case's
+   right edge as it is seen, its middle level with the second line of the selected song's title on
+   the pane (--songs-details-y: SongListView.alignDetails), where the owner marked it (2026-10-10:
+   "move the song detail button here", "parallel with this"; until then it stood under 返回专辑架).
+   It keeps that place whatever the title's length. Before the pane is measured, and in portrait
+   (the title is under the card), just over the card's drawn top edge. */
+.song-chrome .song-details {
+  position: absolute;
+  right: calc(100% - var(--songs-card-right));
+  top: var(--songs-details-y, calc(var(--songs-card-top) - 16px));
+  transform: translateY(-50%);
 }
 /* The column's name, bottom left, as in the details: a 34 x 5 bar from the window's edge. */
 .song-caption {
@@ -145,7 +151,7 @@
   grid-template-areas:
     "head head"
     "selected list"
-    "note list";
+    ". list";
   padding: var(--songs-start) var(--songs-end) var(--songs-end) var(--songs-start);
   border: 1px solid var(--glass-edge);
   background:
@@ -253,7 +259,9 @@
   line-height: 1;
   opacity: 0.72;
 }
-/* 共 N 首 in the tag's colours; under it, quietly, why the list is cut or an album's length. */
+/* 共 N 首 in the tag's colours; under it, quietly, why the list is cut, the list's length or
+   目录离线. Before it, while another song is selected, the playing song's number: a button back
+   to it (● 012, as beside the shelf's ring; the owner, 2026-10-07). */
 .song-tally {
   display: flex;
   flex-direction: column;
@@ -263,7 +271,51 @@
   max-width: 60%;
   margin-right: calc(var(--songs-u) * 0.2222);
 }
+.song-tally-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(var(--songs-u) * 1.1111);
+  max-width: 100%;
+  min-width: 0;
+}
+/* Under the section's class: the page's `.music-app button { font: inherit; color: inherit }`
+   (music.css) would otherwise win and set it in the pane's 16 px ink. Its type is the count
+   note's, as the shelf's ● 012 is the shelf's small type. */
+.music-song .song-go-playing {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: calc(var(--songs-u) * 0.6667);
+  height: max(22px, calc(var(--songs-u) * 2.6667));
+  margin: 0 calc(var(--songs-u) * -0.4444);
+  padding: 0 calc(var(--songs-u) * 0.4444);
+  font-size: max(10px, calc(var(--songs-u) * 1.1111));
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+.music-song .song-go-playing:hover {
+  color: var(--ink);
+}
+.song-go-playing i {
+  display: block;
+  flex: none;
+  width: max(5px, calc(var(--songs-u) * 0.5556));
+  height: max(5px, calc(var(--songs-u) * 0.5556));
+  border-radius: 50%;
+  background: var(--state);
+}
+.music-app .song-go-playing:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
+}
 .song-count {
+  min-width: 0;
   max-width: 100%;
   padding: calc(var(--songs-u) * 0.6667) var(--songs-u);
   background: var(--tag-bg);
@@ -357,16 +409,6 @@
   outline: 1px solid var(--ink);
   outline-offset: -2px;
 }
-/* What play cannot do here, or why songs cannot play: quiet, at the bottom of the side column. */
-.song-note {
-  grid-area: note;
-  align-self: end;
-  margin: 0;
-  padding-right: var(--songs-gap);
-  font-size: max(10px, calc(var(--songs-u) * 1.2222));
-  line-height: 1.7;
-  color: var(--muted);
-}
 
 /* The list: a rule over it and nothing else, so the pane's dots show through its rows. */
 .song-list {
@@ -433,6 +475,7 @@
   opacity: 0;
 }
 .song-row-number {
+  grid-area: 1 / 1;
   display: flex;
   align-items: center;
   height: 11px;
@@ -442,7 +485,53 @@
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* ▶ in the number's cell (NetEase's own list, the owner, 2026-10-08): on a playable row that is
+   hovered, focused or selected, while the list's songs can be played (data-play; NetEase's queue
+   also while its port may not be used for a reason the user can change, where ▶ says why: the
+   owner, 2026-10-09) — never on the row that plays, which keeps its meter, nor on one NetEase has
+   been asked for; on the playing row only while it is paused and can be resumed (data-resume).
+   Clicking it plays the row's song;
+   one click on the rest of the row only selects it, a double-click or a double tap plays it too
+   (song-list.ts rowClickKind; it selects no text, the row being a button). Its box is the whole
+   number column, reaching a little left of the number, to be easy to hit. A tap hovers the row
+   as it lands, so ▶ turns up under
+   the finger: a tap or a pen's press plays only where ▶ showed before it, and otherwise selects
+   the row (rowPressPlays, song-list.ts). */
+.song-row-play {
+  grid-area: 1 / 1;
+  display: none;
+  position: relative;
+  align-self: center;
+  height: calc(var(--songs-u) * 3.1111);
+  margin-left: calc(var(--songs-u) * -0.8889);
+  cursor: pointer;
+}
+.song-row-play::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(var(--songs-u) * 0.8889);
+  width: 0;
+  height: 0;
+  border-left: max(8px, calc(var(--songs-u) * 0.9444)) solid var(--ink);
+  border-top: max(4.5px, calc(var(--songs-u) * 0.5556)) solid transparent;
+  border-bottom: max(4.5px, calc(var(--songs-u) * 0.5556)) solid transparent;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+.song-row-play:hover::before {
+  opacity: 0.65;
+}
+.music-song[data-play="true"] .song-row:not(.playing, .pending):is(:hover, :focus-visible, .selected) .song-row-play,
+.music-song[data-resume="true"] .song-row.playing:not(.pending):is(:hover, :focus-visible, .selected) .song-row-play {
+  display: block;
+}
+.music-song[data-play="true"] .song-row:not(.playing, .pending):is(:hover, :focus-visible, .selected):has(.song-row-play) .song-row-number,
+.music-song[data-resume="true"] .song-row.playing:not(.pending):is(:hover, :focus-visible, .selected):has(.song-row-play) .song-row-number {
+  visibility: hidden;
+}
 .song-row-copy {
+  grid-area: 1 / 2;
   min-width: 0;
 }
 .song-row-copy strong,
@@ -465,6 +554,7 @@
   color: var(--muted);
 }
 .song-row-meta {
+  grid-area: 1 / 3;
   font-size: max(10px, calc(var(--songs-u) * 1.2222));
   line-height: 1;
   color: var(--muted);
@@ -479,32 +569,43 @@
   outline: 1px solid var(--ink);
   outline-offset: -1px;
 }
-/* Playing: a three-bar level meter in the playback colour instead of the number. */
-@property --song-meter-a {
-  syntax: "<length>";
-  inherits: false;
-  initial-value: 6px;
-}
-@property --song-meter-b {
-  syntax: "<length>";
-  inherits: false;
-  initial-value: 10px;
-}
-@property --song-meter-c {
-  syntax: "<length>";
-  inherits: false;
-  initial-value: 8px;
-}
+/* Playing: a three-bar level meter in the playback colour instead of the number: 2 px bars of 6,
+   10 and 8 px at 0, 4 and 8 px, each on its own period, from 45% of its height to all of it
+   (song-list.ts SONG_METER: its one element goes into the playing row, and the page's frame loop
+   scales the bars from their feet about 60 times a second, tickMeter). As the cell's background with
+   animated heights it restyled and repainted the list on every display frame; as an animation of
+   its own it had the pane composited at the display's rate. Whole while paused. */
 .song-row.playing .song-row-number {
+  position: relative;
   color: transparent;
-  background:
-    linear-gradient(var(--state), var(--state)) 0 100% / 2px var(--song-meter-a) no-repeat,
-    linear-gradient(var(--state), var(--state)) 4px 100% / 2px var(--song-meter-b) no-repeat,
-    linear-gradient(var(--state), var(--state)) 8px 100% / 2px var(--song-meter-c) no-repeat;
-  animation:
-    song-level 700ms ease-in-out infinite,
-    song-level-b 820ms ease-in-out 120ms infinite,
-    song-level-c 940ms ease-in-out 240ms infinite;
+}
+.song-meter {
+  display: none;
+}
+.song-row.playing .song-meter {
+  display: block;
+  position: absolute;
+  left: 0;
+  bottom: 0;
+}
+.song-meter i {
+  position: absolute;
+  bottom: 0;
+  width: 2px;
+  background: var(--state);
+  transform-origin: 50% 100%;
+}
+.song-meter i:nth-child(1) {
+  left: 0;
+  height: 6px;
+}
+.song-meter i:nth-child(2) {
+  left: 4px;
+  height: 10px;
+}
+.song-meter i:nth-child(3) {
+  left: 8px;
+  height: 8px;
 }
 /* Selected: the light band, the ink bar and a heavier title (the playing title is heavier too). */
 .song-row.selected {
@@ -527,9 +628,7 @@
   content: "正在切换 · ";
   color: var(--ink);
 }
-/* Paused, stopped or unknown: the meter keeps its bars and holds still. */
-.music-song[data-paused="true"] .song-row.playing .song-row-number,
-.music-app.reduce-motion .song-row.playing .song-row-number,
+/* Reduced motion: the pending row's bar holds still (the meter's bars do with it: tickMeter). */
 .music-app.reduce-motion .song-row.pending::before {
   animation: none;
 }
@@ -554,15 +653,14 @@
 }
 
 /* Too narrow for a column beside the list: the selected song (its steps at the right) goes
-   between the head and the list, and the note under the list. */
+   between the head and the list. */
 .music-song[data-panel="stacked"] .song-glass {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   grid-template-areas:
     "head"
     "selected"
-    "list"
-    "note";
+    "list";
   --songs-start: calc(var(--songs-u) * 2.4);
   --songs-end: calc(var(--songs-u) * 2.2);
 }
@@ -593,30 +691,10 @@
   grid-row: 1 / span 2;
   margin: 0;
 }
-/* The note under the list: always when stacked, and in a wide window too short for the side
-   column to hold it under the selected song. A 1 px rule ends the list above it, so a row cut by the
-   list's bottom edge does not run into the note. */
-.music-song[data-note="under"] .song-note {
-  align-self: auto;
-  padding: calc(var(--songs-u) * 1.2) 0 0;
-  border-top: 1px solid var(--line);
-  line-height: 1.6;
-}
-.music-song[data-panel="wide"][data-note="under"] .song-glass {
-  grid-template-rows: calc(var(--songs-u) * 12) auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "head head"
-    "selected list"
-    ". list"
-    ". note";
-}
 .music-app[data-layout="portrait"] .song-caption {
   display: none;
 }
 @media (min-width: 1700px) {
-  .music-app[data-layout="desktop"] .song-exits .song-details {
-    margin-top: 19px;
-  }
   .music-app[data-layout="desktop"] .song-caption {
     bottom: 28px;
     gap: 16px;
@@ -629,32 +707,4 @@
 }
 .music-app[data-layout="compact"] .song-caption {
   bottom: 18px;
-}
-
-@keyframes song-level {
-  0%,
-  100% {
-    --song-meter-a: 2.7px;
-  }
-  50% {
-    --song-meter-a: 6px;
-  }
-}
-@keyframes song-level-b {
-  0%,
-  100% {
-    --song-meter-b: 4.5px;
-  }
-  50% {
-    --song-meter-b: 10px;
-  }
-}
-@keyframes song-level-c {
-  0%,
-  100% {
-    --song-meter-c: 3.6px;
-  }
-  50% {
-    --song-meter-c: 8px;
-  }
 }

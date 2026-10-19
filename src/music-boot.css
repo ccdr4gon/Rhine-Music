@@ -6,17 +6,49 @@
   background: transparent;
   outline: none;
 }
-.music-boot-skip {
+/* 跳过 (the owner, 2026-10-17: "change this button's text just to 跳过 and remove the box around
+   it"): a word where the header's row ends (the row is hidden while the opening runs), in the row's
+   type, with no box and no focus ring (it has the focus for screen readers, but any key skips: the
+   keyboard has nowhere else to go). Its places follow the header's (music-chrome.css, window-frame.css);
+   the page's button reset (font: inherit) is outranked. */
+.music-app .music-boot-skip {
   position: absolute;
   right: 40px;
-  top: 33px;
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  background: var(--veil);
+  top: 44px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--ink);
   font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
+  transition: opacity 120ms ease;
 }
-@media (max-width: 700px) {
-  .music-boot-skip { top: 23px; right: 20px; font-size: 11px; }
+.music-app .music-boot-skip:hover {
+  opacity: 0.65;
+}
+.music-app .music-boot-skip:focus-visible {
+  outline: none;
+}
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] .music-boot-skip {
+    right: 60px;
+    top: 57px;
+    height: 28px;
+    font-size: 14px;
+  }
+}
+.music-app[data-layout="compact"] .music-boot-skip {
+  right: 25px;
+  top: 26px;
+  font-size: 11px;
+}
+.music-app[data-layout="portrait"] .music-boot-skip {
+  right: 20px;
+  top: 22px;
+  font-size: 11px;
 }

@@ -34,10 +34,16 @@ export class PlaybackClock {
       return;
     }
     const estimate = track === this.track ? this.position(now) : undefined;
-    // A whole-second reading means the true position is somewhere within that second.
-    const agrees = estimate !== undefined && estimate >= position - 0.25 && estimate < position + 1.25;
+    // A whole-second reading means the true position is somewhere within that second. Just after
+    // Rhine's own seek only a reading of the target's own second agrees: NetEase may still report a
+    // second it passed on its way there (2026-10-12: paused, → three times to 3 s, a reading of 2 s
+    // was taken and shown for two seconds).
+    const holding = now < this.hold;
+    const agrees = estimate !== undefined && (holding
+      ? estimate >= position - 0.05 && estimate < position + (playing ? 1.05 : 1)
+      : estimate >= position - 0.25 && estimate < position + 1.25);
     this.track = track;
-    if (estimate !== undefined && !agrees && now < this.hold) {
+    if (estimate !== undefined && !agrees && holding) {
       // A seek was just sent and NetEase still shows where it was: keep the target.
       this.base = estimate;
       this.at = now;

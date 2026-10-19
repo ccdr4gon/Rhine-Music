@@ -195,6 +195,92 @@ pub fn read(path: &Path, covers: bool) -> Result<Metadata, String> {
     Ok(output)
 }
 
+/// The lyrics in a song's own tags, only read: in an ID3v2 tag its synchronised lyrics timed in
+/// milliseconds (SYLT) as LRC lines, else its lyrics text (USLT); in other tags their lyrics text
+/// (a Vorbis comment LYRICS or UNSYNCEDLYRICS, MP4 ©lyr, APE Lyrics). Lyrics text is often LRC
+/// itself. None for DSD files, which are only indexed, and for songs without lyrics.
+pub fn lyrics(path: &Path) -> Option<String> {
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    if extension == "dsf" || extension == "dff" {
+        return None;
+    }
+    if matches!(extension.as_str(), "mp3" | "aac" | "wav" | "aif" | "aiff") {
+        if let Ok(tag) = id3::Tag::read_from_path(path) {
+            let text = tag.synchronised_lyrics().find_map(synchronised_lyrics).or_else(|| {
+                tag.lyrics()
+                    .map(|lyrics| lyrics.text.as_str())
+                    .find(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+            });
+            if text.is_some() {
+                return text;
+            }
+        }
+    }
+    let options = ParseOptions::new()
+        .read_properties(false)
+        .read_cover_art(false);
+    let parsed = Probe::open(path)
+        .ok()?
+        .options(options)
+        .guess_file_type()
+        .ok()?
+        .read()
+        .ok()?;
+    parsed.tags().iter().find_map(|tag| {
+        [ItemKey::Lyrics, ItemKey::UnsyncLyrics]
+            .into_iter()
+            .find_map(|key| tag.get_string(key))
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// SYLT lyrics as LRC text. A part that starts with a line break starts a line (the ID3v2 way),
+/// and a line of several parts times each of them (enhanced LRC); a frame without such breaks
+/// has a line per part, as most taggers write it.
+fn synchronised_lyrics(lyrics: &id3::frame::SynchronisedLyrics) -> Option<String> {
+    use id3::frame::{SynchronisedLyricsType as Kind, TimestampFormat};
+    if lyrics.timestamp_format != TimestampFormat::Ms
+        || !matches!(lyrics.content_type, Kind::Lyrics | Kind::Other)
+    {
+        return None;
+    }
+    let breaks = |text: &str| text.starts_with(['\n', '\r']);
+    let marked = lyrics.content.iter().skip(1).any(|(_, text)| breaks(text));
+    let mut lines: Vec<Vec<(u32, &str)>> = Vec::new();
+    for (time, text) in &lyrics.content {
+        if lines.is_empty() || !marked || breaks(text) {
+            lines.push(Vec::new());
+        }
+        lines
+            .last_mut()?
+            .push((*time, text.trim_start_matches(['\n', '\r'])));
+    }
+    let stamp = |ms: u32| format!("{:02}:{:02}.{:02}", ms / 60_000, ms / 1000 % 60, ms % 1000 / 10);
+    let text = lines
+        .iter()
+        .map(|parts| match parts.as_slice() {
+            [(time, text)] => format!("[{}]{}", stamp(*time), text.trim_end()),
+            // Timed parts without words: a pause, not stamps alone.
+            _ if parts.iter().all(|(_, text)| text.trim().is_empty()) => format!("[{}]", stamp(parts[0].0)),
+            _ => {
+                let timed: String = parts
+                    .iter()
+                    .map(|(time, text)| format!("<{}>{text}", stamp(*time)))
+                    .collect();
+                format!("[{}]{}", stamp(parts[0].0), timed.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn adpcm_wave_properties(reader: &mut (impl Read + Seek)) -> Result<Value, String> {
     let length = reader.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
     reader.rewind().map_err(|e| e.to_string())?;

@@ -143,6 +143,14 @@ export async function createMusicServer({
         if (!file) return json(response, 404, { error: '索引中没有此文件' })
         return await serveFile(request, response, file, { cache: artwork ? 'private, max-age=3600' : 'private, no-cache' })
       }
+      // A song's lyrics (its .lrc, else its tags) as their bytes, which the page decodes; 204 when it has none.
+      const lyrics = /^\/api\/lyrics\/([a-zA-Z0-9-]+)$/.exec(route)
+      if (lyrics && get) {
+        const bytes = await store.lyrics(lyrics[1])
+        if (bytes === undefined) return json(response, 404, { error: '索引中没有此文件' })
+        response.writeHead(bytes ? 200 : 204, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...(bytes ? { 'Content-Length': bytes.length } : {}) })
+        return response.end(bytes && request.method !== 'HEAD' ? bytes : undefined)
+      }
       if (route === '/api/foobar/status' && get) return json(response, 200, { configured: !!store.config.foobarBaseUrl, baseUrl: store.config.foobarBaseUrl, connected: false, note: 'configured 仅代表已保存地址；连接状态需读取 /api/foobar/player 实际响应。' })
       if (route.startsWith('/api/foobar/')) {
         if (!store.config.foobarBaseUrl) return json(response, 503, { error: 'foobar2000 / Beefweb 尚未配置连接' })

@@ -55,6 +55,12 @@ export interface MusicAlbum {
   rawGenres: string[];
   folder: string;
   coverUrl?: string;
+  /**
+   * The picture, where its address can change while the picture does not (NetEase serves one
+   * picture from any of its image servers): the covers and the shelf compare cases by it. The
+   * address otherwise.
+   */
+  coverKey?: string;
   tracks: MusicTrack[];
   producers: MusicProducer[];
   offline: boolean;

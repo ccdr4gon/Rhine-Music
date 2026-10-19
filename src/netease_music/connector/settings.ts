@@ -4,20 +4,22 @@ import type { DebugState, NeteasePlaylist } from "../data/queue";
 import { isNeteaseSource } from "./player";
 
 export interface QueueControl {
-  /** The user lets the play button ask NetEase, through its debugging port, to play the selected song. */
-  enabled: boolean;
   /** NetEase's debugging port answered the last poll. */
   available: boolean;
   status: string;
   /** A poll found the port closed: offer to restart NetEase with it. */
   restart: boolean;
 }
-export function queueControlStatus(control: Pick<QueueControl, "enabled" | "available">, debug?: DebugState) {
-  if (!control.enabled) return "";
-  if (!control.available) return "未检测到网易云调试端口（9233）。以调试端口启动网易云后，点播放才能播放选中的歌。";
+/**
+ * `playKey`: the key the user gave 播放选中的歌 (设置 → 快捷键; P by default, "" for none). These
+ * sentences name it; with P they read word for word as the owner approved them (the owner,
+ * 2026-10-11: "yes keep every key changable", P included).
+ */
+export function queueControlStatus(control: Pick<QueueControl, "available">, debug?: DebugState, playKey = "P") {
+  if (!control.available) return `未检测到网易云调试端口（9233）。以调试端口启动网易云后，点 ▶${playKey ? ` 或按 ${playKey}` : ""} 才能播放选中的歌。`;
   return debug?.mode === "playFm"
-    ? "已连接网易云调试端口。私人 FM 模式下不能播放队列中的歌。"
-    : "已连接网易云调试端口：浏览时不切歌，点播放（或按空格）时网易云播放选中的歌。";
+    ? "已连接网易云调试端口。私人 FM 模式下不能播放队列或歌单中的歌。"
+    : `已连接网易云调试端口：浏览时不切歌，点 ▶${playKey ? `（或按 ${playKey}）` : " "}时网易云播放选中的歌。`;
 }
 
 /**
@@ -36,9 +38,12 @@ export function playlistSummary(playlists: readonly NeteasePlaylist[], truncated
 }
 
 export function queueSettingMarkup(source: ExternalMediaSource | undefined, enabled: boolean, status: string, control: QueueControl,
-  playlists: { enabled: boolean; status: string } = { enabled: true, status: "" }) {
+  playlists: { enabled: boolean; status: string } = { enabled: true, status: "" }, playKey = "P") {
+  const key = esc(playKey);
   if (!isNeteaseSource(source)) return "";
   const queue = `<label class="settings-row external-queue-consent"><span>显示网易云播放队列<small>读取网易云保存在本机的当前播放队列，仅取歌曲编号、歌名、歌手、专辑、时长和封面地址；封面从网易云公开图片服务器加载。不读取账号、Cookie、播放历史或本地歌曲路径。打开后默认同时按歌单分列（读取本机歌单，见下方），可单独关闭。</small></span><input type="checkbox" id="netease-queue" ${enabled ? "checked" : ""}></label><p class="external-note" data-queue-status role="status">${esc(status)}</p>`;
   if (!enabled) return queue;
-  return `${queue}<label class="settings-row external-queue-consent"><span>点播放时让网易云播放选中的歌<small>浏览时不切歌。选中队列中的一首歌后点播放（或按空格），通过网易云的调试端口（仅本机 127.0.0.1:9233）让它播放这首歌，不改变队列顺序；同时显示播放进度，并可拖动进度条。需要以调试端口启动网易云；端口开启期间，本机其他程序也能控制网易云。</small></span><input type="checkbox" id="netease-control" ${control.enabled ? "checked" : ""}></label><p class="external-note" data-debug-status role="status">${esc(control.status)}</p><div class="panel-actions" data-debug-restart ${control.restart ? "" : "hidden"}><button id="netease-restart-debug" data-action="netease-restart-debug">以调试端口重新启动网易云</button></div><label class="settings-row external-queue-consent"><span>按歌单分列<small>默认打开。读取网易云保存在本机的歌单数据（Library\\webdb.dat，只读），仅取你创建的歌单（含“我喜欢的音乐”）的编号、名称、歌曲数与封面地址，以及其中歌曲的编号、歌名、歌手、专辑、时长和封面地址；并使用播放队列的来源歌单编号与名称。每个有歌曲数据的歌单是一列，列旁标出歌单名称，专辑架右侧的歌单列表也列出名称与歌曲数；正在播放的那个歌单显示播放队列本身，其余各列只供浏览、不会切歌。不读取收藏的歌单、账号、Cookie 或播放历史。Rhine 不保存歌单名称和歌曲列表；封面图片从网易云公开图片服务器加载，会留在界面缓存里。</small></span><input type="checkbox" id="netease-playlists" ${playlists.enabled ? "checked" : ""}></label><p class="external-note" data-playlist-status role="status">${esc(playlists.enabled ? playlists.status : "")}</p>`;
+  // The debugging port is no switch (the owner, 2026-10-09: "do not make this a setting option"): what
+  // it is used for stays written here, with its status and the restart.
+  return `${queue}<div class="settings-row external-queue-consent external-debug-port"><span>网易云调试端口<small>浏览时不切歌。以调试端口启动网易云后，点队列中一首歌的 ▶（或${key ? `选中它后按 ${key}、` : ""}打开它的详情），通过网易云的调试端口（仅本机 127.0.0.1:9233）让它播放这首歌，不改变队列顺序；点其他歌单里一首歌的 ▶（同样可${key ? `按 ${key}、` : ""}打开详情），让网易云从这首歌开始播放这个歌单，与在网易云的歌单里双击这首歌相同：网易云的播放队列换成这个歌单，歌单的编号与名称交给网易云作为队列的来源。同时显示播放进度，并可拖动进度条。正在播放的歌的详情里显示它的歌词：Rhine 请网易云载入这首歌的歌词（与打开网易云的播放页时相同，网易云从它的缓存或服务器取得，界面不变），再读取每行歌词的时间、文字、翻译与逐字时间；只读取正在播放的这首歌的歌词，只留在 Rhine 的内存里，不保存、不发送。端口开启期间，本机其他程序也能控制网易云。</small></span></div><p class="external-note" data-debug-status role="status">${esc(control.status)}</p><div class="panel-actions" data-debug-restart ${control.restart ? "" : "hidden"}><button id="netease-restart-debug" data-action="netease-restart-debug">以调试端口重新启动网易云</button></div><label class="settings-row external-queue-consent"><span>按歌单分列<small>默认打开。读取网易云保存在本机的歌单数据（Library\\webdb.dat，只读），仅取你创建的歌单（含“我喜欢的音乐”）的编号、名称、歌曲数与封面地址，以及其中歌曲的编号、歌名、歌手、专辑、时长和封面地址；并使用播放队列的来源歌单编号与名称。每个有歌曲数据的歌单是一列，列旁标出歌单名称，专辑架右侧的歌单列表也列出名称与歌曲数；正在播放的那个歌单显示播放队列本身；其余各列里点一首歌的 ▶，网易云从这首歌开始播放那个歌单（见上方的网易云调试端口）。不读取收藏的歌单、账号、Cookie 或播放历史。Rhine 不保存歌单名称和歌曲列表；封面图片从网易云公开图片服务器加载，会留在界面缓存里。</small></span><input type="checkbox" id="netease-playlists" ${playlists.enabled ? "checked" : ""}></label><p class="external-note" data-playlist-status role="status">${esc(playlists.enabled ? playlists.status : "")}</p>`;
 }

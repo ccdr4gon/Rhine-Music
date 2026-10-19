@@ -1,6 +1,7 @@
 import "@kitlangton/rolling-number/styles.css";
 import { flushDesktopPreferences, isDesktop, saveDesktopPreferences } from "./desktop";
 import { chooseMusicFolders } from "./local_music/connector/folders";
+import { LocalLyrics } from "./local_music/connector/lyrics-api";
 import {
   readLibrary, scanLibrary, enrichLibrary, startIntroductions, readOnlineConfig, saveOnlineConfig,
 } from "./local_music/connector/library-api";
@@ -19,9 +20,9 @@ import "./music-chrome.css";
 import "./music-shelf.css";
 import "./music-detail.css";
 import "./song-scene.css";
-import { laneTrackKey, queueTrackKey } from "./netease_music/data/queue";
+import { caseSong, laneTrackKey, queueTrackKey } from "./netease_music/data/queue";
 import { NETEASE_NAME, isNeteaseSource } from "./netease_music/connector/player";
-import { NeteaseSession } from "./netease_music/connector/session";
+import { NeteaseSession, PORT_BLOCK_NOTICE, type PortBlock } from "./netease_music/connector/session";
 import { queueSettingMarkup } from "./netease_music/connector/settings";
 import {
   playerLinks, playerMediaPort, pageSource, sourceAddress, markSourceSwitch, takeSourceSwitch, type SourceKind,
@@ -29,12 +30,15 @@ import {
 import { type LaneName } from "./lane-labels";
 import { installWindowFrame } from "./window-frame";
 import { WheelNavigation, WHEEL_PIXELS_PER_ROW } from "./wheel-navigation";
+import { FrameCap } from "./frame-cap";
 import {
   ExternalMediaConnection, nativeMediaPort, mediaLibrary, mediaVisualKey,
-  mediaConnectionLabel, mediaPlaybackLabel, mediaTime, mediaSourcesMarkup,
+  mediaConnectionLabel, mediaTime, mediaSourcesMarkup,
   mediaPermissionMarkup, spacedName, type MediaAction, type SourceLink,
 } from "./external_player/external-media";
 import { DocumentDecryption } from "./document-decryption";
+import type { Lyrics } from "./lyrics";
+import { LyricsView, type LyricsClock } from "./lyrics-view";
 import { ContentTransition, SurfaceTransition, DETAIL_SCENE, DETAIL_SWAP, SONG_SCENE } from "./ui-transitions";
 import { qualityMarkup, syncQualityUI } from "./quality-settings";
 import { ArchiveScene } from "./scene";
@@ -78,8 +82,13 @@ import { MusicTrackFocus } from "./music-track-focus";
 import { MusicBoot } from "./music-boot";
 import { songCardRect, viewportLayout } from "./viewport-layout";
 import { SongListView, playlistSongModel, queueSongModel, songSceneMarkup } from "./song-list";
+import {
+  SHORTCUTS, actionKeys, allowed, assign, changed, clear, eventCode, holder, isExtra, keyLabel,
+  keyboardLayout, reset, sanitize, shortcutEvent, shortcutInfo, shortcutTable, slotAction, slotKey,
+  spokenKey, type KeyLayout, type ShortcutAction, type ShortcutInfo, type ShortcutOverrides, type ShortcutSlot,
+} from "./shortcuts";
 import { SONG_VIEW } from "./song-pose";
-import { MUSIC_MODEL } from "./music-model";
+import { MUSIC_COVER, MUSIC_MODEL } from "./music-model";
 
 type Theme = "day" | "night";
 type Panel = "library" | "search" | "settings" | "sources" | null;
@@ -103,14 +112,16 @@ const skipGlyph = (direction: "prev" | "next") => direction === "prev"
   : '<i class="skip-tri skip-right" aria-hidden="true"></i><i class="skip-bar" aria-hidden="true"></i>';
 /**
  * The shelf's key hints, centred at the bottom: moving never plays (选歌, not 换歌), Enter opens
- * the details, S the song scene, Space plays or pauses (a small triangle instead of words). A
- * lone live track (no queue) has only the details and play / pause.
+ * the details, S the song scene (its link's word: 歌单歌曲 in a NetEase playlist column), P plays
+ * the selected song (a small triangle), L goes back to the song that plays, Space pauses or
+ * resumes it (two bars). Written once; each shows only while its key can act (syncKeyHint), and
+ * no sentence takes the place of one that cannot. P, L and SPACE wait hidden for the first sync.
  */
-function keyHintMarkup(queue: boolean) {
-  const hint = (key: string, words: string) => `<span class="hint"><kbd>${key}</kbd><span>${words}</span></span>`;
-  const space = '<span class="hint"><kbd>SPACE</kbd><i class="hint-play" aria-hidden="true"></i><span class="sr-only">播放 / 暂停</span></span>';
-  if (playerCurrent && !queue) return hint("ENTER", "查看") + space;
-  return hint("↑ ↓", "选歌") + hint("ENTER", "查看") + hint("S", playerCurrent ? "播放列表" : "选歌") + space;
+function keyHintMarkup() {
+  const hint = (name: string, key: string, words: string, hidden = false) => `<span class="hint" data-hint="${name}"${hidden ? " hidden" : ""}><kbd>${key}</kbd><span>${words}</span></span>`;
+  const glyph = (name: string, key: string, mark: string, words: string) => `<span class="hint" data-hint="${name}" hidden><kbd>${key}</kbd><i class="${mark}" aria-hidden="true"></i><span class="sr-only">${words}</span></span>`;
+  return hint("move", "↑ ↓", "选歌") + hint("enter", "ENTER", "查看") + hint("songs", "S", playerCurrent ? "播放列表" : "选歌")
+    + glyph("play", "P", "hint-play", "播放选中的歌") + hint("back", "L", "正在播放", true) + glyph("space", "SPACE", "hint-pause", "暂停 / 继续");
 }
 /**
  * The header row's sources (Claude Design's 播放器 · 本地音乐; the owner, 2026-10-06: one app, one
@@ -129,6 +140,8 @@ function sourceButtons() {
     : '<button data-action="library" aria-label="音乐库">音乐库</button><button data-action="search" aria-label="搜索">搜索<em class="topnav-menu-value">/</em></button>';
   return players + local + tools;
 }
+/** The 帧率上限 choices (frames a second; 0: as many as the display shows). */
+const FRAME_CAPS = [0, 144, 120, 90, 60, 30];
 const read =<T>(key: string, fallback: T): T => {
   try {
     return JSON.parse(localStorage.getItem(key) || "null") ?? fallback;
@@ -159,13 +172,19 @@ const preferences = {
     soundVolume: 0.22,
     renderQuality: undefined as RenderQuality | undefined,
     // While NetEase is the current source: show its saved play queue. Off until the user switches it on.
+    // (▶, P, opening a song's details, a double-clicked row and the shelf's and the details' ring on
+    // another song ask NetEase to play a song of its queue through its debugging port whenever the
+    // port answers: no switch, the owner, 2026-10-09, "do not make this a setting option".)
     neteaseQueue: false,
-    // The play button (and Space) asks NetEase to play the selected queue song through its
-    // debugging port (which also gives the progress and seeking); only while the port answers.
-    neteaseControl: true,
     // One shelf column per NetEase playlist, read from its local database once the queue is
     // shown. On unless switched off (the owner's choice, 2026-10-04).
     playlistColumns: true,
+    // The keys the user gave the scenes' actions (设置 → 快捷键; shortcuts.ts): only what differs
+    // from the defaults.
+    shortcuts: {} as ShortcutOverrides,
+    // 帧率上限 (设置 → 通用; the owner, 2026-10-11: "add a max frame option in settings"): at most
+    // this many runs of the frame loop, and so drawn frames, a second; 0 follows the display.
+    frameCap: 0,
   },
   ...read<
     Partial<{
@@ -182,8 +201,9 @@ const preferences = {
       soundVolume: number;
       renderQuality: RenderQuality;
       neteaseQueue: boolean;
-      neteaseControl: boolean;
       playlistColumns: boolean;
+      shortcuts: ShortcutOverrides;
+      frameCap: number;
       // The source chosen last, 本地音乐 or a player, and the player last connected (null after a
       // disconnect; read through readSourceLink): a plain start of the client opens that source
       // again and connects that player again (main.rs opens_player; the owner, 2026-10-06).
@@ -204,11 +224,19 @@ if (!Object.hasOwn(qualityPresets, preferences.quality))
   preferences.quality = "original";
 if (typeof preferences.intro !== "boolean") preferences.intro = true;
 // Keys of earlier builds, saved with every other preference: the playlist-name styles (gone),
-// and playlist columns when they were off by default (now under playlistColumns, so that the
-// old default does not outlive the new one).
-for (const key of ["laneLabels", "laneNameStyle", "neteasePlaylists"]) delete (preferences as Record<string, unknown>)[key];
+// playlist columns when they were off by default (now under playlistColumns, so that the
+// old default does not outlive the new one), and the switch for asking NetEase through its
+// debugging port (gone: the port is used whenever it answers; the owner, 2026-10-09).
+for (const key of ["laneLabels", "laneNameStyle", "neteasePlaylists", "neteaseControl"]) delete (preferences as Record<string, unknown>)[key];
 if (!["genre", "artist", "album"].includes(preferences.sortMode))
   preferences.sortMode = "genre";
+// The keys the user gave (shortcuts.ts sanitize): what this build cannot use, or two actions would
+// share, goes back to its default; that is said once the page shows (start).
+if (!FRAME_CAPS.includes(preferences.frameCap)) preferences.frameCap = 0;
+const savedShortcuts = sanitize(preferences.shortcuts);
+preferences.shortcuts = savedShortcuts.overrides;
+/** Which action each key of the lookup runs (P, S, L, / and the 附加键s), for the keydown handler. */
+let shortcutKeys = shortcutTable(preferences.shortcuts);
 // Where a plain start of the client opens (main.rs opens_player): the source this page shows,
 // saved on every load where it changed. An earlier build's mode (playerMode) was read by main.rs
 // to open this page, its last use: it is dropped (migrated to `source`).
@@ -261,7 +289,20 @@ const netease = new NeteaseSession({
   confirmSoon,
   refresh: refreshExternal,
   notify,
+  lyricsChanged: () => syncLyrics(),
 });
+// The details' lyrics (syncLyrics): their view, the local songs' reader and the two clocks.
+const lyricsView = new LyricsView();
+lyricsView.setReduced(preferences.reduced);
+const localLyrics = new LocalLyrics(() => syncLyrics());
+const neteaseLyricsClock: LyricsClock = {
+  position: () => netease.playbackClock.position(performance.now()),
+  playing: () => netease.debugState.playback === "playing",
+};
+const localLyricsClock: LyricsClock = {
+  position: () => (loadedTrack() ? player?.position : undefined),
+  playing: () => playerState?.transport === "playing",
+};
 // The columns are playlists, whatever the source: the main folder's subfolders for 本地音乐 (the
 // owner, 2026-10-06), NetEase's playlists while it is the current source. The earlier arrangement
 // setting (by genre, artist or album name) stays in the saved preferences (sortMode) but arranges
@@ -350,12 +391,12 @@ stage.innerHTML = `
   <div id="three-scene" class="three-scene"></div>
   <div class="music-vignette" aria-hidden="true"></div>
   <header class="music-header">
-    <div class="music-identity"><span class="music-brand"><strong>RHINE LAB</strong></span></div>
+    <div class="music-identity"><span class="music-brand"><strong>RHINE LAB</strong></span><button id="go-current" class="go-current" data-action="go-playing" data-shown="false" aria-label="回到当前"><i aria-hidden="true"></i><span>回到当前</span><kbd>L</kbd></button></div>
     <nav class="music-topnav" aria-label="音乐终端导航">
       <div class="topnav-modes" id="topnav-modes">
         ${sourceButtons()}
         <div class="topnav-theme"><span class="topnav-menu-only" aria-hidden="true">主题</span><div class="theme-switch" role="group" aria-label="主题">${(["day", "night"] as Theme[]).map((t) => `<button data-theme="${t}" aria-label="${themeNames[t]}主题" aria-pressed="${preferences.theme === t}">${themeNames[t]}</button>`).join("")}</div></div>
-        <button data-action="settings" aria-label="播放与画质设置"><span class="topnav-menu-only">播放与画质</span>设置<i class="topnav-menu-value topnav-menu-square" aria-hidden="true"></i></button>
+        <button data-action="settings" aria-label="设置">设置<i class="topnav-menu-value topnav-menu-square" aria-hidden="true"></i></button>
       </div>
       <i class="topnav-divider" aria-hidden="true"></i>
       <div class="minimal-transport" role="group" aria-label="音乐播放"><span class="now-playing"><i class="now-dot" aria-hidden="true"></i><span id="transport-track" class="transport-track" aria-hidden="true"><span id="transport-track-label"></span></span><span id="now-status" class="sr-only" role="status"></span></span>${playerCurrent ? `<button data-media-action="previous" class="transport-skip external-header-prev" aria-label="外部播放器上一曲" title="上一曲" disabled>${skipGlyph("prev")}</button>` : `<button data-action="previous-track" class="transport-skip transport-prev" aria-label="上一曲" title="上一曲" disabled>${skipGlyph("prev")}</button>`}<button data-action="play-pause" id="play-pause" class="play-ring" aria-label="播放" aria-pressed="false" data-ring="plain"><span class="transport-glyph transport-play" aria-hidden="true"></span><span class="transport-glyph transport-pause" aria-hidden="true"><i></i><i></i></span></button>${playerCurrent ? `<button data-media-action="next" class="transport-skip external-header-next" aria-label="外部播放器下一曲" title="下一曲" disabled>${skipGlyph("next")}</button>` : `<button data-action="next-track" class="transport-skip transport-next" aria-label="下一曲" title="下一曲" disabled>${skipGlyph("next")}</button>`}</div>
@@ -371,7 +412,7 @@ stage.innerHTML = `
       <h1 id="selection-title"></h1><p id="selection-artist" class="selection-artist"></p>
       <div class="selection-meta" id="selection-meta"><span class="selection-fact"><small id="selection-fact-a-key">专辑</small><span id="selection-fact-a" class="selection-fact-value"></span></span><span class="selection-fact selection-fact-count" ${playerCurrent ? "hidden" : ""}><small>曲目数</small><span id="selection-fact-b" class="selection-fact-value"></span></span></div>
       <div class="shelf-actions">
-        <div class="shelf-play"><button data-action="play-pause" id="shelf-play" class="play-ring play-ring-big" aria-label="播放" aria-pressed="false" data-ring="plain" ${playerCurrent ? "disabled" : ""}><span class="transport-glyph transport-play" aria-hidden="true"></span><span class="transport-glyph transport-pause" aria-hidden="true"><i></i><i></i></span></button><span id="shelf-play-note" class="shelf-play-note" data-dot="false"><i aria-hidden="true"></i><span></span></span></div>
+        <div class="shelf-play"><button data-action="shelf-play" id="shelf-play" class="play-ring play-ring-big" aria-label="播放" aria-pressed="false" data-ring="plain" ${playerCurrent ? "disabled" : ""}><span class="transport-glyph transport-play" aria-hidden="true"></span><span class="transport-glyph transport-pause" aria-hidden="true"><i></i><i></i></span></button><button id="shelf-play-note" class="shelf-play-note" data-action="go-playing" hidden><i aria-hidden="true"></i><span></span></button><span id="shelf-play-status" class="shelf-play-status" role="status"></span></div>
         <div class="shelf-links"><button class="open-album" data-action="open"><span id="open-album-label">${playerCurrent ? "当前曲目与控制" : "查看这首歌"}</span><i class="link-chevron" aria-hidden="true"></i></button><button class="open-songs" data-action="songs"><span id="open-songs-label">${playerCurrent ? "播放列表" : "选歌"}</span><i class="link-chevron" aria-hidden="true"></i></button></div>
       </div>
       <section id="playlist-drum" class="playlist-drum" aria-label="歌单" hidden>
@@ -383,7 +424,7 @@ stage.innerHTML = `
       <div class="music-counter"><span class="music-counter-label" id="selection-counter-label">歌曲</span><div><b id="selection-number">01</b><span>/ <i id="selection-total">00</i></span></div></div>
       <div class="album-stepper"><button data-action="prev" aria-label="上一首" title="上一首"><i class="chevron chevron-up" aria-hidden="true"></i></button><div class="ruler-box"><div id="album-ticks"></div></div><button data-action="next" aria-label="下一首" title="下一首"><i class="chevron chevron-down" aria-hidden="true"></i></button></div>
     </div>
-    <div class="music-keyhint" id="music-keyhint">${keyHintMarkup(false)}</div>
+    <div class="music-keyhint" id="music-keyhint">${keyHintMarkup()}</div>
   </section>
   <section id="music-detail" class="music-detail" aria-label="${playerCurrent ? "当前曲目" : "歌曲详情"}" hidden>
     <div class="detail-exits">
@@ -394,8 +435,8 @@ stage.innerHTML = `
     <article id="album-detail-content" tabindex="-1"><div id="detail-head" class="detail-head"></div><h1 id="detail-title" class="detail-title"></h1><div id="detail-body" class="detail-body"></div></article>
   </section>
   <section id="music-song" class="music-song" aria-label="歌曲选择" hidden>${songSceneMarkup()}</section>
-  <div id="music-empty" class="music-empty" hidden>${playerCurrent ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p id="external-empty-note">选择一个外部播放器，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。</p><button data-action="sources" id="external-empty-sources">选择播放器 ↗</button><button data-action="local-source" class="subtle">改用本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><p>选择一个音乐主文件夹：其中每个子文件夹是一个歌单，每首歌一张卡片，封面来自它的专辑。</p><button data-action="library">选择音乐主文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示歌单</button>'}</div>
-  <div id="music-panel-root"></div><div id="music-toast" role="status" aria-live="polite"></div>
+  <div id="music-empty" class="music-empty" hidden>${playerCurrent ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p id="external-empty-note" role="status" hidden></p><button data-action="sources" id="external-empty-sources">选择播放器 ↗</button><button data-action="local-source" class="subtle">改用本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><button data-action="library">选择音乐主文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示歌单</button>'}</div>
+  <div id="music-panel-root"></div><div id="music-toast" role="status" aria-live="polite"><span id="music-toast-text"></span><button id="music-toast-action" class="toast-action" type="button" hidden></button></div>
   <div id="music-loading"><span class="loading-orbit"></span>${sourceSwitch
     ? `<strong>SWITCHING SOURCE</strong><small>${playerCurrent ? "正在切换到播放器" : "正在切换到本地音乐"}</small>`
     : "<strong>OPENING THE ARCHIVE</strong><small>正在载入三维专辑架</small>"}</div>
@@ -596,16 +637,57 @@ function syncBracket() {
   if (!shown) return;
   ["--bl", "--bt", "--br", "--bb"].forEach((name, i) => selectionBracket.style.setProperty(name, `${edges[i]}px`));
 }
+// (The lifted case had a round ▶ of its own from 2026-10-07; the owner removed it on 2026-10-10:
+// "delete the marked button, we already have a play button on the right", the shelf's ring.)
+// These buttons hide once they have done their work (the selection is back on the song that plays):
+// a click leaves the focus where it was, so Enter still opens the details.
+for (const button of [$("#shelf-play-note"), $("#song-go-playing"), $("#go-current")])
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+// The rings that play their song (the shelf's and the details', ringPlay) keep the focus where it was
+// too: left on the ring, a later Enter would play the song browsed to instead of opening its details
+// (2026-10-09 review). The details' ring is written anew with each song, hence the delegation.
+document.addEventListener("mousedown", (event) => {
+  if ((event.target as Element | null)?.closest?.('#shelf-play, [data-action="detail-play"]')) event.preventDefault();
+}, true);
+/**
+ * A double press on a ring that plays its song (ringPlay) plays it once: the press after it within
+ * the double-click time does not pause it. Touch's double tap on a song row alike (song-list.ts).
+ */
+const DOUBLE_PRESS = { ms: 500, px: 16 } as const;
+/**
+ * The press found the header's menu (its compact or portrait form) open: a press elsewhere closes
+ * it (its focusout as the press takes the focus, else the page's click), so it is read here, before
+ * either. On the lifted case that press opens the details, as it always did, and plays nothing (the
+ * review of 2026-10-08: a click that dismisses a menu does not start music; openCase).
+ */
+let pressClosesMenu = false;
+stage.addEventListener("pointerdown", () => {
+  pressClosesMenu = stage.dataset.chromeMenu === "open";
+}, true);
 
-function notify(message: string) {
-  $("#music-toast").textContent = message;
-  $("#music-toast").classList.add("visible");
+/**
+ * A notice under the header's row, for 5.5 s. `action`: one button in it that opens a panel (the
+ * 播放器 panel for a song that cannot be played until the user changes something there:
+ * explainNoPlay), and the notice stays 8 s; the button closes it.
+ */
+function notify(message: string, action?: { label: string; panel: Exclude<Panel, null> }) {
+  const toast = $("#music-toast"), button = $<HTMLButtonElement>("#music-toast-action");
+  $("#music-toast-text").textContent = message;
+  button.hidden = !action;
+  if (action) {
+    button.textContent = action.label;
+    button.dataset.action = action.panel;
+  } else delete button.dataset.action;
+  toast.classList.add("visible");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(
-    () => $("#music-toast").classList.remove("visible"),
-    5500,
-  );
+  toastTimer = setTimeout(hideToast, action ? 8000 : 5500);
 }
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("#music-toast").classList.remove("visible");
+}
+// The notice's button acts through the page's click (its data-action) and the notice goes with it.
+$("#music-toast-action").addEventListener("click", hideToast);
 function time(value: number) {
   const n = Math.max(0, Math.floor(value || 0));
   return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
@@ -638,7 +720,7 @@ function cover(a: MusicAlbum, className = "") {
 }
 // The redaction stays on the facts, the track names and the introduction; the title has its reel.
 const documentDecryption = new DocumentDecryption(
-  ".detail-facts dd, .track-name strong, .album-about p",
+  ".detail-album, .detail-meta span, .track-name strong, .album-about p",
   0.35,
 );
 const tabTransition = new ContentTransition();
@@ -729,6 +811,7 @@ const presentation = new MusicPresentation({
       }
     }
     syncSelectionMotion();
+    syncLyrics();
   },
   prepareMenu: () => {
     if (menu === "song") {
@@ -759,6 +842,8 @@ const presentation = new MusicPresentation({
       songStay = false;
       if (section.hidden || section.dataset.transition === "closing" || section.dataset.transition === "closed") {
         songTransition.show(preferences.reduced);
+        // With a box now: 这首歌 level with the title's second line.
+        songView.alignDetails();
         pendingSongFocus = true;
       }
       section.inert = !!panel;
@@ -835,12 +920,22 @@ boot = new MusicBoot(stage, {
     else scene?.finishMusicIntro(now);
     effects.setScene("archive");
     showBrowseSurface();
+    showStartupNotice();
   },
   // A press during the fade-in shows the whole page at once: the shelf's own fade too.
   onRevealCut: () => browseTransition.finish(),
 });
+/**
+ * For the first seconds the shelf shows, its rolling text keeps the layers it otherwise has only
+ * while it rolls (music.css .layers-warm): the compositor builds their shaders behind the reveal,
+ * as it did while they were layers all the time, instead of on the first roll. On a cold shader
+ * cache (a new WebView2) that build stopped the picture for 4.7 s (measured 2026-10-10).
+ */
+stage.classList.add("layers-warm");
+let layersWarm: ReturnType<typeof setTimeout> | undefined;
 function showBrowseSurface() {
   if (!albums.length || boot?.active) return;
+  layersWarm ??= setTimeout(() => stage.classList.remove("layers-warm"), 3000);
   browseTransition.show(preferences.reduced);
   $("#music-browse").inert = !!panel;
   $("#music-browse").setAttribute("aria-hidden", "false");
@@ -966,7 +1061,8 @@ function fitChrome() {
   const room = (chrome: "row" | "menu", stacked: boolean) => {
     stage.dataset.chrome = chrome;
     stage.dataset.chromeStack = String(stacked);
-    const box = header.getBoundingClientRect(), brand = $(".music-brand").getBoundingClientRect();
+    // The wordmark and 回到当前 beside it, whose room is kept while it is hidden.
+    const box = header.getBoundingClientRect(), brand = $("#go-current").getBoundingClientRect();
     const transport = $(".minimal-transport"), gap = parseFloat(getComputedStyle(transport).columnGap) || 0;
     const shown = getComputedStyle(now).display !== "none";
     const fixed = nav.getBoundingClientRect().width - (shown ? now.getBoundingClientRect().width + gap : 0);
@@ -986,6 +1082,9 @@ function fitChrome() {
   nav.style.setProperty("--song-cap", `${Math.round(Math.max(0, Math.min(space, most))) + 14}px`);
   const bottom = header.getBoundingClientRect().bottom - stage.getBoundingClientRect().top;
   stage.style.setProperty("--chrome-bottom", `${Math.round(bottom)}px`);
+  // Where the wordmark's side ends (回到当前's room included): the song scene's line keeps clear of it.
+  const identity = $("#go-current").getBoundingClientRect().right - stage.getBoundingClientRect().left;
+  stage.style.setProperty("--identity-right", `${Math.round(identity)}px`);
 }
 /** The menu form's list (播放器来源, 本地音乐 and, while it is current, 音乐库 and 搜索; 主题, 设置). */
 function setChromeMenu(open: boolean, focusButton = false) {
@@ -1010,6 +1109,12 @@ function fit() {
   if (mode === "detail") documentDecryption.refresh();
 }
 window.addEventListener("resize", fit);
+// The header is fitted again whenever it or the wordmark's side changes size once laid out: a new
+// layout's margins and type (which can come frames after the resize is reported, as in Chromium's own
+// emulation, where the form chosen at the resize would otherwise stay), the fonts, 回到当前's key.
+const chromeWatch = new ResizeObserver(() => fitChrome());
+chromeWatch.observe($(".music-header"));
+chromeWatch.observe($(".music-identity"));
 
 async function loadLibrary(force = false) {
   if (playerCurrent) return;
@@ -1092,13 +1197,23 @@ function detailKey() {
 async function applyLibrary() {
   const hadAlbums = albums.length > 0;
   const previousId = currentAlbum()?.id;
+  const previousIndex = selected;
   const previousDetail = detailKey();
+  // The shelf as it was, for what still points into it (a selection on its way, a pending hop).
+  const previousRecords = records;
   const visualKey = (items: MusicAlbum[], groups: MusicGenre[]) =>
     JSON.stringify([
       items.map((a) => [a.id, a.title, a.artist, a.genreId, a.coverUrl]),
       groups.map((g) => [g.id, g.name]),
     ]);
+  // What the shelf shows, without its cases' keys (a NetEase picture on any of its image servers).
+  const shapeKey = (items: MusicAlbum[], groups: MusicGenre[]) =>
+    JSON.stringify([
+      items.map((a) => [a.title, a.artist, a.genreId, a.coverKey ?? a.coverUrl]),
+      groups.map((g) => [g.id, g.name]),
+    ]);
   const oldVisual = visualKey(albums, genres);
+  const oldShape = shapeKey(albums, genres);
   if (library.albums.length) demo = false;
   // The columns are playlists, in their own order: the main folder's (one case per song, as
   // NetEase's queue has it), or NetEase's.
@@ -1119,12 +1234,20 @@ async function applyLibrary() {
     0,
     records.findIndex((r) => r.id === previousId),
   );
-  if (playerCurrent && records.length && records[selected]?.id !== previousId) {
+  // A playlist asked to play from one of its songs (the owner, 2026-10-10) has become NetEase's
+  // queue: the case it was asked from is gone, and the song asked for has a case of the queue's
+  // own in the same column. The selection moves to it, and the request stands until NetEase
+  // reports the song.
+  const gone = playerCurrent && records.length > 0 && records[selected]?.id !== previousId;
+  const jump = gone ? netease.queueJump : undefined;
+  const asked = jump?.from && jump.from === previousId ? records.findIndex((record) => record.id === jump.key) : -1;
+  if (asked >= 0) selected = asked;
+  else if (gone) {
     // The box the user rested on is gone: it left NetEase's queue, or its column became or
     // stopped being the queue (the queue's cases have keys of their own). Nothing to play:
     // follow NetEase again from the song it plays now, whichever column that is. Asked of
     // the new queue (queuePlaying is still the last poll's), and never left in a column that
-    // is only for browsing, where following stops.
+    // is not the queue, where following stops.
     netease.forgetQueueJumps();
     netease.queueFollowPaused = false;
     const key = netease.playingKey();
@@ -1143,7 +1266,46 @@ async function applyLibrary() {
     }),
   );
   if (records[selected]) columnMemory.set(fileLocation(selected).lane, records[selected].id);
-  if (scene && ready && oldVisual !== visualKey(albums, genres)) {
+  // Where a case of the shelf as it was stands now: the same key, else the same song in the same
+  // column (a playlist's cases and NetEase's queue's have keys of their own); -1 when it is gone.
+  const moved = (index: number) => {
+    const before = previousRecords[index];
+    if (!before) return -1;
+    const same = records.findIndex((record) => record.id === before.id);
+    if (same >= 0) return same;
+    const song = caseSong(before.id), column = before.album?.genreId;
+    return records.findIndex((record) => record.album?.genreId === column && caseSong(record.id) === song);
+  };
+  // Only on NetEase's queue shelf: a source with one card is built again for each song, as before.
+  const anchor = playerCurrent && hadAlbums && !!netease.shownQueue() ? moved(previousIndex) : -1;
+  const shapeChanged = oldShape !== shapeKey(albums, genres);
+  if (scene && ready && oldVisual !== visualKey(albums, genres) && anchor >= 0) {
+    // NetEase's queue moved to another playlist, or back, or NetEase's playlists were read again,
+    // and the song the selection rests on is still in its column. The cases took other keys, and
+    // where NetEase's own copy of a playlist differs from the one saved on this PC (a song more or
+    // less, another order, a picture on another of its image servers) other songs too. Nothing is
+    // torn down (2026-10-16, the owner: "when I switch to a new playlist and click the play button,
+    // it reloads the whole scene1"; 2026-10-10: the rebuild also closed and reopened the details or
+    // the song scene, about 4.5 s): the selection stays on its song where it now stands, the lifted
+    // case, the camera and an open details or song scene stay, the cases around take their songs in
+    // place (scene.relayout), and no cover is painted again (cover-atlas.ts keys a print by its
+    // picture). Where the selection has to go instead (following NetEase's song), it goes as any
+    // selection does. A selection still on its way, or a hop waiting for one, keeps its song.
+    const pending = presentation.pendingSelection;
+    if (pending) {
+      const index = moved(pending.index);
+      if (index >= 0) presentation.pendingSelection = { ...pending, index, navigation: undefined };
+      else presentation.pendingSelection = undefined;
+    }
+    if (gestureFor !== undefined) {
+      const index = moved(gestureFor);
+      gestureFor = index >= 0 ? index : undefined;
+    }
+    const target = selected;
+    selected = anchor;
+    scene.relayout(anchor);
+    if (target !== anchor) select(target);
+  } else if (scene && ready && oldVisual !== visualKey(albums, genres)) {
     const reopen = presentation.openingOrDetail;
     const reopenMenu = menu;
     cancelSearchTrack();
@@ -1202,7 +1364,8 @@ async function applyLibrary() {
     );
   }
   updateSelection();
-  if (mode === "detail" && previousDetail !== detailKey())
+  // The song scene lists the selected column: again when its songs changed under the selection.
+  if (mode === "detail" && (previousDetail !== detailKey() || (menu === "song" && shapeChanged)))
     menu === "song" ? renderSongs() : renderDetail();
   updateStatus();
 }
@@ -1226,16 +1389,16 @@ function updateStatus() {
     };
     // A remembered source is awaited by name, and nothing asks to choose (the 播放器 panel can
     // still change it); NetEase, while nothing was ever connected, beside the other players;
-    // after a disconnect, nothing is connected by itself.
+    // after a disconnect, nothing is connected by itself. The empty page says only what is under
+    // way or what the user must do (the owner, 2026-10-07: no descriptive text): 等待 X…, or which
+    // of several sessions to connect; otherwise its buttons speak for themselves.
     const preferredName = externalMedia.preferred?.name ?? "";
     const awaited = externalMedia.remembers && externalMedia.awaitsPreferred && !externalMedia.ambiguous;
-    setText($("#external-empty-note"), `${externalMedia.ambiguous
-      ? `${preferredName}有多个媒体会话，请选择要连接的一个`
-      : awaited
-        ? `等待${spacedName(preferredName)}…上次连接的是它，它出现后会自动连接`
-        : externalMedia.followsPreferred
-          ? `${preferredName}在运行时会自动连接，也可以选择其他播放器`
-          : "选择一个外部播放器"}，显示它的当前曲目与封面。这里只提供连接和控制，不导入曲库，也不播放本地音频。`);
+    const emptyNote = $("#external-empty-note");
+    const emptyText = externalMedia.ambiguous ? `${preferredName}有多个媒体会话，请选择要连接的一个`
+      : awaited ? `等待${spacedName(preferredName)}…` : "";
+    setText(emptyNote, emptyText);
+    if (emptyNote.hidden === !!emptyText) emptyNote.hidden = !emptyText;
     setText($("#external-empty-sources"), awaited ? "更换播放器 ↗" : "选择播放器 ↗");
     const queue = netease.shownQueue();
     // Diagnostics only (no longer shown): what the shelf holds.
@@ -1356,8 +1519,10 @@ function updateSelection(navigation?: ArchiveNavigation) {
   );
   titleMotion.update(a.title, animated);
   $("#selection-title").title = a.title;
+  // The ticks know a case by its song: the same songs under new keys (NetEase's queue moved to
+  // another playlist) are the same ticks, not a new group that ripples in.
   tickMotion.update(
-    files.map((index) => ({ index, id: records[index].id, title: records[index].title })),
+    files.map((index) => ({ index, id: caseSong(records[index].id), title: records[index].title })),
     selected,
     preferences.reduced,
     navigation,
@@ -1381,6 +1546,15 @@ function commitSelection(index: number, navigation?: ArchiveNavigation, keepDeta
       ? "column"
       : "tick",
   );
+  // ▶ on a song the selection was still moving to: its case hops now that it is the lifted one.
+  if (gestureFor !== undefined) {
+    const due = gestureFor === selected;
+    gestureFor = undefined;
+    if (due) {
+      scene?.playGesture();
+      if (records.length) tickMotion.ripple();
+    }
+  }
 }
 function select(index: number, navigation?: ArchiveNavigation, openAfter = presentation.openingOrDetail, route?: AlbumSelection["route"]) {
   if (!records.length || !ready || boot?.active || index < 0) return;
@@ -1402,7 +1576,7 @@ function select(index: number, navigation?: ArchiveNavigation, openAfter = prese
   // waiting for the shelf to settle.
   if (route === "archive" && mode === "archive") setMenu("detail");
   presentation.select({ index: wrap(index, records.length), navigation, route }, openAfter);
-  // The play button acts on where the selection is going: say so while a detail switch waits.
+  // P, L, ● and the key hints act on where the selection is going: follow it while a detail switch waits.
   syncPlayButton();
 }
 function navigationSelection() {
@@ -1458,6 +1632,7 @@ function setMode(next: "archive" | "detail") {
 function setMenu(next: "detail" | "song") {
   menu = next;
   stage.dataset.menu = next;
+  syncLyrics();
 }
 /** The song scene lists an album's songs or NetEase's queue; a lone live track has neither. */
 function songsAvailable() {
@@ -1500,19 +1675,57 @@ function swapToDetail() {
 /**
  * The three scenes (the shelf, the opened case's details, the song scene) each lead to the
  * other two, and the keys mean the same in every one of them: Enter (or clicking the
- * selected case) opens the details, S switches to the song scene and back to the details,
- * Esc returns to the shelf. (Enter on a focused button does what the button does: on a row
- * of the song list it selects or plays that row.) S is never a way out to the shelf; while
- * a swap is refused (still opening, text leaving, shelf settling after a rebuild) it is ignored.
+ * selected case, which on the shelf also plays its song: openCase) opens the details, S switches
+ * to the song scene and back to the details, Esc returns to the shelf. (Enter on a focused
+ * button does what the button does: on a row of the song list it selects that row.) S is never
+ * a way out to the shelf; while a swap is refused (still opening, text leaving, shelf settling
+ * after a rebuild) it is ignored.
  */
 function toggleSongs() {
   if (menu !== "song") openSongs();
-  else swapToDetail();
+  // S from the song scene opens the song's details, and plays it (openCase; the owner, 2026-10-09).
+  else openCase(true, swapToDetail);
 }
-/** Song details: opened from the shelf, swapped in from the song scene. */
+/** Song details: opened from the shelf, swapped in from the song scene (false when that swap is refused). */
 function showDetails() {
-  if (menu === "song") swapToDetail();
-  else setMode("detail");
+  if (menu === "song") return swapToDetail();
+  setMode("detail");
+  return true;
+}
+/**
+ * Opening the selected song's details plays it: a click or a tap on the shelf's lifted case (the
+ * owner, 2026-10-08: "when I click a box to enter scene2, it should just switch to that song and play
+ * it"), and since 2026-10-09 ("also play this song") Enter, the 查看这首歌 link, the song scene's large
+ * card, its 这首歌 link and S from there. Its song plays as ▶ plays it (selectionPlay, playSelection)
+ * and its details open (`open`: as each of them opened them before). 本地音乐: the player plays it and
+ * continues through its playlist. NetEase: 播放队列中这首歌 for a song of its queue, or for a song of
+ * another playlist column that playlist from the song (2026-10-10), while the port answers, or the
+ * paused song it plays resumes. The song that plays goes on (opening never pauses), and where the song
+ * cannot be played (the port down, private FM, a source with one card, a local song the browser cannot
+ * play: ↗) only the details open, as do a press
+ * that closes the header's open menu (`play` false: pressClosesMenu) and Enter on details already open.
+ * Where only a reason the user can change stands in the way (the port down, private FM: playBlock),
+ * the page says so as the details open (requestPlay; the owner, 2026-10-09: the click "doesn't switch
+ * to that song or play it", silently). The case being drawn out is the motion: it does not hop first
+ * (the review of 2026-10-08: it rose twice), while the waves and the ruler's ring answer the play
+ * (playWaves). A double click opens and plays once: its second press finds the case on its way out
+ * (scene.onSelect answers it only on the shelf), and the song asked for is no longer one to play. Rows
+ * the wheel still owes are dropped: they would carry the opened details away from the song that was
+ * clicked (and plays). From the song scene the song plays once the swap to the details is accepted.
+ */
+function openCase(play = true, open: () => boolean | void = showDetails) {
+  // Open or opening already (Enter on the details): they do what they did, nothing plays again.
+  if (presentation.openingOrDetail && menu === "detail") return void open();
+  const index = selected;
+  const plays = play && navigationSelection() === index;
+  wheelNavigation.reset();
+  if (menu === "song") {
+    // From the song scene the swap may be refused (still arriving, its text leaving): play once it is not.
+    if (open() !== false && plays) requestPlay(index, false);
+    return;
+  }
+  if (plays) requestPlay(index, false);
+  open();
 }
 /** Esc and the back buttons: the shelf, from the details and from the song scene alike. */
 function leaveMenu() {
@@ -1528,6 +1741,7 @@ async function prewarmSongPanel() {
   syncSongCard();
   section.inert = true;
   section.hidden = false;
+  songView.alignDetails();
   // Two painted frames, or a short wait when the window is not being painted at all.
   await new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, 300);
@@ -1555,7 +1769,6 @@ function renderSongs() {
       keyOf: lane ? (track) => laneTrackKey(lane, track) : queueTrackKey,
       indexOf: (key) => index.get(key) ?? -1,
       time,
-      note: netease.songQueueNote(),
       lane: lane && { name: lane.name, live: lane.live },
       column: { number: fileLocation(selected).lane + 1, total: archiveColumns.length },
     });
@@ -1594,7 +1807,9 @@ function syncSongRows(reveal = false) {
   const queue = !!netease.shownQueue();
   // Each row is a case's song (NetEase's queue or playlist, or a local playlist).
   const selectedKey = records[selected]?.id;
-  const playing = (queue ? netease.queuePlaying : playerState?.currentTrack?.id) || undefined;
+  // 本地音乐: the song the player has loaded (playing, paused or loading), as the shelf marks it
+  // (playingRecord); not the last one of a playlist that has played to its end (idle).
+  const playing = (queue ? netease.queuePlaying : loadedTrack()?.id) || undefined;
   // Paused, stopped or unknown: the current row stays marked but its level meter holds still. The
   // page reads the same state as the meter's colour (--state, syncRing), so they never disagree.
   const paused = queue
@@ -1605,7 +1820,14 @@ function syncSongRows(reveal = false) {
   const lane = queue ? netease.laneAt() : undefined;
   const loaded = playingRecord();
   const live = queue ? !lane || lane.live : loaded >= 0 && fileLocation(loaded).lane === fileLocation(selected).lane;
-  songView.sync({ playing, selected: selectedKey, pending: netease.queueJump?.key, paused, live });
+  // ▶ on a row (hovered, focused or selected): its song can be played (a song of NetEase's queue, or
+  // with its playlist one of another playlist column, since 2026-10-10; a local song with a file the
+  // browser plays: the row's own mark), or, on the row that is paused, resumed (selectionPlay's
+  // rules). NetEase's rows keep their ▶ while the port may not be used for a reason the user can
+  // change: pressed, it says why (playOffer, requestPlay; the owner, 2026-10-09).
+  const play = queue || !playerCurrent;
+  const resume = loaded >= 0 && playOffer(loaded)?.action === "resume";
+  songView.sync({ playing, selected: selectedKey, pending: netease.pendingKey(), paused, live, play, resume });
   if (reveal) songView.reveal(selectedKey ?? playing, !preferences.reduced && !$("#music-song").hidden);
 }
 /** The shorter way round a looping column from one of its files to another. */
@@ -1618,118 +1840,658 @@ function rowNavigation(from: number, to: number): ArchiveNavigation | undefined 
   return { axis: "row", direction: rows };
 }
 /**
- * The play button and Space. The owner's play mode (2026-10-05): browsing never switches the
- * song; the play button plays the selection when it is not what plays, and pauses or resumes
- * it when it is. With NetEase as the current source a selected song of its queue is played through the
- * debugging port (NetEase's own "play this song of the queue"); what Rhine cannot ask NetEase
- * to play (a playlist column, no port, private FM) leaves NetEase's plain play / pause.
+ * The header's ring and Space: pause or resume what plays, never another song (the owner,
+ * 2026-10-08: "ring = pause/resume only"; browsing still never switches the song, and ▶ / P play the
+ * selection, playSelection); the shelf's and the details' ring too while their song is the one that
+ * plays (ringPlay). 本地音乐: the song the player has loaded. NetEase: its own play / pause; where it
+ * offers none, the port's 播放队列中这首歌 for the song it plays, which can start that song, never
+ * pause it (playsCurrent). Any other player: its play / pause. Nothing loaded: nothing to do (the
+ * header's ring is disabled).
  */
 function togglePlayback() {
   if (playerCurrent) {
-    const wanted = netease.queueSongToPlay(playsCurrent());
-    if (wanted) void netease.playQueueSong(wanted);
-    else {
+    if (externalMedia?.offers("toggle")) {
       if (!externalMedia?.can("toggle")) return;
       void controlExternal("toggle");
+    } else {
+      const current = playsCurrent();
+      if (!current) return;
+      void netease.playQueueSong(current);
     }
-  } else if (localSongWaits()) playSong();
-  else playerState?.currentTrack ? void player?.toggle() : playSong();
+  } else {
+    if (!player || !loadedTrack()) return;
+    void player.toggle();
+  }
   scene?.playGesture();
   if (records.length) tickMotion.ripple();
 }
 /**
- * Whether the play button may ask for the playing song itself: when NetEase offers no play /
- * pause of its own (whether or not a control is on its way) and is not playing it. It can
- * start a song that way, never pause one.
+ * The song NetEase plays, for the rings when NetEase offers no play / pause of its own (whether
+ * or not a control is on its way) and is not playing it: the port's action can start it that
+ * way, never pause it. Undefined otherwise, or while the port may not be used.
  */
 function playsCurrent() {
-  return !externalMedia?.offers("toggle") && mediaPlayback() !== "playing";
+  if (externalMedia?.offers("toggle") || mediaPlayback() === "playing") return undefined;
+  return netease.queueSongToPlay(true, playingRecord());
 }
-/** NetEase's own play / pause, whatever is selected: the details page's player controls. */
+/** 本地音乐: the song the player has loaded (playing, paused or loading), as the header shows it. */
+function loadedTrack() {
+  const state = playerState;
+  return state?.currentTrack && ["playing", "paused", "loading"].includes(state.transport) ? state.currentTrack : undefined;
+}
+/**
+ * What ▶ does for the song of the case at `index` (the lifted case's ▶, a song row's, P; the
+ * owner, 2026-10-07/08): "play" it, "resume" it when it is the song that is paused, or nothing
+ * (undefined): the song that plays, a song whose request NetEase has not answered yet, a song
+ * Rhine may not ask NetEase for now (the port down, private FM: playBlock, where requestPlay says
+ * why; a song of another playlist column is asked for with its playlist since 2026-10-10), a local
+ * song without a file to play (a demonstration cover, an offline folder)
+ * or one the browser cannot play (↗: DSF / DFF, which are only indexed, and any other format it
+ * does not decode; asked to, the player would stop the song that plays and say so), and any source
+ * with one card.
+ */
+function selectionPlay(index: number): "play" | "resume" | undefined {
+  const key = records[index]?.id;
+  if (!key) return undefined;
+  if (playerCurrent) {
+    if (!netease.shownQueue()) return undefined;
+    if (key === netease.queuePlaying) {
+      const playback = mediaPlayback();
+      if (externalMedia?.offers("toggle")) return playback === "paused" || playback === "stopped" ? "resume" : undefined;
+      return playback !== "playing" && netease.queueSongToPlay(true, index) ? "resume" : undefined;
+    }
+    if (netease.isPending(key)) return undefined;
+    return netease.queueSongToPlay(false, index) ? "play" : undefined;
+  }
+  const song = localSong(index), album = albums.find((item) => item.id === key);
+  if (!song || !album?.tracks.length || album.offline || !song.track.browserPlayable) return undefined;
+  if (loadedTrack()?.id === song.id) return playerState?.transport === "paused" ? "resume" : undefined;
+  return "play";
+}
+/**
+ * ▶ (and P, through requestPlay): play the song of the case at `index`, selecting it first when it
+ * is not the selection (along its column, the shorter way round, as a row does), or resume it when
+ * it is the song that is paused. 本地音乐: the player plays it and continues through its playlist.
+ * NetEase: the consented 播放队列中这首歌, or for a song of another playlist column NetEase's own
+ * 播放全部 of that playlist from the song, after which the playlist is its queue (playQueueSong; the
+ * owner, 2026-10-10). The selected case hops (with the ruler's ripple) once the selection has arrived; not when
+ * `hop` is false (a click that also opens the case: openCase).
+ */
+function playSelection(index = navigationSelection(), hop = true) {
+  const action = selectionPlay(index);
+  if (!action) return;
+  const cursor = navigationSelection();
+  if (index !== cursor) {
+    netease.queueFollowPaused = true;
+    select(index, rowNavigation(cursor, index));
+  }
+  if (playerCurrent) {
+    if (action === "resume" && externalMedia?.offers("toggle")) {
+      if (!externalMedia.can("toggle")) return;
+      void controlExternal("toggle");
+    } else {
+      const wanted = netease.queueSongToPlay(action === "resume", index);
+      if (!wanted) return;
+      void netease.playQueueSong(wanted);
+    }
+  } else if (action === "resume") void player?.toggle();
+  else {
+    const song = localSong(index);
+    if (!song) return;
+    void player?.play(song.id, playlistQueue(localShelf, song));
+  }
+  answerPlay(index, hop);
+}
+// A song asked to play while the selection was still on its way to it: its case hops once it
+// has arrived (commitSelection), not the case that leaves.
+let gestureFor: number | undefined;
+/**
+ * The play gesture for the song of the case at `index`: now when it is the lifted case, else on
+ * arrival. Without its hop (`hop` false: the case is being opened, which is its motion), the waves.
+ */
+function answerPlay(index: number, hop = true) {
+  if (index === selected && navigationSelection() === selected) {
+    gestureFor = undefined;
+    if (hop) scene?.playGesture();
+    else playWaves();
+    if (records.length) tickMotion.ripple();
+  } else gestureFor = index;
+}
+/**
+ * The play gesture's waves without the lifted case's hop: over the shelf (seen under the opened case
+ * too) and along the song scene's chain; the caller adds the ruler's ring. No hop begins, and a hop
+ * still running from an earlier press lands as it would have. Reduced motion has neither, as before.
+ */
+function playWaves() {
+  scene?.playGesture({ hop: false });
+}
+/**
+ * Why ▶ cannot play the song of the case at `index` now, where the reason is one the user can change
+ * in the 播放器 panel (the owner, 2026-10-09, whose NetEase ran without its debugging port: "clicking
+ * the lifted box doesn't switch to that song or play it"): a song NetEase can be asked for (its
+ * queue's, or since 2026-10-10 another playlist's, with that playlist: netease.songRequest), or the
+ * song it plays that ▶ would start (NetEase offering no play / pause of its own), while the port does
+ * not answer or NetEase is in private FM (netease.portBlock; there is no switch for it since
+ * 2026-10-09). Undefined when ▶ can play it (selectionPlay) and wherever it never could: the song that
+ * plays, one NetEase was asked for already, a source with one card, and every local song ▶ does not
+ * play (a demonstration cover, an offline folder, ↗).
+ */
+function playBlock(index: number): PortBlock | undefined {
+  if (!playerCurrent) return undefined;
+  const key = records[index]?.id, request = netease.songRequest(index);
+  if (!key || !request || netease.isPending(key)) return undefined;
+  if (!request.playlist && key === netease.queuePlaying && (externalMedia?.offers("toggle") || mediaPlayback() === "playing")) return undefined;
+  return netease.portBlock();
+}
+/**
+ * What ▶ offers for the case at `index`: to play its song, or to resume it when it is the one that
+ * is paused (selectionPlay), or to say why it cannot now (`block`: playBlock). Undefined: no ▶.
+ */
+function playOffer(index: number): { action: "play" | "resume"; block?: PortBlock } | undefined {
+  const action = selectionPlay(index);
+  if (action) return { action };
+  const block = playBlock(index);
+  return block ? { action: records[index]?.id === netease.queuePlaying ? "resume" : "play", block } : undefined;
+}
+/**
+ * Every way of playing a chosen song: ▶ on the lifted case or a row, P, a click on the lifted case
+ * (openCase, `hop` false), a double-click on a row, and the shelf's and the details' ring for a song
+ * other than the one that plays (ringPlay). It plays as ▶ does (playSelection); where a reason the
+ * user can change stands in the way it says which, with the way to the 播放器 panel, and sends nothing
+ * (explainNoPlay). Whether it played.
+ */
+function requestPlay(index: number, hop = true) {
+  if (selectionPlay(index)) {
+    playSelection(index, hop);
+    return true;
+  }
+  explainNoPlay(index);
+  return false;
+}
+/**
+ * The error notice for a song that was asked to play and cannot be (requestPlay): NetEase's port
+ * reason (playBlock) with a button to the 播放器 panel, where the port's status and the restart are
+ * (Rhine never restarts NetEase by itself). Nothing for the rest (the song that plays, one asked for
+ * already, a local song ▶ does not play): their rings and rows say why in their titles. (A playlist
+ * column that was only for browsing said so once a page until 2026-10-10, when its songs became
+ * playable with their playlist.)
+ */
+function explainNoPlay(index: number) {
+  const block = playBlock(index);
+  if (block) notify(PORT_BLOCK_NOTICE[block], { label: "打开播放器", panel: "sources" });
+}
+/**
+ * Why there is nothing to play for the case at `index` (no ▶: playOffer is undefined), for the
+ * title of a ring that is then disabled (the reason only there, the owner, 2026-10-07).
+ */
+function noPlayReason(index: number) {
+  if (playerCurrent) return "不能播放这首歌";
+  const song = localSong(index), album = albums.find((item) => item.id === records[index]?.id);
+  if (!song || !album?.tracks.length) return "演示封面没有音频";
+  if (album.offline) return "目录离线";
+  if (!song.track.browserPlayable) return `${song.track.format} 需要兼容的播放内核`;
+  return "不能播放这首歌";
+}
+/**
+ * Whether a ring for the song of the case at `index` pauses or resumes it: it is the song that plays
+ * or is paused (the one the player has loaded, or NetEase plays), or the live track of a source with
+ * one card. Otherwise the ring plays that song (ringPlay).
+ */
+function ringPauses(index: number) {
+  if (playerCurrent && !netease.shownQueue()) return true;
+  return index >= 0 && index === playingRecord();
+}
+/**
+ * The shelf's 42 px ring (the selection's) and the details' ring (the song they show) are their song's
+ * own play button (the owner, 2026-10-09: "when I click the play button, it should only play the
+ * selected song, not the previously playing one"): on the song that plays or is paused they pause or
+ * resume it (togglePlayback); on any other song, or while nothing is loaded, they play it as ▶ does
+ * (requestPlay, with the hop). The header's ring stays pause / resume of what plays.
+ */
+function ringPlay(index: number) {
+  // A double press on a ring that has just played its song (2026-10-09 review: the second press
+  // found the ring turned into that song's pause button and paused it): the gesture's end, nothing.
+  const now = performance.now();
+  if (index === ringPlayed.index && now - ringPlayed.at < DOUBLE_PRESS.ms) return;
+  if (ringPauses(index)) togglePlayback();
+  else {
+    requestPlay(index);
+    ringPlayed = { at: now, index };
+  }
+}
+let ringPlayed = { at: -Infinity, index: -1 };
+/**
+ * A click on a row of the song scene's list: on its ▶ (`onPlay`) or the rest of it. One click
+ * selects the row's case (the chain runs to it the shorter way round); one on ▶ plays the row's song
+ * instead (selectionPlay, playSelection), where a tap or a pen's press found ▶ shown before it
+ * (songView.playAllowed). A double-click or a double tap (the owner, 2026-10-08: "double-click a
+ * song in the list to switch to it") plays the song of the row it began on by the same rules: its
+ * first click selected the row, so the second only plays (the case hops once it has arrived), and
+ * nothing when the first click played it already or the song cannot be played (a song without a file
+ * or one the browser cannot play, ↗): the double click only selected it. Where the port may not be used
+ * for a reason the user can change (the port down, private FM), the double click or ▶ says so instead
+ * (requestPlay; the owner, 2026-10-09),
+ * once a burst, and ▶ selects the row as the rest of it does. A further click of the burst does
+ * nothing.
+ */
+function clickSongRow(clicked: HTMLButtonElement, onPlay: boolean, event: MouseEvent) {
+  const click = songView.rowClick(clicked, event);
+  const row = click.row, index = Number(row.dataset.select);
+  if (row.disabled || row.dataset.select === undefined || !Number.isInteger(index)) return;
+  if (click.kind !== "single") {
+    if (click.kind === "double" && !click.played) {
+      songView.rowPlayed();
+      requestPlay(index);
+    }
+    return;
+  }
+  if (onPlay && songView.playAllowed(row) && playOffer(index)) {
+    songView.rowPlayed();
+    if (requestPlay(index)) return;
+  }
+  netease.queueFollowPaused = true;
+  select(index, rowNavigation(navigationSelection(), index));
+}
+/**
+ * Back to the song that plays or is paused (L, and its number beside the ring and on the song
+ * scene's pane; the owner, 2026-10-07): the selection moves there as following does, along its
+ * column the shorter way round, or into its column by the shorter way round the shelf, as stepping
+ * into NetEase's queue lands on it. Navigation only: nothing plays, no gesture; following resumes.
+ */
+function goToPlaying() {
+  const target = backTarget(), cursor = navigationSelection();
+  if (target < 0) return;
+  netease.queueFollowPaused = false;
+  wheelNavigation.reset();
+  const from = fileLocation(cursor).lane, to = fileLocation(target).lane;
+  if (from === to) {
+    select(target, rowNavigation(cursor, target));
+    return;
+  }
+  const columns = archiveColumns.length, forward = wrap(to - from, columns);
+  select(target, { axis: "lane", direction: forward <= columns / 2 ? forward : forward - columns });
+}
+/**
+ * Where L (goToPlaying) goes: the case of the song that plays or is paused, while the selection
+ * (or where it is moving) is another case; -1 when there is none, or the source has one card.
+ */
+function backTarget() {
+  if (playerCurrent && !netease.shownQueue()) return -1;
+  const target = playingRecord(), cursor = navigationSelection();
+  return target >= 0 && target !== cursor && records[cursor] ? target : -1;
+}
+/** Whether the header's ring and Space have something to pause or resume now (else that ring is disabled). */
+function pauseResumeOffered() {
+  if (playerCurrent) return !!externalMedia && (externalMedia.offers("toggle") || !!playsCurrent());
+  return !!player && !!loadedTrack();
+}
+/** A player's own play / pause, for the details of a source with one card (its live track). */
 function toggleExternal() {
   if (!externalMedia?.can("toggle")) return;
   void controlExternal("toggle");
   scene?.playGesture();
   if (records.length) tickMotion.ripple();
 }
-/** 本地音乐: the selected song is not the one loaded, so the play button plays it. */
-function localSongWaits() {
-  const song = currentAlbum(), loaded = playerState?.currentTrack;
-  return !!song?.tracks.length && !song.offline && (!loaded || loaded.id !== song.id);
-}
 /** NetEase's playback as its own player reports it when the port answers, else as Windows does. */
 function mediaPlayback(source = externalMedia?.selected) {
   return netease.playback(source);
 }
-/** The play button says what it will do: play the selection, or pause / resume what plays. */
+/**
+ * The play rings say what they do (their words in their name and title): the header's pauses or
+ * resumes what plays, never the selection, disabled while there is nothing to pause or resume (the
+ * reason in its title); the shelf's and the details' are their song's (ringPlay). Then ▶ and the key
+ * hints.
+ */
 function syncPlayButton() {
   syncRing();
   syncPlayNote();
-  // The header's ring and the shelf's larger one are the same control (the same press, label and state).
-  for (const button of document.querySelectorAll<HTMLButtonElement>("#play-pause, #shelf-play")) {
-    if (playerCurrent) {
-      if (!externalMedia) return;
-      const source = externalMedia.selected, wanted = netease.queueSongToPlay(), playback = mediaPlayback(source);
-      // Pausing or resuming NetEase's song while another case is selected (a playlist column's).
-      const other = !!netease.shownQueue() && records[navigationSelection()]?.id !== netease.queuePlaying ? "当前" : "";
-      const label = wanted ? "播放这首" : playback === "playing" ? `暂停${other}` : playback === "unknown" ? "播放 / 暂停（状态未知）" : playback === "paused" ? `继续${other}` : `播放${other}`;
-      // Not dimmed while a control is on its way (a press in that moment is ignored, as before).
-      button.disabled = !wanted && !externalMedia.offers("toggle") && !netease.queueSongToPlay(playsCurrent());
-      button.setAttribute("aria-pressed", String(!wanted && playback === "playing"));
-      button.setAttribute("aria-label", label);
-      button.title = wanted ? `${source?.name ?? NETEASE_NAME}：播放 ${wanted.song.title}` : source ? `${source.name}：${label}` : "请先连接播放器";
-      continue;
+  syncSelectionPlay();
+  applyRing(document.querySelector<HTMLButtonElement>("#play-pause"), pauseResumeRing());
+  applyRing(document.querySelector<HTMLButtonElement>("#shelf-play"), songRing(navigationSelection()));
+  // The details' ring of a song (NetEase's queue, a local song); a lone live track's is its player's own (updateExternalControls).
+  applyRing(document.querySelector<HTMLButtonElement>('#detail-toggle[data-action="detail-play"]'), songRing(selected));
+  syncDetailTimeline();
+  syncLyrics();
+}
+/**
+ * The details' timeline belongs to the song that plays (the owner, 2026-10-09: "in the detail of a song
+ * isnt playing, dont show the timeline, when it starts to play, make an animation for the timeline to
+ * emerge"): on the details of any other song it is not there (folded away, out of reach of the keys),
+ * and when the song they show starts to play, or is the one paused, it emerges: it opens downwards as
+ * its line draws in from the left. When another song plays it folds away again. The song that plays is
+ * the one a ring pauses (ringPauses): the song the player has loaded or NetEase plays, or a lone live
+ * track. A document just written takes its state at once (timelineState, detailTimeline); reduced motion
+ * has no movement.
+ */
+function syncDetailTimeline() {
+  const wrap = document.querySelector<HTMLElement>("#detail-body .detail-timeline-wrap");
+  if (!wrap) return;
+  const state = timelineState();
+  if (wrap.dataset.timeline === state) return;
+  wrap.dataset.motion = preferences.reduced ? "off" : "on";
+  wrap.dataset.timeline = state;
+  wrap.inert = state === "hidden";
+}
+function timelineState() {
+  return ringPauses(selected) ? "shown" : "hidden";
+}
+/**
+ * The details' lyrics (the owner, 2026-10-17: "Redesign scene 2. It shouldn't show 曲目数 anymore, and
+ * see if you can add dynamic lyrics there instead"), in the box under the transport and the timeline
+ * (lyrics-view.ts). Like the timeline they belong to the song that plays or is paused: on another
+ * song's details the box is folded away, and it opens when that song starts. NetEase's are the lyrics
+ * it has loaded for the song it plays, read through its debugging port (asked to load them first, as
+ * its playing page does: netease.lyrics); a local song's are its .lrc beside it, else its tags
+ * (localLyrics); a lone live track has none. They are asked for, and follow the song, only while the
+ * details show.
+ */
+function syncLyrics() {
+  lyricsView.attach(document.querySelector<HTMLElement>("#detail-body .detail-lyrics"));
+  const source = timelineState() === "shown" ? lyricsSource() : undefined;
+  if (!source) return lyricsView.hide();
+  const open = mode === "detail" && menu === "detail";
+  if (open) source.want();
+  lyricsView.show(source.key, source.lyrics, source.clock, open);
+}
+// The song NetEase's port last named, with the case that played then: a reading that misses its time
+// now and then (NetEase busy loading a playlist) keeps that song's lyrics while the same case plays, up
+// to LYRICS_PORT_GRACE_MS, instead of taking them away and writing them again a second later.
+let neteaseLyricsSong: { id: string; record: number; at: number } | undefined;
+const LYRICS_PORT_GRACE_MS = 5000;
+function lyricsSource(): { key: string; lyrics: Lyrics | null | undefined; clock: LyricsClock; want(): void } | undefined {
+  if (playerCurrent) {
+    if (!netease.shownQueue()) return undefined;
+    // NetEase's lyrics are read through its debugging port, for the song it reports.
+    const now = performance.now(), record = playingRecord();
+    const id = netease.debugState.available ? netease.debugState.trackId : undefined;
+    if (id) neteaseLyricsSong = { id, record, at: now };
+    const kept = neteaseLyricsSong;
+    if (!id && kept && kept.record === record && now - kept.at < LYRICS_PORT_GRACE_MS)
+      return { key: `netease:${kept.id}`, lyrics: netease.lyrics.get(kept.id), clock: neteaseLyricsClock, want() {} };
+    if (!id) return { key: "netease", lyrics: null, clock: neteaseLyricsClock, want() {} };
+    return { key: `netease:${id}`, lyrics: netease.lyrics.get(id), clock: neteaseLyricsClock, want: () => netease.lyrics.want(id) };
+  }
+  const track = loadedTrack();
+  if (!track) return undefined;
+  return { key: `local:${track.id}`, lyrics: localLyrics.get(track.id), clock: localLyricsClock, want: () => localLyrics.want(track.id) };
+}
+interface RingWords { disabled: boolean; pressed: boolean; label: string; title: string }
+/** The header's ring: pause or resume what plays (togglePlayback). */
+function pauseResumeRing(): RingWords {
+  if (playerCurrent) {
+    const source = externalMedia?.selected, playback = mediaPlayback(source);
+    const label = playback === "playing" ? "暂停" : playback === "unknown" ? "播放 / 暂停（状态未知）" : playback === "paused" ? "继续" : "播放";
+    // Not dimmed while a control is on its way (a press in that moment is ignored, as before).
+    const disabled = !externalMedia?.offers("toggle") && !playsCurrent();
+    return {
+      disabled, pressed: playback === "playing", label: disabled ? "暂停 / 继续" : label,
+      title: !source ? "请先连接播放器"
+        : disabled ? `${source.name}没有提供${playback === "playing" ? "暂停" : "播放 / 暂停"}`
+        : `${source.name}：${label}`,
+    };
+  }
+  const loaded = loadedTrack(), transport = playerState?.transport;
+  const playing = !!loaded && (transport === "playing" || transport === "loading");
+  const label = playing ? "暂停" : "继续";
+  return { disabled: !loaded, pressed: playing, label: loaded ? label : "暂停 / 继续", title: loaded ? `${label}：${loaded.title}` : "没有正在播放的歌" };
+}
+/**
+ * The shelf's or the details' ring for the song of the case at `index` (ringPlay): the header's
+ * words on the song that plays or is paused; otherwise ▶ and 播放：<its title> (also where pressing it
+ * only says why it cannot play now: playOffer's block), or, with nothing to play, disabled with the
+ * reason in its title. Not dimmed while NetEase has not answered a request for it (a press then does
+ * nothing, as the header's ring while a control is on its way).
+ */
+function songRing(index: number): RingWords {
+  if (ringPauses(index)) return pauseResumeRing();
+  const title = records[index]?.title ?? "";
+  if (playOffer(index)) return { disabled: false, pressed: false, label: `播放：${title}`, title: `播放：${title}` };
+  if (playerCurrent && title && netease.isPending(records[index]?.id))
+    return { disabled: false, pressed: false, label: `正在切换：${title}`, title: "正在切换…" };
+  return { disabled: true, pressed: false, label: "播放", title: noPlayReason(index) };
+}
+function applyRing(button: HTMLButtonElement | null, words: RingWords) {
+  if (!button) return;
+  if (button.disabled !== words.disabled) button.disabled = words.disabled;
+  const pressed = String(words.pressed);
+  if (button.getAttribute("aria-pressed") !== pressed) button.setAttribute("aria-pressed", pressed);
+  if (button.getAttribute("aria-label") !== words.label) button.setAttribute("aria-label", words.label);
+  if (button.title !== words.title) button.title = words.title;
+}
+/**
+ * ▶'s keys as the selection and the player now allow (playOffer: what selectionPlay plays, and
+ * NetEase's songs while the port may not be used for a reason the user can change, where P says
+ * why): the key hints. (The song rows' ▶ follows the song scene's data-play and each row's
+ * data-playable: song-scene.css. The lifted case's own ▶ is gone since 2026-10-10.)
+ */
+function syncSelectionPlay() {
+  syncKeyHint();
+}
+/**
+ * The keyboard layout's characters (navigator.keyboard), read at the start and whenever the window
+ * comes back to the front (the layout may have changed); until then keys are named by their codes.
+ */
+let keyLayout: KeyLayout | undefined;
+function readKeyLayout() {
+  void keyboardLayout().then((layout) => {
+    if (!layout || sameLayout(layout, keyLayout)) return;
+    keyLayout = layout;
+    applyKeyLabels();
+  });
+}
+/** Whether two layouts print the same on every key (a new map comes back at every focus). */
+function sameLayout(a: KeyLayout, b?: KeyLayout) {
+  if (!b || a.size !== b.size) return false;
+  for (const [code, text] of a) if (b.get(code) !== text) return false;
+  return true;
+}
+/**
+ * An action's name and note as this page says them: with 本地音乐 as the source, S is 选歌, as its
+ * hint and its links are; with a player, 播放列表.
+ */
+function actionWords(id: ShortcutAction): { name: string; note?: string } {
+  const info = shortcutInfo(id);
+  if (id === "songs" && !playerCurrent) return { name: "选歌", note: "在专辑架和详情里打开选歌；在选歌里打开这首歌" };
+  return { name: info.name, note: info.note };
+}
+/** What an action's key is shown as now: its main key, else its 附加键; "" while it has neither. */
+function keyName(id: ShortcutAction) {
+  const key = actionKeys(preferences.shortcuts, id)[0];
+  return key ? keyLabel(key, keyLayout) : "";
+}
+/**
+ * Writes the keys' names where the page shows them: the shelf's hints (move, enter, play, songs,
+ * playing, space), the details' and the song scene's ways back (Esc) and to the playlist (S), the
+ * menu form's 搜索 (/), the canvas's label (sceneLabel) and NetEase's play key (netease.playKey). A
+ * key the user cleared is not shown. The markup keeps the default names (keyHintMarkup, songSceneMarkup).
+ */
+function applyKeyLabels() {
+  const write = (selector: string, text: string) => document.querySelectorAll<HTMLElement>(selector).forEach((node) => {
+    setText(node, text);
+    if (node.hidden !== !text) node.hidden = !text;
+  });
+  write('#music-keyhint [data-hint="move"] > kbd', [keyName("songUp"), keyName("songDown")].filter(Boolean).join(" "));
+  write('#music-keyhint [data-hint="enter"] > kbd', keyName("open"));
+  write('#music-keyhint [data-hint="play"] > kbd', keyName("play"));
+  write('#music-keyhint [data-hint="songs"] > kbd', keyName("songs"));
+  write('#music-keyhint [data-hint="back"] > kbd, #go-current > kbd', keyName("playing"));
+  write('#music-keyhint [data-hint="space"] > kbd', keyName("pause"));
+  write('.music-back[data-action="back"] > kbd', keyName("back"));
+  write(".detail-songs > kbd, .song-details > kbd", keyName("songs"));
+  write('[data-action="search"] > .topnav-menu-value', keyName("search"));
+  document.querySelector("#three-scene canvas")?.setAttribute("aria-label", sceneLabel());
+  // NetEase's port status and consent name the key of 播放选中的歌.
+  netease.playKey = keyName("play");
+  queueSettingVisual = "";
+  debugSettingVisual = "";
+  keyHintKey = "";
+  syncKeyHint();
+  if (panel === "settings" && settingsTab === "keys" && !shortcutCapture) renderShortcutRows();
+}
+/** The scene's description for screen readers: its keys for the lists and the songs (the arrows by default). */
+function sceneLabel() {
+  if (playerCurrent) return "三维卡片，显示所选外部播放器的当前曲目";
+  const ids: ShortcutAction[] = ["listLeft", "listRight", "songUp", "songDown"];
+  if (!ids.some((id) => changed(preferences.shortcuts, id))) return "三维歌曲阵列，左右切歌单，上下切歌";
+  const say = (id: ShortcutAction) => {
+    const key = actionKeys(preferences.shortcuts, id)[0];
+    return key ? spokenKey(key, keyLayout) : "";
+  };
+  const lists = [say("listLeft"), say("listRight")].filter(Boolean).join("、");
+  const songs = [say("songUp"), say("songDown")].filter(Boolean).join("、");
+  return ["三维歌曲阵列", lists && `${lists}切歌单`, songs && `${songs}切歌`].filter(Boolean).join("，");
+}
+/** The keydown's action, if any (shortcuts.ts). */
+function shortcutAt(e: KeyboardEvent) {
+  return shortcutEvent(e) ? shortcutKeys.get(eventCode(e)) : undefined;
+}
+/** Runs an action as its keys do (whichever key the user gave it, main or 附加键). */
+function runShortcut(action: ShortcutAction, e: KeyboardEvent) {
+  switch (action) {
+    case "pause":
+      togglePlayback();
+      return;
+    case "play": {
+      // As ▶: on a focused song row, that row's song (where its ▶ is); otherwise the selection.
+      const row = menu === "song" ? (e.target as HTMLElement).closest<HTMLButtonElement>("#song-list .song-row") : null;
+      const index = row && !row.disabled && row.dataset.select !== undefined ? Number(row.dataset.select) : NaN;
+      requestPlay(Number.isInteger(index) ? index : navigationSelection());
+      return;
     }
-    const song = currentAlbum(), loaded = playerState?.currentTrack, waits = localSongWaits();
-    const playing = !waits && !!playerState?.playing;
-    const resume = !waits && playerState?.transport === "paused" ? "继续" : "播放";
-    // Nothing loaded and nothing the selection could play (offline, a demonstration cover).
-    button.disabled = !waits && !loaded && !(song?.tracks.length && !song.offline);
-    button.setAttribute("aria-pressed", String(playing));
-    button.setAttribute("aria-label", playing ? "暂停" : resume);
-    button.title = waits ? `播放：${song!.title}` : loaded ? `${playing ? "暂停" : resume}：${loaded.title}` : "播放选中的歌";
+    case "playing":
+      goToPlaying();
+      return;
+    case "songs":
+      toggleSongs();
+      return;
+    case "search":
+      searchGenre = "";
+      openPanel("search");
+      return;
+    case "open":
+      openCase();
+      return;
+    case "back":
+      leaveMenu();
+      return;
+    case "songUp":
+    case "songDown":
+      // Inside the playlist they move along its rows, as the arrows do.
+      if (menu === "song" && songView.handleKey(e, action === "songUp" ? "ArrowUp" : "ArrowDown")) return;
+      stepAlbum(action === "songUp" ? -1 : 1);
+      return;
+    case "listLeft":
+      stepGenre(-1);
+      return;
+    case "listRight":
+      stepGenre(1);
+      return;
+  }
+}
+/** A notice for when the page is in front of the user (not under the loading cover or the opening). */
+let startupNotice: (() => void) | undefined;
+function showStartupNotice() {
+  const show = startupNotice;
+  startupNotice = undefined;
+  show?.();
+}
+/** Saves the keys the user gave and shows them everywhere. */
+function setShortcuts(next: ShortcutOverrides) {
+  preferences.shortcuts = next;
+  shortcutKeys = shortcutTable(next);
+  savePrefs();
+  applyKeyLabels();
+}
+/**
+ * The bottom key hints, as the selection (or where it is moving) and the player now allow: S says
+ * what its link says (播放列表, or 歌单歌曲 in a NetEase playlist column that is not its queue); P while
+ * the lifted case has ▶ (playOffer: not a demonstration cover, an offline folder, a song the browser
+ * cannot play (↗), the song that plays; while NetEase may not be asked
+ * for a reason the user can change, P says why, as ▶ does);
+ * L only while it is another song than the one that plays or is paused (backTarget); SPACE only
+ * while something can be paused or resumed (pauseResumeOffered). A lone live track (no queue) has
+ * only the details and pause / resume. The hints are shown and hidden, never written again.
+ */
+let keyHintKey = "";
+function syncKeyHint() {
+  const queue = !!netease.shownQueue(), lane = queue ? netease.laneAt() : undefined;
+  const browsing = !!lane && !lane.live;
+  const songs = playerCurrent ? (browsing ? "歌单歌曲" : "播放列表") : "选歌";
+  const shelf = !playerCurrent || queue;
+  const shown: Record<string, boolean> = {
+    move: shelf, songs: shelf,
+    play: shelf && !!playOffer(navigationSelection()),
+    back: backTarget() >= 0,
+    space: pauseResumeOffered(),
+  };
+  // A key cleared in 设置 → 快捷键 has no hint.
+  shown.enter = !!keyName("open");
+  if (!keyName("songUp") && !keyName("songDown")) shown.move = false;
+  if (!keyName("songs")) shown.songs = false;
+  if (!keyName("play")) shown.play = false;
+  if (!keyName("playing")) shown.back = false;
+  if (!keyName("pause")) shown.space = false;
+  const key = JSON.stringify([songs, shown]);
+  if (key === keyHintKey) return;
+  keyHintKey = key;
+  const hints = $("#music-keyhint");
+  setText(hints.querySelector<HTMLElement>('[data-hint="songs"] > span')!, songs);
+  for (const [name, on] of Object.entries(shown)) {
+    const hint = hints.querySelector<HTMLElement>(`[data-hint="${name}"]`)!;
+    if (hint.hidden === on) hint.hidden = !on;
   }
 }
 /**
- * The note beside the shelf's play ring: the number of the song (or album) that plays when the
- * selection is another one of its column (a dot in the playback colour), "正在切换…" while
- * NetEase has not yet reported the song asked for, "只供浏览" in a playlist column; nothing when
- * the selection is what plays or nothing plays.
+ * Beside the shelf's play ring: the number of the song that plays or is paused, while the
+ * selection is another song (any column), as a button back to it (goToPlaying; a dot in the
+ * playback colour); "正在切换…" (a status, not a button) while NetEase has not yet reported the
+ * song asked for; nothing when the selection is what plays, nothing plays, or the source has one
+ * card. The song scene's pane has the same button beside its count, and every scene 回到当前
+ * beside the wordmark.
  */
 function syncPlayNote() {
-  const note = $("#shelf-play-note");
   const cursor = navigationSelection(), key = records[cursor]?.id;
-  let text = "", dot = false;
-  if (playerCurrent) {
-    const lane = netease.shownQueue() ? netease.laneAt(cursor) : undefined;
-    if (!netease.shownQueue() || !key) text = "";
-    else if (lane && !lane.live) text = "只供浏览";
-    else if (netease.queueJump?.key === key) text = "正在切换…";
-    else if (netease.queuePlaying && key !== netease.queuePlaying) {
-      const playing = records.findIndex((record) => record.id === netease.queuePlaying);
-      if (playing >= 0) {
-        text = String(columnFiles(fileLocation(playing).lane).indexOf(playing) + 1).padStart(3, "0");
-        dot = true;
-      }
-    }
-  } else {
-    // The loaded song's number in its playlist, while another song is selected.
-    const loaded = playerState?.currentTrack && ["playing", "paused", "loading"].includes(playerState.transport)
-      ? playerState.currentTrack.id : undefined;
-    const playing = loaded && key !== loaded ? records.findIndex((record) => record.id === loaded) : -1;
-    if (playing >= 0) {
-      text = String(columnFiles(fileLocation(playing).lane).indexOf(playing) + 1).padStart(3, "0");
-      dot = true;
+  let status = "", number = "", playing = -1;
+  if (key && (!playerCurrent || netease.shownQueue())) {
+    if (playerCurrent && netease.isPending(key)) status = "正在切换…";
+    else {
+      playing = playingRecord();
+      if (playing >= 0 && playing !== cursor)
+        number = String(columnFiles(fileLocation(playing).lane).indexOf(playing) + 1).padStart(3, "0");
     }
   }
-  setText(note.lastElementChild as HTMLElement, text);
-  if (note.dataset.dot !== String(dot)) note.dataset.dot = String(dot);
+  setText($("#shelf-play-status"), status);
+  const label = number ? `回到正在播放的歌：${records[playing].title}` : "";
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#shelf-play-note, #song-go-playing")) {
+    // Pressed from the keyboard, it leaves the focus on the selection as it hides.
+    if (!number && !button.hidden && document.activeElement === button)
+      button.id === "song-go-playing" ? songView.focusCurrent() : $("[data-action=open]").focus({ preventScroll: true });
+    if (button.hidden === !!number) button.hidden = !number;
+    setText(button.lastElementChild as HTMLElement, number);
+    if (button.title !== label) {
+      button.title = label;
+      button.setAttribute("aria-label", number ? `${label}（${number}）` : "回到正在播放的歌");
+    }
+  }
+  // 回到当前 beside the wordmark (the owner, 2026-10-17: "add 回到当前 button to top left", "add this
+  // button to every scene, but show it only when a different song is selected"). It keeps its room
+  // while hidden (invisible, out of reach). Pressed from the keyboard, it leaves the focus on the
+  // scene's selection as it hides: 查看这首歌, the details' document, the song scene's row.
+  const current = $("#go-current"), shown = String(!!number);
+  if (!number && current.dataset.shown === "true" && document.activeElement === current)
+    mode === "archive" ? $("[data-action=open]").focus({ preventScroll: true })
+      : menu === "song" ? songView.focusCurrent()
+      : $("#album-detail-content").focus({ preventScroll: true });
+  if (current.dataset.shown !== shown) current.dataset.shown = shown;
+  if (current.title !== label) {
+    current.title = label;
+    current.setAttribute("aria-label", number ? `回到当前：${records[playing].title}（${number}）` : "回到当前");
+  }
 }
 /** The case of the song that is loaded in the player (NetEase's, or the local player's), -1 if none. */
 function playingRecord() {
   if (playerCurrent) return netease.queuePlaying ? records.findIndex((record) => record.id === netease.queuePlaying) : -1;
-  const loaded = playerState?.currentTrack && ["playing", "paused", "loading"].includes(playerState.transport)
-    ? playerState.currentTrack.id : undefined;
+  const loaded = loadedTrack()?.id;
   return loaded ? records.findIndex((record) => record.id === loaded) : -1;
 }
 /** The ruler's dot over the playing song's tick, and the playlist list's dot on its column. */
@@ -1742,16 +2504,17 @@ function syncPlayingMarks() {
   }
 }
 /**
- * The play ring and the playback colour (--state, on the stage). A plain ring when a press
- * plays the selection, or when nothing is loaded; otherwise the playing song's progress from
- * 12 o'clock, all in the line colour while its position is unknown. --state is the playing or
+ * The play rings and the playback colour (--state, on the stage). The header's ring: plain when
+ * nothing is loaded; otherwise the playing song's progress from 12 o'clock, all in the line colour
+ * while its position is unknown (it pauses or resumes that song, whatever is selected). The shelf's
+ * and the details' ring show the same while their song is that one (ringPauses), else a plain ring
+ * with no progress (they play their song: ringPlay; the owner, 2026-10-09). --state is the playing or
  * the paused colour only when the player says so, else muted (never an invented state).
  */
 function syncRing() {
   let ring: "plain" | "progress" | "unknown" = "plain", progress = 0;
   let playback: "playing" | "paused" | "unknown" = "unknown";
-  // The details' ring: NetEase's own play / pause (always what plays, never the selection); a local
-  // song's details play that song, so locally it is the header's ring.
+  // A lone live track's details ring: its player's own play / pause, as it always was.
   let own: "plain" | "progress" | "unknown" = "unknown";
   if (playerCurrent) {
     const source = externalMedia?.selected, state = mediaPlayback(source);
@@ -1761,7 +2524,7 @@ function syncRing() {
       const known = typeof position === "number" && typeof duration === "number" && duration > 0;
       own = known ? "progress" : "unknown";
       if (known) progress = position / duration;
-      if (!netease.queueSongToPlay()) ring = own;
+      ring = own;
     }
   } else {
     const state = playerState, track = state?.currentTrack;
@@ -1769,21 +2532,26 @@ function syncRing() {
     playback = !track ? "unknown" : state!.transport === "playing" ? "playing" : state!.transport === "paused" ? "paused"
       : state!.transport === "loading" && stage.dataset.playback !== "unknown" ? stage.dataset.playback as "playing" | "paused" : "unknown";
     if (track && state!.duration > 0) progress = state!.currentTime / state!.duration;
-    if (track && !localSongWaits()) ring = state!.duration > 0 ? "progress" : "unknown";
-    own = ring;
+    if (loadedTrack()) ring = (state?.duration ?? 0) > 0 ? "progress" : "unknown";
   }
   if (stage.dataset.playback !== playback) stage.dataset.playback = playback;
   const value = `${Math.round(Math.max(0, Math.min(1, progress)) * 1000) / 10}%`;
-  // The header's ring and the shelf's larger one.
-  for (const button of document.querySelectorAll<HTMLElement>("#play-pause, #shelf-play")) {
-    if (button.dataset.ring !== ring) button.dataset.ring = ring;
-    if (button.style.getPropertyValue("--progress") !== value) button.style.setProperty("--progress", value);
-  }
+  const paint = (button: HTMLElement | null, shape: typeof ring, fill: string) => {
+    if (!button) return;
+    if (button.dataset.ring !== shape) button.dataset.ring = shape;
+    if (button.style.getPropertyValue("--progress") !== fill) button.style.setProperty("--progress", fill);
+  };
+  // The header's ring: what plays.
+  paint(document.querySelector("#play-pause"), ring, value);
+  // The shelf's (the selection's) and the details' (their song's): what plays only while it is theirs.
+  const song = (button: HTMLElement | null, index: number) => {
+    const theirs = ringPauses(index);
+    paint(button, theirs ? ring : "plain", theirs ? value : "0%");
+  };
+  song(document.querySelector("#shelf-play"), navigationSelection());
   const detail = document.querySelector<HTMLElement>("#detail-toggle");
-  if (detail) {
-    if (detail.dataset.ring !== own) detail.dataset.ring = own;
-    if (detail.style.getPropertyValue("--progress") !== value) detail.style.setProperty("--progress", value);
-  }
+  if (detail?.dataset.action === "detail-play") song(detail, selected);
+  else paint(detail, own, value);
 }
 /** 本地音乐's previous / next in the header: the local player's own queue, once a song is loaded. */
 function syncLocalSkip() {
@@ -1796,36 +2564,19 @@ function syncLocalSkip() {
     next.disabled = !loaded || state!.currentIndex >= state!.queue.length - 1;
 }
 /**
- * 本地音乐's song details: the ring plays this song, or pauses / resumes it once it is the one
- * loaded (the play button's own rule); what is loaded when it is another song (正在播放); and
- * this song's position while it is loaded (the slider seeks it; dashed while another song plays).
+ * 本地音乐's song details: the ring (syncPlayButton: ringPlay's words) plays this song, or pauses /
+ * resumes it once it is the one loaded, and this song's position while it is loaded (the slider seeks
+ * it). While another song or none is loaded the timeline is folded away (syncDetailTimeline), and the
+ * header names what is loaded.
  */
 let localSeekHeld = false;
 function syncLocalTransport() {
   if (playerCurrent) return;
   const state = playerState, track = state?.currentTrack;
-  const toggle = document.querySelector<HTMLButtonElement>("#detail-toggle");
-  if (toggle) {
-    const waits = localSongWaits();
-    const playing = !waits && !!state?.playing;
-    const label = waits || !track ? "播放这首" : playing ? "暂停" : state!.transport === "paused" ? "继续" : "播放";
-    toggle.disabled = !waits && !track;
-    toggle.setAttribute("aria-pressed", String(playing));
-    toggle.setAttribute("aria-label", label);
-    toggle.title = !waits && track ? `${label}：${track.title}` : label;
-  }
-  // 正在播放: placed when the document is rendered, while the loaded song is another one than
-  // the one shown. It then keeps its place until the next document and names what is loaded, so
-  // a song started here does not pull the controls up under the pointer.
   const shown = currentAlbum();
   const other = !!track && track.id !== shown?.id;
-  for (const row of document.querySelectorAll<HTMLElement>("[data-local-now-row]")) {
-    if (row.dataset.localNowRow) continue;
-    row.dataset.localNowRow = "placed";
-    row.hidden = !other;
-  }
-  for (const node of document.querySelectorAll<HTMLElement>("[data-local-now]")) setText(node, track?.title ?? "—");
-  // The timeline is this song's: its position while it is the one loaded, else its length only.
+  // The timeline is this song's: its position while it is the one loaded, else its length only (and
+  // folded away: syncDetailTimeline).
   const mine = !!track && !other;
   const known = mine && state!.duration > 0;
   const length = shown?.tracks[0]?.duration ?? 0;
@@ -1865,23 +2616,11 @@ function stopPlayback() {
   if (records.length) tickMotion.ripple();
 }
 /**
- * 本地音乐's details ring: it plays this song when another one (or none) is loaded, and pauses
- * or resumes it once it is the one loaded, as the play button does.
- */
-function toggleLocal() {
-  if (!player) return;
-  if (localSongWaits()) playSong();
-  else if (playerState?.currentTrack) void player.toggle();
-  else return;
-  scene?.playGesture();
-  if (records.length) tickMotion.ripple();
-}
-/**
  * A local song's details (2026-10-06: each case is a song of a folder playlist): the design's
- * document with its tag (the playlist's number and the song's place in it, previous / next), four
- * facts with Chinese keys (the song's album, year, format and length; the artist is the line
- * above them), what the player has loaded when it is another song, the transport row and the
- * timeline, which play this song, and its album's introduction when there is one.
+ * document with its tag (the playlist's number and the song's place in it, previous / next), the
+ * artist and the album on one line, the year, format and length on a quiet line under it, the
+ * transport row and the timeline, which play this song, its lyrics while it is the one loaded (the
+ * owner, 2026-10-17), and its album's introduction when there is one.
  */
 function renderDetail() {
   if (externalMedia) return renderExternalDetail();
@@ -1897,15 +2636,17 @@ function renderDetail() {
   $("#detail-head").innerHTML = detailHead(`PL ${String(location.lane + 1).padStart(2, "0")} · ${pad3(files.indexOf(selected) + 1)}`, `/ ${pad3(files.length)}`,
     { group: "切换歌曲", previous: "上一首", next: "下一首" });
   detailTitle.set(a.title);
-  $("#detail-body").innerHTML = `<p class="detail-artist">${esc(a.artist)}${a.offline ? '<span class="detail-badge">目录离线</span>' : ""}</p>
-    <dl class="detail-facts">${detailFact("专辑", esc(track?.album || "未提供"))}${detailFact("年份", esc(String(track?.year || "未提供")))}${detailFact("格式", demo ? "封面演示" : esc(songFormat(track)))}${detailFact("时长", demo || !track?.duration ? "—" : esc(time(track.duration)))}${detailFact("正在播放", "", ' data-local-now-row data-wide="true" hidden', " data-local-now")}</dl>
-    <div class="detail-transport" role="group" aria-label="播放控制"><button data-action="previous-track" class="detail-control" aria-label="上一曲" title="上一曲" disabled>${skipGlyph("prev")}</button>${detailDivider}<button data-action="local-toggle" id="detail-toggle" class="detail-control detail-toggle" aria-label="播放这首" aria-pressed="false" data-ring="plain">${detailRing}</button>${detailDivider}<button data-action="next-track" class="detail-control" aria-label="下一曲" title="下一曲" disabled>${skipGlyph("next")}</button></div>${detailTimeline("local-seek", "播放位置", "local")}${songAbout(song)}`;
+  const format = demo ? "封面演示" : songFormat(track);
+  const meta = [track?.year ? String(track.year) : "", format === "未提供" ? "" : format, !demo && track?.duration ? time(track.duration) : ""].filter(Boolean);
+  $("#detail-body").innerHTML = `${detailArtist(a.artist, track?.album, a.offline ? '<span class="detail-badge">目录离线</span>' : "")}${meta.length ? `<p class="detail-meta">${meta.map((fact) => `<span>${esc(fact)}</span>`).join("")}</p>` : ""}
+    <div class="detail-transport" role="group" aria-label="播放控制"><button data-action="previous-track" class="detail-control" aria-label="上一曲" title="上一曲" disabled>${skipGlyph("prev")}</button>${detailDivider}<button data-action="detail-play" id="detail-toggle" class="detail-control detail-toggle" aria-label="播放" aria-pressed="false" data-ring="plain">${detailRing}</button>${detailDivider}<button data-action="next-track" class="detail-control" aria-label="下一曲" title="下一曲" disabled>${skipGlyph("next")}</button></div>${detailTimeline("local-seek", "播放位置", "local")}${lyricsBox}${songAbout(song)}`;
   article.scrollTop = scroll;
   documentDecryption.reset(
     article,
     preferences.reduced || scene?.decryptionFrame.phase === "clear",
   );
-  syncRing();
+  // The ring's shape and words (its song's own play button) and the rest of the transport.
+  syncPlayButton();
   syncLocalTransport();
 }
 /**
@@ -2154,6 +2895,7 @@ function requestSeek(position: number) {
   if (!Number.isFinite(position)) return;
   netease.seekTarget(position);
   updateExternalTimeline();
+  lyricsView.sync();
   if (externalSeekPointer === undefined && !externalSeekKeys.size) void netease.sendSeeks();
 }
 function updateExternalControls() {
@@ -2162,21 +2904,33 @@ function updateExternalControls() {
   // ... and the header's now-playing slot with it.
   updateStatus();
   syncPlayButton();
-  // The details page's controls work NetEase as it is: their play / pause (a ring with a
-  // triangle or two bars, the words in its name) says what plays.
+  // The details page's controls work the player as it is: a lone live track's play / pause (a ring
+  // with a triangle or two bars, the words in its name) says what plays. (A song's ring is its own:
+  // syncPlayButton.)
   const playback = mediaPlayback(source);
   const toggleLabel = playback === "playing" ? "暂停" : playback === "unknown" ? "播放 / 暂停（状态未知）" : "播放";
+  // NetEase's own previous / next do nothing while it plays a song outside its queue (outsideQueue):
+  // not offered then, the reason only in their titles and names (the owner, 2026-10-07).
+  const stuck = netease.outsideQueue();
   document.querySelectorAll<HTMLButtonElement>("[data-media-action]").forEach(button => {
-    button.disabled = !externalMedia.offers(button.dataset.mediaAction as MediaAction);
-    if (button.dataset.mediaAction !== "toggle") return;
+    const action = button.dataset.mediaAction as MediaAction, skip = action === "previous" || action === "next";
+    button.disabled = !externalMedia.offers(action) || (skip && stuck);
+    if (skip) {
+      const name = (button.dataset.baseName ??= button.getAttribute("aria-label") ?? ""), title = (button.dataset.baseTitle ??= button.title);
+      const reason = stuck ? "：网易云正在播放的歌不在它的播放队列里，网易云不能从这里切换上一首或下一首" : "";
+      if (button.getAttribute("aria-label") !== name + reason) button.setAttribute("aria-label", name + reason);
+      if (button.title !== title + reason) button.title = title + reason;
+    }
+    if (action !== "toggle") return;
     if (button.getAttribute("aria-label") !== toggleLabel) button.setAttribute("aria-label", toggleLabel);
     const title = source ? `${source.name}：${toggleLabel}` : toggleLabel;
     if (button.title !== title) button.title = title;
     button.setAttribute("aria-pressed", String(playback === "playing"));
   });
-  const shown = source && { ...source, playback: playback ?? source.playback };
-  document.querySelectorAll<HTMLElement>("[data-media-playback]").forEach(node => { node.textContent = mediaPlaybackLabel(shown); });
-  document.querySelectorAll<HTMLElement>("[data-media-album]").forEach(node => { node.textContent = source?.album || "未提供"; });
+  document.querySelectorAll<HTMLElement>("[data-media-album]").forEach((node) => {
+    setText(node, source?.album ?? "");
+    if (node.hidden !== !source?.album) node.hidden = !source?.album;
+  });
   updateExternalTimeline();
   const warning = [externalMedia.warning, source?.warning, externalMedia.error].filter(Boolean).join("\n");
   document.querySelectorAll<HTMLElement>("[data-media-warning]").forEach(node => { node.textContent = warning; });
@@ -2203,7 +2957,7 @@ function updateExternalControls() {
     const control = netease.queueControl();
     // The control switch is not part of the key: rebuilding under it would drop its focus.
     const restarting = netease.debugRestarting && !isNeteaseSource(source);
-    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, preferences.playlistColumns, restarting]);
+    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, preferences.playlistColumns, restarting, netease.playKey]);
     if (queueSetting && queueKey !== queueSettingVisual) {
       queueSettingVisual = queueKey;
       debugSettingVisual = "";
@@ -2213,7 +2967,7 @@ function updateExternalControls() {
       queueSetting.innerHTML = restarting
         ? '<p class="external-note" role="status">正在以调试端口重新启动网易云…</p>'
         : queueSettingMarkup(source, preferences.neteaseQueue, netease.queueStatus, control,
-            { enabled: preferences.playlistColumns, status: netease.playlistStatus });
+            { enabled: preferences.playlistColumns, status: netease.playlistStatus }, netease.playKey);
       if (focused) queueSetting.querySelector<HTMLElement>(`#${CSS.escape(focused)}`)?.focus({ preventScroll: true });
     }
     const queueStatusNode = document.querySelector<HTMLElement>("[data-queue-status]");
@@ -2234,28 +2988,8 @@ function updateExternalControls() {
   updateQueueRows();
 }
 function updateQueueRows() {
-  const key = records[selected]?.id;
-  const playing = !!netease.queuePlaying && key === netease.queuePlaying;
-  // The details' 网易云当前曲目: placed when the document is rendered, while the selection is not
-  // NetEase's song ('正在切换…' while NetEase has not yet reported the song asked for). It then
-  // keeps its place until the next document and names NetEase's song, so the controls below it
-  // do not jump up under the pointer when NetEase arrives at the selection.
-  for (const row of document.querySelectorAll<HTMLElement>("[data-now-row]")) {
-    if (row.dataset.nowRow) continue;
-    row.dataset.nowRow = "placed";
-    row.hidden = playing;
-  }
-  document.querySelectorAll<HTMLElement>("[data-media-now]").forEach((node) => {
-    setText(node, netease.queueJump?.key === key && !!key ? "正在切换…" : externalMedia?.selected?.title || "未提供");
-  });
-  // ... and under the timeline, what the controls cannot do here (nothing when the port plays the selection).
-  const limit = netease.shownQueue() ? netease.queueControlLimit() : externalMedia?.selected ? LONE_TRACK_NOTE : "";
-  document.querySelectorAll<HTMLElement>("[data-detail-limit]").forEach((node) => setText(node, limit));
-  if (menu === "song") {
-    // The switch and the port change under an open song scene; its rows are not re-rendered for that.
-    if (netease.shownQueue()) setText($("#song-note"), netease.songQueueNote());
-    syncSongRows();
-  }
+  // The switch and the port change under an open song scene (its rows' ▶): its rows are not re-rendered for that.
+  if (menu === "song") syncSongRows();
 }
 /** The playlists' names beside their columns, written over the picture (scene.ts placeLaneLabels). */
 let laneNames: LaneName[] | null = null;
@@ -2301,7 +3035,7 @@ function syncQueueChrome() {
     button.title = words;
   }
   // Whether NetEase follows depends on the switch and its port, so the hint only says "select".
-  $("#music-keyhint").innerHTML = keyHintMarkup(queue);
+  syncKeyHint();
 }
 function syncExternal(): Promise<void> {
   // Serialize scene changes; a later snapshot wins after an in-flight cover upload.
@@ -2326,8 +3060,11 @@ function syncExternal(): Promise<void> {
   return externalUpdating;
 }
 // After a play / pause, a play request or a step to another song: read again every 150 ms
-// until NetEase's state changes (at most 1.5 s) instead of a second later.
-const CONFIRM_STEP_MS = 150, CONFIRM_MS = 1500;
+// until NetEase's state changes (at most 1.5 s) instead of a second later. A play request NetEase
+// has not answered where it was asked for (netease.awaiting: the song not yet seen there, or a
+// playlist's 播放全部 not yet read as its queue, which NetEase saves a moment after the song starts)
+// is read every 250 ms after that, until it is or the request lapses (2026-10-17).
+const CONFIRM_STEP_MS = 150, CONFIRM_MS = 1500, AWAITING_STEP_MS = 250;
 let confirmUntil = 0, confirmFrom = "";
 let externalRefreshAgain = false;
 let handedSession = sourceSwitch?.session;
@@ -2363,7 +3100,8 @@ async function refreshExternal() {
   finally {
     externalRefreshing = false;
     if (confirmUntil && (performance.now() >= confirmUntil || playbackKey() !== confirmFrom)) confirmUntil = 0;
-    const delay = externalRefreshAgain ? 0 : confirmUntil ? CONFIRM_STEP_MS : document.hidden ? 2000 : 1000;
+    const delay = externalRefreshAgain ? 0 : confirmUntil ? CONFIRM_STEP_MS : document.hidden ? 2000
+      : netease.awaiting() ? AWAITING_STEP_MS : 1000;
     if (!externalStopped) externalPoll = setTimeout(() => void refreshExternal(), delay);
   }
 }
@@ -2398,11 +3136,12 @@ function renderSourcesPanel() {
   $<HTMLButtonElement>('[data-action="refresh-sources"]').disabled = true;
 }
 /**
- * The details' document (Claude Design, 2026-10-05, direction A): a tag row (the case's tag and
- * count, previous / next), the title (its own reel, #detail-title), the artist, the facts, a
+ * The details' document (Claude Design, 2026-10-05, direction A; redesigned 2026-10-17 for the
+ * lyrics): a tag row (the case's tag and count, previous / next), the title (its own reel,
+ * #detail-title), the artist and the album on one line (the facts and their 曲目数 are gone), a
  * transport row (previous | play ring | next | stop, 48 high, divided by 1 px lines) and the
- * 播放位置 timeline; under it, only when there is something to say, a muted line of what the
- * controls cannot do and the player's warnings.
+ * 播放位置 timeline; under it, only when there is one, the player's warning; then the lyrics, which
+ * take the rest of the column.
  */
 const pad3 = (n: number) => String(n).padStart(3, "0");
 function detailHead(tag: string, count: string, steps?: { group: string; previous: string; next: string }, after = "") {
@@ -2410,18 +3149,32 @@ function detailHead(tag: string, count: string, steps?: { group: string; previou
     `<button data-action="${action}" class="detail-step" aria-label="${label}" title="${label}"><i class="chevron chevron-${action === "prev" ? "up" : "down"}" aria-hidden="true"></i></button>`;
   return `<div class="detail-tag-row"><span class="detail-tag-group"><span class="selection-tag detail-tag">${esc(tag)}</span>${count ? `<span class="detail-tag-of">${count}</span>` : ""}${after}</span>${steps ? `<span class="detail-steps" role="group" aria-label="${steps.group}">${step("prev", steps.previous)}${step("next", steps.next)}</span>` : ""}</div>`;
 }
-const detailFact = (key: string, value: string, row = "", data = "") =>
-  `<div class="detail-fact"${row}><dt>${key}</dt><dd${data}>${value}</dd></div>`;
+/** The artist, then the album in the muted colour after a dot (none when there is no album). */
+const detailArtist = (artist: string, album: string | undefined, after = "", albumData = "") =>
+  `<p class="detail-artist"><span class="detail-artist-name">${esc(artist)}</span><span class="detail-album"${albumData}${album ? "" : " hidden"}>${esc(album ?? "")}</span>${after}</p>`;
+// The lyrics' box (syncLyrics, lyrics-view.ts): written folded away; syncLyrics sets it at once.
+const lyricsBox = '<section class="detail-lyrics" data-lyrics="off" data-motion="off" aria-label="歌词" tabindex="-1"><div class="lyrics-list"></div></section>';
 const detailDivider = '<i class="detail-divider" aria-hidden="true"></i>';
 const detailRing = '<span class="detail-ring" aria-hidden="true"><span class="transport-glyph transport-play"></span><span class="transport-glyph transport-pause"><i></i><i></i></span></span>';
+// The timeline, in a fold that opens and closes with the song that plays (syncDetailTimeline): written
+// open or shut as it is, without movement.
 function detailTimeline(id: string, name: string, data: "media" | "local") {
-  return `<label class="detail-timeline" for="${id}"><span class="detail-timeline-head"><span${data === "media" ? " data-media-timeline-label" : ""}>播放位置</span><output for="${id}"><span data-${data}-position>—</span> / <span data-${data}-duration>—</span></output></span><input type="range" id="${id}" class="detail-seek" min="0" max="1" step="1" value="0" disabled aria-label="${name}" data-known="false"></label>`;
+  const state = timelineState();
+  return `<div class="detail-timeline-wrap" data-timeline="${state}" data-motion="off"${state === "hidden" ? " inert" : ""}><div class="detail-timeline-clip"><label class="detail-timeline" for="${id}"><span class="detail-timeline-head"><span${data === "media" ? " data-media-timeline-label" : ""}>播放位置</span><output for="${id}"><span data-${data}-position>—</span> / <span data-${data}-duration>—</span></output></span><input type="range" id="${id}" class="detail-seek" min="0" max="1" step="1" value="0" disabled aria-label="${name}" data-known="false"></label></div></div>`;
 }
-// NetEase's (or another player's) own controls: they act on what plays, whatever is selected.
-const externalControls = `<div class="detail-transport" role="group" aria-label="外部播放器控制"><button data-media-action="previous" class="detail-control" aria-label="上一曲" title="上一曲">${skipGlyph("prev")}</button>${detailDivider}<button data-media-action="toggle" id="detail-toggle" class="detail-control detail-toggle" aria-label="播放" title="播放" aria-pressed="false" data-ring="unknown">${detailRing}</button>${detailDivider}<button data-media-action="next" class="detail-control" aria-label="下一曲" title="下一曲">${skipGlyph("next")}</button>${detailDivider}<button data-media-action="stop" class="detail-control detail-stop" aria-label="停止" title="停止"><i aria-hidden="true"></i></button></div>${detailTimeline("external-seek", "外部播放器播放位置", "media")}`;
-const detailNote = '<p class="detail-limit" data-detail-limit></p><p class="detail-warning" data-media-warning role="status"></p>';
-// A lone live track (no queue): what the page is and is not.
-const LONE_TRACK_NOTE = "只显示当前曲目，不代表完整专辑或播放队列。音量与音效由原播放器控制；灰色按钮表示该来源当前未提供相应能力。";
+// NetEase's (or another player's) own controls: previous, next and stop act on what plays, whatever
+// is selected. The ring between them: a lone live track's is its player's own play / pause; a song of
+// NetEase's queue or playlists has its own play button (ringPlay: it plays that song, or pauses or
+// resumes it once it is the one that plays; the owner, 2026-10-09).
+function externalControls(song: boolean) {
+  const ring = song
+    ? `<button data-action="detail-play" id="detail-toggle" class="detail-control detail-toggle" aria-label="播放" title="播放" aria-pressed="false" data-ring="plain">${detailRing}</button>`
+    : `<button data-media-action="toggle" id="detail-toggle" class="detail-control detail-toggle" aria-label="播放" title="播放" aria-pressed="false" data-ring="unknown">${detailRing}</button>`;
+  return `<div class="detail-transport" role="group" aria-label="外部播放器控制"><button data-media-action="previous" class="detail-control" aria-label="上一曲" title="上一曲">${skipGlyph("prev")}</button>${detailDivider}${ring}${detailDivider}<button data-media-action="next" class="detail-control" aria-label="下一曲" title="下一曲">${skipGlyph("next")}</button>${detailDivider}<button data-media-action="stop" class="detail-control detail-stop" aria-label="停止" title="停止"><i aria-hidden="true"></i></button></div>${detailTimeline("external-seek", "外部播放器播放位置", "media")}`;
+}
+// Under the timeline, only when there is one: the player's warning (no descriptive text, the owner,
+// 2026-10-07; what a control cannot do is in its own title).
+const detailNote = '<p class="detail-warning" data-media-warning role="status"></p>';
 function renderQueueDetail() {
   const a = currentAlbum();
   if (!a) return;
@@ -2435,9 +3188,9 @@ function renderQueueDetail() {
     { group: "切换歌曲", previous: "上一首", next: "下一首" },
   );
   detailTitle.set(a.title);
-  // The design's facts: the song's album and its column's song count; NetEase's own song, full
-  // width, while the selection is another one (updateQueueRows keeps it current).
-  $("#detail-body").innerHTML = `<p class="detail-artist">${esc(a.artist)}</p><dl class="detail-facts">${detailFact("专辑", esc(song?.album || "未提供"))}${detailFact("曲目数", `${files.length} 首`)}${detailFact("网易云当前曲目", "", ' data-now-row data-wide="true" hidden', " data-media-now")}</dl>${externalControls}${detailNote}`;
+  // The artist and the song's album on one line; no facts (the owner, 2026-10-17: no 曲目数), the
+  // lyrics instead. NetEase's own song is in the header.
+  $("#detail-body").innerHTML = `${detailArtist(a.artist, song?.album)}${externalControls(true)}${detailNote}${lyricsBox}`;
   documentDecryption.reset($("#album-detail-content"), preferences.reduced || scene?.decryptionFrame.phase === "clear");
   updateExternalControls();
 }
@@ -2449,7 +3202,7 @@ function renderExternalDetail() {
   $("#detail-head").innerHTML = detailHead("LIVE TRACK", "", undefined,
     `<button data-action="sources" class="detail-source">${esc(source.name)}<i class="link-chevron" aria-hidden="true"></i></button>`);
   detailTitle.set(source.title || "曲名未提供");
-  $("#detail-body").innerHTML = `<p class="detail-artist">${esc(source.artist || "歌手未提供")}</p><dl class="detail-facts">${detailFact("专辑", esc(source.album || "未提供"), "", " data-media-album")}${detailFact("播放状态", "", "", " data-media-playback")}</dl>${externalControls}${detailNote}`;
+  $("#detail-body").innerHTML = `${detailArtist(source.artist || "歌手未提供", source.album, "", " data-media-album")}${externalControls(false)}${detailNote}`;
   documentDecryption.reset($("#album-detail-content"), preferences.reduced || scene?.decryptionFrame.phase === "clear");
   updateExternalControls();
 }
@@ -2469,6 +3222,7 @@ function closePanel(after?: () => void) {
     after?.();
     return;
   }
+  shortcutCapture = undefined;
   pendingPanelAfter = after;
   if (panelClosing) return;
   panelClosing = true;
@@ -2513,7 +3267,7 @@ function openPanel(next: Panel, instant = false) {
   const titles = {
     library: ["MUSIC LIBRARY", "本地音乐库"],
     search: ["FIND MUSIC", "搜索歌曲"],
-    settings: ["SYSTEM SETTINGS", "播放与画质"],
+    settings: ["SYSTEM SETTINGS", "设置"],
     sources: ["CONNECT YOUR PLAYER", "连接外部播放器"],
   };
   $("#music-panel-root").innerHTML =
@@ -2537,6 +3291,7 @@ function openPanel(next: Panel, instant = false) {
   if (next === "sources") renderSourcesPanel();
   (
     document.querySelector<HTMLElement>("#album-search") ||
+    document.querySelector<HTMLElement>('#music-panel-root [role="tab"][aria-selected="true"]') ||
     $("#music-panel-root button")
   )?.focus({ preventScroll: true });
 }
@@ -2629,22 +3384,217 @@ function renderSearchResults() {
     ? results.join("")
     : '<div class="no-results">没有找到歌曲。</div>';
 }
+/** The settings panel's tab (通用, 快捷键), kept while the page lives (a source switch reloads it). */
+let settingsTab: "general" | "keys" = "general";
+/**
+ * The settings panel: two tabs (the owner, 2026-10-10: "a settings tab where users can customize
+ * the hotkeys"), 通用 (everything the panel had) and 快捷键; only the shown tab is in the page.
+ */
 function renderSettingsPanel() {
+  const tab = (id: typeof settingsTab, number: string, name: string) =>
+    `<button role="tab" id="settings-tab-${id}" data-action="settings-tab" data-settings-tab="${id}" aria-selected="${settingsTab === id}" aria-controls="settings-tabpanel" tabindex="${settingsTab === id ? 0 : -1}"><span aria-hidden="true">${number}</span>${name}</button>`;
   $("#panel-body").innerHTML =
+    `<div class="music-tabs panel-tabs" role="tablist" aria-label="设置分类">${tab("general", "01", "通用")}${tab("keys", "02", "快捷键")}<i class="music-tab-indicator" aria-hidden="true"></i></div><div id="settings-tabpanel" role="tabpanel" aria-labelledby="settings-tab-${settingsTab}"></div>`;
+  renderSettingsTab(true);
+}
+function renderSettingsTab(first = false) {
+  const body = $("#settings-tabpanel");
+  body.setAttribute("aria-labelledby", `settings-tab-${settingsTab}`);
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]")) {
+    const on = button.dataset.settingsTab === settingsTab;
+    button.setAttribute("aria-selected", String(on));
+    button.tabIndex = on ? 0 : -1;
+  }
+  if (settingsTab === "keys") renderShortcutsTab(body);
+  else renderGeneralSettings(body);
+  // The 2 px ink line under the chosen tab, as the old album tabs had it (180 ms; at once when reduced).
+  const selected = document.querySelector<HTMLElement>(`[data-settings-tab="${settingsTab}"]`);
+  const line = document.querySelector<HTMLElement>(".panel-tabs .music-tab-indicator");
+  if (selected && line) {
+    line.style.transition = first || preferences.reduced ? "none" : "";
+    line.style.transform = `translateX(${selected.offsetLeft}px) scaleX(${selected.offsetWidth})`;
+  }
+  if (!first) tabTransition.reveal(body, preferences.reduced);
+}
+function setSettingsTab(next: typeof settingsTab) {
+  if (next === settingsTab) return;
+  endShortcutCapture();
+  settingsTab = next;
+  renderSettingsTab();
+  document.querySelector(".music-panel")?.scrollTo({ top: 0 });
+  effects.play("ui-tick");
+}
+/** ← → Home End on the tabs move between them (and show them), as tabs do. */
+function settingsTabKey(e: KeyboardEvent) {
+  const tab = (e.target as HTMLElement).closest?.<HTMLButtonElement>("[data-settings-tab]");
+  if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return false;
+  e.preventDefault();
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]")];
+  const at = tabs.indexOf(tab);
+  const next = tabs[e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : (at + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+  setSettingsTab(next.dataset.settingsTab as typeof settingsTab);
+  next.focus();
+  return true;
+}
+/** 通用: what the settings panel always had. */
+function renderGeneralSettings(body: HTMLElement) {
+  body.innerHTML =
     `<section class="panel-section"><h3>外观主题</h3><div class="theme-cards">${(["day", "night"] as Theme[]).map((t) => `<button data-theme="${t}" aria-pressed="${preferences.theme === t}" class="${t}"><i></i><strong>${themeNames[t]}</strong><span>${t === "day" ? "暖白玻璃与日光" : "极简星空与透光白卡"}</span></button>`).join("")}</div></section>
     <section class="panel-section" id="introduction-settings"><h3>专辑介绍</h3><p>从公开百科查询并更新专辑介绍，附上资料来源。介绍保存在本机，不需要配置 MusicBrainz 联系信息；音乐文件不会上传。</p><p id="introduction-coverage"></p><button class="primary-button" id="introduction-refresh" data-action="introductions-library">查询 / 更新专辑介绍 ↗</button><progress id="introduction-progress" aria-label="专辑介绍查询进度" max="1" value="0" hidden></progress><p id="introduction-status" class="scan-status" role="status" aria-live="polite"></p><details id="introduction-missing" hidden><summary></summary><ul></ul></details></section>
     ${qualityMarkup(renderQuality)}
-    <section class="panel-section"><h3>动效与显示</h3><label class="settings-row"><span>减少动态效果<small>简化镜头、文字加载和页签过渡</small></span><input type="checkbox" id="reduced-motion" ${preferences.reduced ? "checked" : ""}></label><label class="settings-row"><span>开场动画<small>启动时约 4 秒的专辑架进场，下次启动时生效</small></span><input type="checkbox" id="intro-setting" ${preferences.intro ? "checked" : ""}></label><button class="text-button" data-action="fullscreen">切换全屏 ↗</button></section>
+    <section class="panel-section"><h3>动效与显示</h3><label class="settings-row"><span>减少动态效果<small>简化镜头、文字加载和页签过渡</small></span><input type="checkbox" id="reduced-motion" ${preferences.reduced ? "checked" : ""}></label><label class="settings-row"><span>开场动画<small>启动时约 4 秒的专辑架进场，下次启动时生效</small></span><input type="checkbox" id="intro-setting" ${preferences.intro ? "checked" : ""}></label><label class="settings-row"><span>帧率上限<small>三维画面每秒最多画多少帧；上限越低越省电，动作越不顺滑</small></span><select id="frame-cap" aria-label="帧率上限">${FRAME_CAPS.map((cap) => `<option value="${cap}"${preferences.frameCap === cap ? " selected" : ""}>${cap ? `${cap} 帧／秒` : "不限（跟随显示器）"}</option>`).join("")}</select></label><button class="text-button" data-action="fullscreen">切换全屏 ↗</button></section>
     <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，播完后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 Windows 和 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
     <section class="panel-section"><h3>开发与资源</h3><p>音乐适配与维护：<a href="https://github.com/RonaldDeng/Rhine-Music-Demo" target="_blank" rel="noopener">RonaldDeng ↗</a><br>原版界面：<a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener">LBEILC / RhineLabUI ↗</a></p><p><a href="/licenses/project-mit.txt" target="_blank" rel="noopener">代码 MIT 许可 ↗</a> · <a href="https://github.com/RonaldDeng/Rhine-Music-Demo/blob/v0.2.0/NOTICE.md" target="_blank" rel="noopener">版权与资源说明 ↗</a></p><a href="/?original=1&scene=archive" target="_blank" rel="noopener">打开原版档案界面 ↗</a><p><a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">MiSans 字体许可 ↗</a></p></section>`;
   if (playerCurrent) {
-    $("#introduction-settings").remove();
-    $("#volume").closest(".panel-section")?.remove();
-    $("#panel-body").insertAdjacentHTML("afterbegin", '<p class="panel-intro">当前来源是外部播放器，这里只调整此窗口的外观。歌曲音量、淡入淡出与曲库管理请在原播放器中设置；连接播放器时，此窗口不播放本地音乐或 BGM。</p>');
+    body.querySelector("#introduction-settings")?.remove();
+    body.querySelector("#volume")?.closest(".panel-section")?.remove();
+    body.insertAdjacentHTML("afterbegin", '<p class="panel-intro">当前来源是外部播放器，这里只调整此窗口的外观。歌曲音量、淡入淡出与曲库管理请在原播放器中设置；连接播放器时，此窗口不播放本地音乐或 BGM。</p>');
   }
   updateQuality();
   updateIntroductionStatus();
 }
+/**
+ * 快捷键 (shortcuts.ts): each action with its main key and its 附加键, every one a button that takes the next key pressed.
+ * A key button takes the next key pressed (shortcutCapture); a key another action holds asks for a
+ * second press, then the two swap; Backspace clears, Esc cancels. The rows are written again after
+ * every change; the status line stays, for screen readers.
+ */
+function renderShortcutsTab(body: HTMLElement) {
+  body.innerHTML = `<p class="panel-intro">点一个按键，再按下新的键即可更改；新键已被其他操作使用时，再按一次可互换。Backspace 清除，Esc 取消。每个操作可以再加一个附加键；Esc 总是关闭面板与菜单。</p><p id="shortcut-status" class="shortcut-status" role="status" aria-live="polite"></p><div id="shortcut-rows"></div><button class="text-button" data-action="shortcuts-reset-all">全部恢复默认</button>`;
+  renderShortcutRows();
+}
+function renderShortcutRows(focusSlot?: string) {
+  const rows = document.querySelector<HTMLElement>("#shortcut-rows");
+  if (!rows) return;
+  // Written again, the rows keep the focused key button or 恢复默认 (the window coming back, a reset).
+  const active = document.activeElement instanceof HTMLElement && rows.contains(document.activeElement) ? document.activeElement : undefined;
+  focusSlot ??= active?.dataset.shortcutSlot;
+  const focusReset = focusSlot ? undefined : active?.dataset.shortcut;
+  const groups = ["播放", "浏览", "打开与返回"] as const;
+  rows.innerHTML = `<div class="shortcut-head" aria-hidden="true"><span></span><span>按键</span><span>附加键</span><span></span></div>` +
+    groups.map((group) => `<section class="panel-section shortcut-group"><h3>${group}</h3>${SHORTCUTS.filter((info) => info.group === group).map(shortcutRow).join("")}</section>`).join("");
+  if (focusSlot) rows.querySelector<HTMLElement>(`[data-shortcut-slot="${focusSlot}"]`)?.focus({ preventScroll: true });
+  else if (focusReset) (rows.querySelector<HTMLElement>(`[data-shortcut="${focusReset}"]`) ??
+    rows.querySelector<HTMLElement>(`[data-shortcut-slot="${focusReset}"], [data-shortcut-slot="${focusReset}.extra"]`))?.focus({ preventScroll: true });
+}
+function shortcutRow(info: ShortcutInfo) {
+  const words = actionWords(info.id);
+  const slotCap = (slot: ShortcutSlot) => {
+    const key = slotKey(preferences.shortcuts, slot);
+    const capturing = shortcutCapture?.slot === slot;
+    const shown = capturing ? "按下新的键…" : key ? keyLabel(key, keyLayout) : isExtra(slot) ? "+" : "未设置";
+    const spoken = key ? spokenKey(key, keyLayout) : "未设置";
+    const what = `${words.name}${isExtra(slot) ? "的附加键" : ""}`;
+    return `<button class="shortcut-key${capturing ? " capturing" : ""}${key ? "" : " empty"}" data-action="shortcut-capture" data-shortcut-slot="${slot}" aria-label="${esc(`${what}：${capturing ? "按下新的键" : spoken}`)}"><kbd>${esc(shown)}</kbd></button>`;
+  };
+  const restore = changed(preferences.shortcuts, info.id)
+    ? `<button class="text-button shortcut-reset" data-action="shortcut-reset" data-shortcut="${info.id}" aria-label="${esc(`恢复默认：“${words.name}”改回 ${spokenKey(info.key, keyLayout)}`)}">恢复默认</button>`
+    : "<span></span>";
+  return `<div class="shortcut-row" data-shortcut-row="${info.id}"><span class="shortcut-name">${words.name}${words.note ? `<small>${words.note}</small>` : ""}</span>${slotCap(info.id)}${slotCap(`${info.id}.extra`)}${restore}</div>`;
+}
+/** The key button that takes the next key pressed, if any; and the key that set one, until it is released. */
+let shortcutCapture: { slot: ShortcutSlot; pending?: string } | undefined;
+let shortcutHeld = "";
+function shortcutStatus(text: string) {
+  const node = document.querySelector<HTMLElement>("#shortcut-status");
+  if (node) node.textContent = text;
+}
+/** “查看这首歌”, or “查看这首歌”的附加键: an action's slot, named in a message. */
+function slotWords(slot: ShortcutSlot) {
+  return `“${actionWords(slotAction(slot)).name}”${isExtra(slot) ? "的附加键" : ""}`;
+}
+function startShortcutCapture(slot: ShortcutSlot) {
+  shortcutCapture = { slot };
+  renderShortcutRows(slot);
+  shortcutStatus(`请按新的键来设置${slotWords(slot)}，Backspace 清除，Esc 取消`);
+}
+/** Ends the capture (a cancel says so, if `cancelled`); the focus stays on its key button. */
+function endShortcutCapture(message?: string) {
+  if (!shortcutCapture) return;
+  const slot = shortcutCapture.slot;
+  shortcutCapture = undefined;
+  renderShortcutRows(document.activeElement?.closest?.("#shortcut-rows") ? slot : undefined);
+  if (message !== undefined) shortcutStatus(message);
+}
+// The capture takes the keys before the page does (capture phase): Esc cancels it rather than
+// closing the panel; Tab still moves the focus (and cancels); Ctrl, Alt and Win combinations stay
+// the system's (Alt+F4) and are refused; a key's repeats and its release are not the page's.
+function captureShortcutKey(e: KeyboardEvent) {
+  if (shortcutHeld && e.code === shortcutHeld) {
+    if (e.repeat) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    // A fresh press: its release went to another window.
+    shortcutHeld = "";
+  }
+  if (!shortcutCapture) return;
+  if (e.key === "Tab") {
+    endShortcutCapture("已取消");
+    return;
+  }
+  e.stopPropagation();
+  const modifier = ["Shift", "Control", "Alt", "AltGraph", "Meta", "OS", "CapsLock", "NumLock", "ScrollLock", "Fn"].includes(e.key);
+  if (e.ctrlKey || e.altKey || e.metaKey) {
+    if (!modifier) shortcutStatus("不支持组合键，请只按一个键");
+    return;
+  }
+  e.preventDefault();
+  if (e.repeat || modifier) return;
+  shortcutHeld = e.code;
+  const slot = shortcutCapture.slot;
+  const current = slotKey(preferences.shortcuts, slot);
+  if (e.key === "Escape") {
+    endShortcutCapture(current ? `已取消，${slotWords(slot)}仍为 ${keyLabel(current, keyLayout)}` : "已取消");
+    return;
+  }
+  if (e.key === "Backspace" || e.key === "Delete") {
+    setShortcuts(clear(preferences.shortcuts, slot));
+    endShortcutCapture(`${slotWords(slot)}已清除`);
+    return;
+  }
+  if (e.isComposing || e.keyCode === 229 || ["Unidentified", "Process"].includes(e.key) ||
+    /^(Lang[1-5]|Convert|NonConvert|KanaMode|HangulMode|HanjaMode|Zenkaku|Hankaku|ZenkakuHankaku|Eisu|Romaji)$/.test(e.key)) {
+    shortcutStatus("请先关闭输入法，再按一个键");
+    return;
+  }
+  const code = eventCode(e), name = keyLabel(code, keyLayout);
+  if (!allowed(code)) {
+    shortcutStatus(`${code ? `${name} ` : "这个键"}不能用作快捷键（Tab、功能键与媒体键不行），请按其他键`);
+    return;
+  }
+  const other = holder(preferences.shortcuts, code);
+  if (other && other !== slot && shortcutCapture.pending !== code) {
+    shortcutCapture.pending = code;
+    shortcutStatus(`${name} 已用于${slotWords(other)}，再按一次 ${name} 互换，或按其他键`);
+    return;
+  }
+  const result = assign(preferences.shortcuts, slot, code);
+  if (!result.ok) return;
+  setShortcuts(result.overrides);
+  const moved = result.moved
+    ? `；${slotWords(result.moved.slot)}${result.moved.key ? `改用 ${keyLabel(result.moved.key, keyLayout)}` : "已清除"}`
+    : "";
+  endShortcutCapture(`${slotWords(slot)}已改为 ${name}${moved}`);
+}
+function releaseShortcutKey(e: KeyboardEvent) {
+  if (!shortcutHeld || e.code !== shortcutHeld) return;
+  shortcutHeld = "";
+  e.preventDefault();
+  e.stopPropagation();
+}
+document.addEventListener("keydown", captureShortcutKey, true);
+document.addEventListener("keyup", releaseShortcutKey, true);
+// Alt+← and Alt+→ would take the page back or forward in its history (the other source's page):
+// never, in a panel, a text field, the opening or while a key is being set too.
+window.addEventListener("keydown", (e) => {
+  if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) e.preventDefault();
+}, true);
+window.addEventListener("blur", () => {
+  shortcutHeld = "";
+  endShortcutCapture("已取消");
+});
 function updateQuality() {
   renderQuality = normalizeQuality(renderQuality);
   preferences.renderQuality = renderQuality;
@@ -2733,12 +3683,6 @@ async function queryIntroductions(one = false) {
     updateIntroductionStatus();
   }
 }
-/** 本地音乐: play the selected song; the player then continues through its playlist. */
-function playSong() {
-  const a = currentAlbum(), song = localSong();
-  if (playerCurrent || !song || !a?.tracks.length || a.offline) return;
-  void player?.play(song.id, playlistQueue(localShelf, song));
-}
 
 document.addEventListener("click", (e) => {
   if (boot?.active) return;
@@ -2750,6 +3694,8 @@ document.addEventListener("click", (e) => {
   if (stage.dataset.chromeMenu === "open" && !(e.target as Element).closest(".topnav-menu-button") &&
     (!(e.target as Element).closest(".topnav-modes") || (target && !target.dataset.theme)))
     setChromeMenu(false, false);
+  // A key being set is cancelled by a click anywhere but its own button (which cancels it too).
+  if (shortcutCapture && target?.dataset.action !== "shortcut-capture") endShortcutCapture("已取消");
   if (!target) return;
   if (target instanceof HTMLButtonElement && target.disabled) return;
   if (target.dataset.mediaSource && externalMedia) {
@@ -2781,15 +3727,17 @@ document.addEventListener("click", (e) => {
     if (step && Number.isInteger(step)) stepGenre(step);
     return;
   }
+  // A row of the song scene's list, its ▶ or the rest of it: one click, two or more (clickSongRow).
+  const songRow = target.closest<HTMLButtonElement>("#song-list .song-row");
+  if (songRow) {
+    clickSongRow(songRow, target.dataset.action === "play-row", e);
+    return;
+  }
   if (target.dataset.select) {
     const index = Number(target.dataset.select);
     const rulerStep = Number(target.dataset.rulerStep);
     netease.queueFollowPaused = true;
-    select(index,
-      target.dataset.rulerStep !== undefined && Number.isInteger(rulerStep)
-        ? { axis: "row", direction: rulerStep }
-        // A playlist row: the chain of covers runs to it the shorter way round.
-        : target.closest("#music-song") ? rowNavigation(navigationSelection(), index) : undefined);
+    select(index, target.dataset.rulerStep !== undefined && Number.isInteger(rulerStep) ? { axis: "row", direction: rulerStep } : undefined);
     return;
   }
   if (target.dataset.album) {
@@ -2824,6 +3772,36 @@ document.addEventListener("click", (e) => {
     return;
   }
   switch (action) {
+    // 设置's tabs and its 快捷键 (renderShortcutsTab).
+    case "settings-tab":
+      setSettingsTab(target.dataset.settingsTab === "keys" ? "keys" : "general");
+      break;
+    case "shortcut-capture": {
+      const slot = target.dataset.shortcutSlot as ShortcutSlot;
+      if (shortcutCapture?.slot === slot) endShortcutCapture("已取消");
+      else startShortcutCapture(slot);
+      break;
+    }
+    case "shortcut-reset": {
+      const id = target.dataset.shortcut as ShortcutAction;
+      const info = shortcutInfo(id);
+      const result = reset(preferences.shortcuts, id);
+      setShortcuts(result.overrides);
+      renderShortcutRows(id);
+      const moved = result.moved
+        ? `；${slotWords(result.moved.slot)}${result.moved.key ? `改用 ${keyLabel(result.moved.key, keyLayout)}` : "已清除"}`
+        : "";
+      shortcutStatus(`“${actionWords(id).name}”已恢复默认 ${keyLabel(info.key, keyLayout)}${moved}`);
+      break;
+    }
+    case "shortcuts-reset-all": {
+      // What this build does not know (a later version's keys) stays for it.
+      const known = new Set<string>(SHORTCUTS.flatMap((info) => [info.id, `${info.id}.extra`]));
+      setShortcuts(Object.fromEntries(Object.entries(preferences.shortcuts).filter(([slot]) => !known.has(slot))));
+      renderShortcutRows();
+      shortcutStatus("所有快捷键已恢复默认");
+      break;
+    }
     // 本地音乐 in the header (and the empty page's button): the local music becomes the current
     // source; nothing to do while it is (as with the chosen theme word).
     case "local-source":
@@ -2866,14 +3844,17 @@ document.addEventListener("click", (e) => {
     case "dismiss-panel":
       closePanel();
       break;
+    // 查看这首歌 (the shelf) and 这首歌 (the song scene) open the song's details and play it (openCase;
+    // the owner, 2026-10-09). A pointer press that closed the header's open menu only opens; a press
+    // of the key (e.detail 0) is not one.
     case "open":
-      setMode("detail");
+      openCase(!(e.detail > 0 && pressClosesMenu), () => setMode("detail"));
       break;
     case "songs":
       toggleSongs();
       break;
     case "details":
-      showDetails();
+      openCase(!(e.detail > 0 && pressClosesMenu));
       break;
     case "back":
       leaveMenu();
@@ -2903,12 +3884,22 @@ document.addEventListener("click", (e) => {
     case "genre-next":
       stepGenre(1);
       break;
+    // The header's ring: pause or resume what plays.
     case "play-pause":
       togglePlayback();
       break;
-    // 本地音乐's details: the local player's own play / pause.
-    case "local-toggle":
-      toggleLocal();
+    // The shelf's 42 px ring: the selected song's own play button (ringPlay).
+    case "shelf-play":
+      ringPlay(navigationSelection());
+      break;
+    // (▶ in a song row, data-action="play-row", is the row's: clickSongRow, above.)
+    // ● 012 beside the shelf's ring and on the song scene's pane: back to the song that plays.
+    case "go-playing":
+      goToPlaying();
+      break;
+    // The details' ring of a song (NetEase's queue, a local song): that song's own play button.
+    case "detail-play":
+      ringPlay(selected);
       break;
     // 本地音乐's header: the local player's own previous / next song. The shelf stays where it is.
     case "previous-track":
@@ -3024,14 +4015,6 @@ document.addEventListener("change", (e) => {
     void refreshExternal();
     return;
   }
-  if (externalMedia && el.id === "netease-control") {
-    preferences.neteaseControl = el.checked;
-    savePrefs();
-    netease.controlSwitched(el.checked);
-    updateExternalControls();
-    void refreshExternal();
-    return;
-  }
   if (el.id === "quality-preset") {
     preferences.quality = el.value as QualityPreset;
     renderQuality = normalizeQuality(qualityPresets[preferences.quality]);
@@ -3062,6 +4045,13 @@ document.addEventListener("change", (e) => {
     player?.setSongFadeEnabled(el.checked);
     savePrefs();
   }
+  if (el.id === "frame-cap") {
+    const cap = Number((el as unknown as HTMLSelectElement).value);
+    preferences.frameCap = FRAME_CAPS.includes(cap) ? cap : 0;
+    frameCap.set(preferences.frameCap);
+    requestFrame();
+    savePrefs();
+  }
   if (el.id === "reduced-motion") {
     preferences.reduced = el.checked;
     transportTitleMotion.setReduced(el.checked);
@@ -3072,6 +4062,7 @@ document.addEventListener("change", (e) => {
     }
     syncSelectionMotion();
     scene?.setReduced(el.checked);
+    lyricsView.setReduced(el.checked);
     stage.classList.toggle("reduce-motion", el.checked);
     updateSelection();
     savePrefs();
@@ -3096,7 +4087,8 @@ document.addEventListener("keydown", (e) => {
     setChromeMenu(false, true);
     return;
   }
-  // In the open menu the arrows move along its items, not the shelf; the scene's keys close it.
+  // In the open menu the arrows move along its items, not the shelf; the scenes' keys close it before
+  // they act (but Space and Enter, which press its items).
   if (stage.dataset.chromeMenu === "open") {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -3105,13 +4097,15 @@ document.addEventListener("keydown", (e) => {
       items[at < 0 ? (step > 0 ? 0 : items.length - 1) : (at + step + items.length) % items.length]?.focus();
       return;
     }
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.code === "KeyS") setChromeMenu(false);
+    if (!!shortcutAt(e) && e.code !== "Space" && e.key !== "Enter") setChromeMenu(false);
   }
-  if (e.key === "Escape") {
-    panel ? closePanel() : leaveMenu();
+  // Esc closes an open panel, whatever key 返回专辑架 has.
+  if (e.key === "Escape" && panel) {
+    closePanel();
     return;
   }
   if (panel) {
+    if (settingsTabKey(e)) return;
     if (e.key === "Tab") {
       const items = [
         ...document.querySelectorAll<HTMLElement>(
@@ -3131,53 +4125,64 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
-  if (
-    (e.target as HTMLElement).matches(
-      "input, textarea, select, [contenteditable=true]",
-    )
-  )
-    return;
-  if (e.key === "/") {
-    e.preventDefault();
-    searchGenre = "";
-    openPanel("search");
-  }
-  if (e.code === "KeyS" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
-    e.preventDefault();
-    toggleSongs();
-    return;
-  }
-  // Inside the playlist the arrows move along its rows; elsewhere they move the shelf.
+  const target = e.target as HTMLElement;
+  // Typing: no shortcut (a slider is not typing).
+  if (target.matches("input:not([type=range]), textarea, select, [contenteditable=true]")) return;
+  // Inside the playlist its own keys (↑ ↓ Home End PageUp PageDown) move along its rows, whatever
+  // they are bound to; a focused slider keeps its keys too.
   if (menu === "song" && songView.handleKey(e)) return;
-  if (e.key === "ArrowLeft") {
-    e.preventDefault();
-    stepGenre(-1);
+  if (target.matches("input[type=range]") && SLIDER_KEYS.has(e.key)) return;
+  // Ctrl or Win with Space or Enter is no shortcut, and does not press the focused control either
+  // where the key alone would act instead (Chromium's press ignores them). Alt+Space is the window's.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.isComposing && e.keyCode !== 229 &&
+    (e.code === "Space" || e.key === "Enter")) {
+    const plain = shortcutKeys.get(eventCode(e));
+    if (plain && takesPress(e, plain, target)) {
+      e.preventDefault();
+      if (e.code === "Space") spaceTaken = true;
+    }
+    return;
   }
-  if (e.key === "ArrowRight") {
-    e.preventDefault();
-    stepGenre(1);
-  }
-  if (e.key === "ArrowUp") {
-    e.preventDefault();
-    stepAlbum(-1);
-  }
-  if (e.key === "ArrowDown") {
-    e.preventDefault();
-    stepAlbum(1);
-  }
-  if (e.key === "Enter" && !(e.target as HTMLElement).closest("button, a")) {
-    e.preventDefault();
-    showDetails();
-  }
-  // Space stays play / pause on a playlist row too; Enter is what activates the row.
-  if (e.code === "Space" && (!(e.target as HTMLElement).closest("button, a") || (e.target as HTMLElement).closest("#song-list"))) {
-    e.preventDefault();
-    togglePlayback();
-  }
+  // Every action by its keys (shortcuts.ts; the user's, 设置 → 快捷键): by the key's code, without
+  // Ctrl, Alt or Win, held down only where the action repeats (the songs' and the playlists' steps).
+  const action = shortcutAt(e);
+  if (!action) return;
+  if ((e.code === "Space" || e.key === "Enter") && !takesPress(e, action, target)) return;
+  e.preventDefault();
+  if (e.code === "Space") spaceTaken = true;
+  if (!e.repeat || shortcutInfo(action).repeat) runShortcut(action, e);
 });
-// A button is clicked when Space is released: keep that from playing the focused row.
+/** A focused slider's own keys. */
+const SLIDER_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+/**
+ * Whether Space or Enter, bound to `action`, acts instead of pressing the focused control (Space
+ * presses it as it is released). In the three scenes the action comes first (the owner, 2026-10-08:
+ * Space pauses or resumes whatever button has the focus), but not where they stay the control's own
+ * (pressKeepsOwn); 查看这首歌 leaves a focused button its own press, as Enter always did; and Enter
+ * presses the header's and a notice's buttons whatever it is bound to, so 设置 stays in reach of
+ * the keyboard.
+ */
+function takesPress(e: KeyboardEvent, action: ShortcutAction, target: HTMLElement) {
+  if (pressKeepsOwn(target)) return false;
+  const control = target.closest("button, a");
+  if (!control) return true;
+  if (action === "open") return false;
+  return !(e.key === "Enter" && !!control.closest(".music-topnav, #music-toast"));
+}
+/**
+ * Where Space and Enter stay the focused control's own keys: the header's open menu, the window's
+ * own buttons, and a page without songs (its buttons: choose a folder, a player, the demonstration).
+ */
+function pressKeepsOwn(target: HTMLElement) {
+  return stage.dataset.chromeMenu === "open" || !!target.closest(".window-bar")
+    || (!records.length && !!target.closest("button, a"));
+}
+// A focused button is clicked when Space is released: not when Space ran a shortcut.
+let spaceTaken = false;
 document.addEventListener("keyup", (e) => {
-  if (e.code === "Space" && (e.target as HTMLElement).closest?.("#song-list")) e.preventDefault();
+  if (e.code !== "Space" || !spaceTaken) return;
+  spaceTaken = false;
+  e.preventDefault();
 });
 
 // The wheel scrolls the shelf. Events only add to the accumulator; frame() applies the rows
@@ -3225,20 +4230,47 @@ function drainWheel() {
 let lastFrame = 0,
   frameCount = 0,
   frameRequest = 0,
-  frameTimer = 0;
+  frameTimer = 0,
+  // The number of the loop's pending request: only that one runs the loop, so it is one loop.
+  frameToken = 0;
+// 帧率上限 (frame-cap.ts): which display frames the loop may run on.
+const frameCap = new FrameCap();
+frameCap.set(preferences.frameCap);
+/**
+ * Asks for the loop's next run. A second loop drew the whole scene again in every display frame
+ * (2026-10-10: up to 637 draws a second against the display's 240; the frame pacing takes a run that
+ * took no time for a fresh start that must draw); a request that is not the latest ends unrun.
+ */
+function scheduleFrame() {
+  const token = ++frameToken;
+  frameRequest = requestAnimationFrame((ms) => {
+    if (token === frameToken) frame(ms);
+  });
+}
 function requestFrame() {
   window.clearTimeout(frameTimer);
   frameTimer = 0;
-  if (!frameRequest) frameRequest = requestAnimationFrame(frame);
+  if (!frameRequest) scheduleFrame();
 }
 function frame(ms: number) {
   frameRequest = 0;
+  // 帧率上限: a display frame before the next run's time (an early wake by input, or one stamped
+  // before that time) only measures the display for the frame pacing; the loop then waits for it.
+  const capped = !document.hidden;
+  if (capped && !frameCap.admit(ms)) {
+    if (scene && !viewer?.isOpen) scene.skipFrame(ms / 1000);
+    waitForFrame(frameCap.next);
+    return;
+  }
   if (!document.hidden && scene) {
     drainWheel();
     const opening = boot?.update(ms / 1000);
     if (!viewer?.isOpen) scene.update(ms / 1000, opening?.cinema);
     syncBracket();
     syncSongHop();
+    // The song scene's level meter moves with this loop (about 60 times a second at rest, fewer
+    // under a lower 帧率上限).
+    songView.tickMeter(ms, preferences.reduced);
     viewer?.update(ms / 1000);
     if (!viewer?.isOpen && !boot?.active) presentation.update();
     const phase = presentation.phase;
@@ -3297,15 +4329,35 @@ function frame(ms: number) {
   // Input or a state change during this frame already asked for the next one.
   if (frameRequest) return;
   // While the scene rests and nothing here animates, wait for the scene's next
-  // ~60 Hz slot instead of running every display frame (FramePacing).
+  // ~60 Hz slot instead of running every display frame (FramePacing); with a 帧率上限,
+  // also for the cap's next run, whichever is later.
   const quiet = scene && !document.hidden && !boot?.active && !viewer?.isOpen &&
     !pendingDetailFocus && !pendingSongFocus && !pendingSearchTrack && !wheelNavigation.active && (presentation.phase === "archive" ||
       (presentation.phase === "detail" && !documentDecryption.active));
-  const wait = quiet ? scene!.nextFrameAt() * 1000 - performance.now() : 0;
-  if (wait > 1) frameTimer = window.setTimeout(requestFrame, wait);
-  else frameRequest = requestAnimationFrame(frame);
+  waitForFrame(Math.max(quiet ? scene!.nextFrameAt() * 1000 : 0, capped ? frameCap.next : 0));
+}
+/**
+ * Runs the loop again at `at` (ms, the animation-frame clock): a timer, or the next display frame
+ * when that is less than a display frame away (it is then the first that may run).
+ */
+function waitForFrame(at: number) {
+  const wait = at - performance.now();
+  if (wait > Math.max(1, (scene?.displayFrame ?? 0) * 1000)) {
+    // The interval across this wait is not a display frame (FramePacing).
+    scene?.frameWaited();
+    frameTimer = window.setTimeout(requestFrame, wait);
+  } else scheduleFrame();
 }
 async function start() {
+  // The keys' names (设置 → 快捷键), with the keyboard layout's characters once it is read.
+  applyKeyLabels();
+  readKeyLayout();
+  window.addEventListener("focus", readKeyLayout);
+  if (savedShortcuts.reverted) {
+    savePrefs();
+    settingsTab = "keys";
+    startupNotice = () => notify("有快捷键与其他按键重复或不能使用，已恢复默认。", { label: "打开设置", panel: "settings" });
+  }
   // This local application owns its live index. An old archive PWA must not serve stale UI.
   if ("serviceWorker" in navigator) {
     const registrations = await navigator.serviceWorker.getRegistrations();
@@ -3330,7 +4382,7 @@ async function start() {
     fitChrome();
     $("#three-scene canvas").setAttribute(
       "aria-label",
-      playerCurrent ? "三维卡片，显示所选外部播放器的当前曲目" : "三维歌曲阵列，左右切歌单，上下切歌",
+      sceneLabel(),
     );
     stage.classList.toggle("reduce-motion", preferences.reduced);
     // A player as the current source starts on the song that is playing: with the default link
@@ -3350,8 +4402,11 @@ async function start() {
     scene.onSelect = (index, cell, lifted) => {
       if (boot?.active || panel) return;
       const songScene = presentation.phase === "detail" && menu === "song";
-      // The selected case opens its details: on the shelf and as the song scene's large card.
-      if (lifted && (presentation.phase === "archive" || songScene)) return showDetails();
+      // The selected case opens its details: on the shelf, where its song also plays (openCase;
+      // not for the press that closed the header's open menu), and as the song scene's large
+      // card, where it plays too since 2026-10-09 (openCase).
+      if (lifted && presentation.phase === "archive") return openCase(!pressClosesMenu);
+      if (lifted && songScene) return openCase(!pressClosesMenu);
       if (playerCurrent && !netease.shownQueue()) return;
       // A card of the chain becomes the large card, also when a short looping column shows
       // the same album or song again there.
@@ -3377,11 +4432,18 @@ async function start() {
       else browseTransition.hide(true);
       $("#music-browse").inert = !albums.length || !!panel;
       $("#music-browse").setAttribute("aria-hidden", String(!albums.length));
+      showStartupNotice();
     }
     syncSelectionMotion();
     requestAnimationFrame((ms) => {
       stage.classList.add("theme-motion-ready");
       scene!.onWake = requestFrame;
+      // The loop starts here. The wheel may have started one while the above was loading: its
+      // pending run is dropped, and this is the one loop.
+      if (frameRequest) cancelAnimationFrame(frameRequest);
+      window.clearTimeout(frameTimer);
+      frameRequest = frameTimer = 0;
+      frameToken++;
       frame(ms);
     });
   } catch (error) {

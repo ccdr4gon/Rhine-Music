@@ -261,7 +261,9 @@ export function setupMusicRuler(host: HTMLElement, noun = "专辑") {
       moving = approach(slot.height, heightTarget, seconds, instant) || moving;
       moving = approach(slot.opacity, opacityTarget, seconds, instant) || moving;
       moving = moving || (!instant && (!revealed || (valid && now < slot.rippleAt + RIPPLE_DURATION)));
-      slot.button.style.transform = `translate3d(${(slot.x + pad).toFixed(3)}px, 0, 0)`;
+      // A plain translation: moving ticks repaint the ruler's strip, where layers of their own
+      // were drawn again with every frame of the scene, at rest too.
+      slot.button.style.transform = `translate(${(slot.x + pad).toFixed(3)}px)`;
       slot.button.style.opacity = String(Math.max(0, Math.min(1, slot.presence.value)));
       slot.button.style.setProperty("--ruler-height", `${Math.max(0, slot.height.value).toFixed(3)}px`);
       slot.mark.style.setProperty("--ruler-opacity", String(Math.max(0, Math.min(1, slot.opacity.value))));

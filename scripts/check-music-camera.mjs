@@ -4,7 +4,7 @@ import { MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicArchiv
   MUSIC_LENS, musicLens } from '../src/music-camera.ts';
 import { damp } from '../src/motion.ts';
 import { BokehShader } from 'three/addons/shaders/BokehShader.js';
-import { focalShader } from '../src/depth-of-field.ts';
+import { FOCAL_GUARD, FOCAL_NO_BOX, focalBoxes, focalFootprint, focalGuardWeight, focalShader } from '../src/depth-of-field.ts';
 import { COLUMN_SPACING, ROW_SPACING } from '../src/archive-loop.ts';
 import { MUSIC_MODEL } from '../src/music-model.ts';
 import { SONG_CHAIN_CENTRE, SONG_VIEW, songChainPose } from '../src/song-pose.ts';
@@ -272,6 +272,129 @@ const radians = Math.PI / 180;
   assert.ok(focus > 0 && focus < lean && lean < slab && slab < radius, 'The shelf focus and the slab are applied before the blur radius is computed');
   assert.ok(patched.includes('vec3( ( vUv * 2.0 - 1.0 ) * focalSlope * -viewZ, viewZ ) - focalPoint'), 'The pixel is placed in view space from its depth');
   assert.throws(() => focalShader('void main() {}'), /bokeh shader/);
+  // The guard: its uniforms, and a guarded copy of the gather beside the stock one, which the
+  // shelf, the opened album and the opening film keep (the guard is 0 there), and so does every
+  // pixel whose blur reaches no box or that does not blur at all.
+  assert.equal(patched.split('uniform float focalGuard;').length, 2, 'float focalGuard');
+  assert.equal(patched.split(`uniform vec4 focalBoxes[ ${FOCAL_GUARD.boxes} ];`).length, 2, 'vec4 focalBoxes: the boxes on screen of the cases that are the large card, the only places it guards');
+  assert.equal(patched.split(`uniform float focalBoxWeights[ ${FOCAL_GUARD.boxes} ];`).length, 2, 'float focalBoxWeights: how much each of them is the card');
+  const stockGather = BokehShader.fragmentShader.slice(BokehShader.fragmentShader.indexOf('vec4 col = vec4( 0.0 );') + 'vec4 col = vec4( 0.0 );'.length,
+    BokehShader.fragmentShader.indexOf('gl_FragColor = col / 41.0;'));
+  assert.ok(patched.includes(`} else {\n${stockGather}\n\t}`), 'The stock gather is kept as it is');
+  assert.ok(patched.includes('if ( focalGuard > 0.0 && dofblur.x != 0.0 && focalBoxed( vUv, 0.4 * abs( dofblur ) * aspectcorrect ) > 0.0 ) {'),
+    'and runs wherever the guard is off, nothing blurs or the blur reaches no box');
+  const ring = [...stockGather.matchAll(/col \+= texture2D\( tColor, ([^\n;]+) \);/g)].map((tap) => tap[1].trim()).filter((uv) => uv !== 'vUv.xy');
+  assert.equal(ring.length, 40, 'The stock gather is the pixel\'s own sample and 40 around it');
+  assert.ok(patched.includes(`\t\tcol += texture2D( tColor, vUv.xy );\n\t\ttotal = 1.0;\n\t\tvec2 focalTaps[ 40 ] = vec2[ 40 ](\n\t\t\t${ring.join(',\n\t\t\t')} );\n\t\tfor ( int i = 0; i < 40; i++ ) focalTap( focalTaps[ i ], centre, col, total );`),
+    'The guarded copy counts the pixel\'s own sample as it is and loops over the others in the stock order (a small shader: compiled sample by sample it took seconds)');
+  assert.ok(patched.includes('col += weight * textureLod( tColor, uv, 0.0 );'), 'reading their colours as texture2D does here, at level 0');
+  assert.ok(patched.indexOf('float getDepth(') < patched.indexOf('float focalHides(') && patched.indexOf('float focalHides(') < patched.indexOf('void main()'),
+    'The guard reads the depth the way the shader does');
+  assert.ok(patched.includes('ivec2 first = ivec2( floor( uv * vec2( textureSize( tDepth, 0 ) ) - 0.5 ) ) - 1;') &&
+    patched.includes('for ( int y = 0; y < 4; y++ )\n\t\tfor ( int x = 0; x < 4; x++ )\n\t\t\thides = max( hides, focalCard( first + ivec2( x, y ), centre ) );'),
+    'and reads a sample\'s whole footprint (focalFootprint)');
+  assert.throws(() => focalShader(BokehShader.fragmentShader.replace(/\n\s*col \+= texture2D\( tColor, [^\n]*/, '')), /41-sample gather/,
+    'a gather of another size is refused');
+  assert.throws(() => focalShader(BokehShader.fragmentShader.replace('col += texture2D( tColor, vUv.xy );', 'col += texture2D( tColor, vUv.xy + vec2( 0.0 ) );')), /41-sample gather/,
+    'and so is one without the pixel\'s own sample');
+  // In numbers, in the song scene (the focus is on the large card, the depth rounded by up to
+  // 0.3 either way). The large card is sharp from corner to corner: turned by the view's yaw
+  // and seen from its elevation, it is at most this far from the focus along the lens.
+  const lens = SONG_VIEW.distance, range = MUSIC_LENS.song.range, rounding = 0.3, half = MUSIC_MODEL.width / 2;
+  const corner = half * Math.sin(SONG_VIEW.yaw * radians) + MUSIC_MODEL.height / 2 * Math.sin(SONG_VIEW.elevation * radians) + MUSIC_MODEL.depth / 2;
+  for (const offset of [-corner - rounding, 0, corner + rounding]) {
+    const tap = lens + offset;
+    assert.equal(focalGuardWeight(tap + FOCAL_GUARD.nearer[1], tap, lens, range), 0, `the card ${offset.toFixed(2)} from the focus is left out of what lies behind it`);
+    assert.equal(focalGuardWeight(300, tap, lens, range), 0, 'and out of the far background');
+    assert.equal(focalGuardWeight(tap, tap, lens, range), 1, 'while it still counts for itself');
+    assert.equal(focalGuardWeight(300, tap, lens, range, 0), 1, 'and every sample counts with the guard off');
+  }
+  // The chain's places past the lifted case's own are blurred, their nearest corner (turned
+  // 28 degrees, song-pose.ts YAW) included: their colours still blur into the places behind
+  // them and into the background, as they did before the guard.
+  for (let u = SONG_CHAIN_CENTRE + 1; u < 14; u++) {
+    const pose = songChainPose(u);
+    const nearest = pose.z + (Math.sin(28 * radians) * half + MUSIC_MODEL.depth / 2) * pose.scale + rounding;
+    assert.equal(focalGuardWeight(300, lens - nearest, lens, range), 1, `place ${u} still blurs into the background`);
+    assert.equal(focalGuardWeight(lens - songChainPose(u + 1).z, lens - nearest, lens, range), 1, `and into place ${u + 1}`);
+  }
+  // The footprint, drawn out: the card's outline (an edge at any angle, or a corner) over a dark
+  // background, as the scene pass draws it (eight samples a texel, in Direct3D's pattern) with
+  // its depth taken once at each texel's centre; the pixels around it blur with the stock gather.
+  // Read at the sample alone, the depth let the outline's colour into the blur (the thin lines
+  // around the card); read over the whole footprint, none of it comes in.
+  const offsets = [...stockGather.matchAll(/vUv\.xy \+ \( vec2\(\s*([-\d.]+),\s*([-\d.]+)\s*\) \* aspectcorrect \) \* dofblur(\d?)/g)]
+    .map(([, x, y, ring]) => [+x * (ring ? +ring / 10 : 1), +y * (ring ? +ring / 10 : 1)]);
+  assert.equal(offsets.length, 40);
+  assert.ok(offsets.every(([x, y]) => Math.abs(x) <= 0.4 && Math.abs(y) <= 0.4), 'Every sample lies within 0.4 of the blur either way');
+  for (const u of [3, 3.2, 3.5, 3.51, 3.9, 4.49]) {
+    const [first, last] = focalFootprint(u), read = Math.floor(u - 0.5);
+    assert.ok(first === read - 1 && last === read + 2, `the footprint of a read at ${u}: the two texels it blends and one more either side`);
+  }
+  const multisamples = [[1, -3], [-1, 3], [5, 1], [-3, -5], [-5, 5], [-7, -1], [3, 7], [7, -7]].map(([x, y]) => [x / 16, y / 16]);
+  const size = 40, centre = 20;
+  let leakAlone = 0, leakFootprint = 0;
+  for (const angle of [0, 7, 20, 33, 45, 61, 90])
+    for (const shift of [0, 0.23, 0.5, 0.81])
+      for (const corner of [false, true]) {
+        const a = angle * radians, inside = (x, y) => {
+          const dx = x - centre - shift, dy = y - centre - shift / 3;
+          return dx * Math.cos(a) + dy * Math.sin(a) < 0 && (!corner || -dx * Math.sin(a) + dy * Math.cos(a) < 0);
+        };
+        const clampTexel = (i) => Math.min(size - 1, Math.max(0, i));
+        const card = (i, j) => inside(clampTexel(i) + 0.5, clampTexel(j) + 0.5);
+        const cover = Array.from({ length: size }, (_, i) => Array.from({ length: size }, (_, j) =>
+          multisamples.filter(([x, y]) => inside(i + 0.5 + x, j + 0.5 + y)).length / multisamples.length));
+        const colour = (x, y) => {
+          const i = Math.floor(x - 0.5), j = Math.floor(y - 0.5), fx = x - 0.5 - i, fy = y - 0.5 - j, c = (p, q) => cover[clampTexel(p)][clampTexel(q)];
+          return (1 - fx) * (1 - fy) * c(i, j) + fx * (1 - fy) * c(i + 1, j) + (1 - fx) * fy * c(i, j + 1) + fx * fy * c(i + 1, j + 1);
+        };
+        const footprint = (x, y) => {
+          const [i0, i1] = focalFootprint(x), [j0, j1] = focalFootprint(y);
+          for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) if (card(i, j)) return true;
+          return false;
+        };
+        for (let i = 8; i < size - 8; i++)
+          for (let j = 8; j < size - 8; j++) {
+            // A pixel behind the card's outline: not the card, none of its colour, and no card
+            // beside it (those keep their own colour).
+            if (cover[i][j] > 0 || card(i, j) || card(i + 1, j) || card(i - 1, j) || card(i, j + 1) || card(i, j - 1)) continue;
+            for (const blur of [2, 5, 11, 15]) {
+              let alone = 0, aloneCount = 1, guarded = 0, guardedCount = 1;
+              for (const [dx, dy] of offsets) {
+                const x = i + 0.5 + dx * blur, y = j + 0.5 + dy * blur, c = colour(x, y);
+                if (!card(Math.floor(x), Math.floor(y))) { alone += c; aloneCount++; }
+                if (!footprint(x, y)) { guarded += c; guardedCount++; }
+              }
+              leakAlone = Math.max(leakAlone, alone / aloneCount);
+              leakFootprint = Math.max(leakFootprint, guarded / guardedCount);
+            }
+          }
+      }
+  assert.ok(leakAlone > 0.05, `read at the sample alone, the outline came into the blur (${(leakAlone * 100).toFixed(1)} % of the card's colour)`);
+  assert.equal(leakFootprint, 0, 'read over the footprint, none of it does');
+}
+{
+  // The guard's boxes: the large card's, and on a step those of the copy leaving its place and of
+  // the case rising into it, each as much as it is the large card; empty ones hold nothing.
+  const width = 1440, height = 900, card = (share, left, top) => ({ share, left, top, right: left + 340, bottom: top + 260 });
+  const uv = ({ left, top, right, bottom }) => [left / width, 1 - bottom / height, right / width, 1 - top / height];
+  const empty = { box: [...FOCAL_NO_BOX], weight: 0 };
+  const reach = FOCAL_GUARD.reach / 320;
+  assert.ok(FOCAL_NO_BOX[0] - reach > 1 && FOCAL_NO_BOX[1] - reach > 1 && FOCAL_NO_BOX[2] + reach < 0 && FOCAL_NO_BOX[3] + reach < 0,
+    'An empty box reaches no point of the picture, even in a picture 320 texels wide');
+  const large = card(1, 285, 328);
+  assert.deepEqual(focalBoxes([large], width, height), [{ box: uv(large), weight: 1 }, empty, empty, empty], 'At rest: the large card');
+  const rising = card(0.15, 300, 560);
+  assert.deepEqual(focalBoxes([rising, large], width, height), [{ box: uv(large), weight: 1 }, { box: uv(rising), weight: 0.15 }, empty, empty],
+    'On a step: the copy leaving the card\'s place, still the large card, and the case rising into it');
+  assert.deepEqual(focalBoxes([card(0, 300, 560), large], width, height)[1], empty, 'A case that is not the card at all has no box');
+  const burst = [0.9, 0.3, 0.7, 0.1, 0.5].map((share, k) => card(share, 100 * k, 40 * k));
+  const boxes = focalBoxes(burst, width, height);
+  assert.deepEqual(boxes.map((b) => b.weight), [0.9, 0.7, 0.5, 0.3], 'A burst of steps: the cards that are the card most first');
+  assert.deepEqual(boxes[3].box, [100 / width, 1 - 380 / height, 640 / width, 1 - 40 / height], 'and the last box takes in all that are left');
+}
+{
   // The shelf term in numbers: a point `rows` rows and `lanes` lanes from the focus, seen by a camera turned
   // 59 degrees from the row axis and 25 degrees down, measures the same on the shelf whatever the camera.
   const camera = new THREE.PerspectiveCamera(6, 16 / 9, 5, 300);

@@ -1,14 +1,18 @@
 //! Jump to an exact song of NetEase Cloud Music's play queue through the Chrome DevTools
 //! port NetEase serves when it is started with `--remote-debugging-port=9233`. Used while
-//! the user shows NetEase's queue and has not turned off playing the selected song with the
-//! play button (it is on by default). Connections go to 127.0.0.1 only. The scripts run in
+//! the user shows NetEase's queue. Connections go to 127.0.0.1 only. The scripts run in
 //! NetEase's player page read, from its Redux store, the current song id, playback state,
 //! play mode, duration, trial-clip range, pending seek target, whether the song is loaded
 //! (play-session id, first-load flag, launch-restore record) and the queue entries' song
-//! ids, and the playback position from its progress slider. They dispatch only the two
-//! actions its own queue panel and progress slider dispatch: play a queue entry, seek in
-//! the current song. Cookies, storage and account state are never read, and nothing is
-//! stored in the page.
+//! ids, and the playback position from its progress slider; and, for the song it plays, the
+//! lyrics it has loaded (each line's time and text, their translation, and its word-timed
+//! lyrics when it has them; the owner, 2026-10-17). They dispatch only the four actions
+//! NetEase's own interface dispatches: play a queue entry (its queue panel), seek in the
+//! current song (its progress slider), play one of the user's playlists from one of its songs
+//! (its 播放全部, which replaces the queue with the playlist; the owner, 2026-10-10), and load
+//! the lyrics of the song it plays (what its playing page does when it opens, from its cache
+//! or its server; the owner, 2026-10-17). Cookies, storage and account state are never read,
+//! and nothing is stored in the page.
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -26,6 +30,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const STATE_BUDGET: Duration = Duration::from_millis(1500);
 /// NetEase answers the jump's evaluate call after about 550 ms.
 const PLAY_BUDGET: Duration = Duration::from_secs(5);
+/// Read once for a song (and a few times while NetEase loads them).
+const LYRICS_BUDGET: Duration = Duration::from_secs(3);
 
 const ERR_PORT: &str = "未检测到网易云调试端口（9233），请以调试端口启动网易云";
 const ERR_MISSING: &str = "这首歌已不在网易云的播放队列中";
@@ -36,8 +42,23 @@ const ERR_ID: &str = "无效的歌曲编号";
 const ERR_POSITION: &str = "无效的播放位置";
 const ERR_CHANGED: &str = "网易云已经换歌，没有调整进度";
 const ERR_NOT_LOADED: &str = "这首歌还没有加载，暂时不能调整进度";
+const ERR_PLAYLIST_ID: &str = "无效的歌单或歌曲编号";
+const ERR_PLAYLIST_FM: &str = "私人 FM 模式下不能播放歌单";
 /// No song is longer than this; anything larger is a unit mistake.
 const MAX_POSITION: f64 = 24.0 * 60.0 * 60.0;
+/// The longest playlist name sent back to NetEase with its own playlist (as the queue reader
+/// keeps it).
+const MAX_NAME: usize = 300;
+/// The most lyrics taken from NetEase (in characters, the script's limits too): ordinary songs
+/// have a few thousand; within these a reply stays far below the socket's MAX_BYTES even with
+/// every character escaped. Word-timed lyrics or a translation over its limit are left out whole
+/// (the lines still show), never cut.
+const MAX_LYRIC_LINES: usize = 2000;
+const MAX_LYRIC_LINE: usize = 300;
+const MAX_LYRIC_TEXT: usize = 50_000;
+const MAX_LYRIC_TRANSLATION: usize = 30_000;
+const MAX_LYRIC_WORDS: usize = 60_000;
+const MAX_LYRIC_WORDS_TRANSLATION: usize = 10_000;
 
 /// Defines `findStore`: walks at most 400 React fibre nodes from `#root`, breadth-first,
 /// to the node whose props hold the Redux store. Reads nothing else.
@@ -151,6 +172,105 @@ const PLAY_BODY: &str = r#"
   return 'sent';
 "#;
 
+/// Expects `playlist` and `track` (ids as exact JavaScript numbers) and `name` (the playlist's
+/// name as Rhine read it from NetEase's database). Dispatches NetEase's own generic action as its
+/// 播放全部 does for a playlist, starting at `track`: NetEase loads the playlist itself (from its
+/// playlist page, its server, or offline its local database) and replaces its play queue with it,
+/// as double-clicking that song in the playlist does there. The playlist goes as a number, as its
+/// pages give it. The song to start with goes in the type NetEase gives its songs' ids, read from
+/// the first entry of its queue (else its playing song): NetEase looks for it among the playlist's
+/// songs with a strict comparison, and with the other type it replaces the queue but starts
+/// nothing (2026-10-12: strings in NetEase's current version; a number went on with the old song).
+/// The source fields (scene, text, href, sourceData) are the ones NetEase saves with a queue
+/// started from a playlist page, by which the queue's playlist is told. Returns "store", "fm" or
+/// "sent".
+const PLAYLIST_BODY: &str = r#"
+  const store = findStore();
+  if (!store) return 'store';
+  const state = store.getState();
+  const playing = state.playing || {};
+  if (playing.playingMode === 'playFm') return 'fm';
+  const queued = (state.playingList && state.playingList.curPlayingList) || [];
+  const first = Array.isArray(queued) && queued[0];
+  const sample = first ? (first.track && first.track.id != null ? first.track.id : first.resourceId) : playing.resourceTrackId;
+  const start = typeof sample === 'number' ? track : String(track);
+  // Not awaited: NetEase loads the playlist before it plays.
+  store.dispatch({
+    type: 'async:action/doAction',
+    payload: {
+      actionId: 'playAll',
+      data: {
+        resource: { id: playlist },
+        resourceType: 'playlist',
+        from: { scene: 'playlist', text: name, href: '/playlist/' + playlist, sourceData: { id: playlist, name }, assignedPlayId: start },
+      },
+      parentData: {},
+    },
+  });
+  return 'sent';
+"#;
+
+/// Expects `id` (the song id the caller shows, a string) and `load` (a boolean). Reads, for the
+/// song NetEase plays, the lyrics it keeps for its playing page (`async:lyric`): which song they
+/// belong to (compared with the playing song's id, or its online id; neither is returned), whether
+/// NetEase is loading lyrics and whether its last load failed, what it shows (`displayType`: lyrics,
+/// instrumental or none), its own adjustment of their times (`offset`), each line's time and text,
+/// their translation and its word-timed lyrics with their translation. While NetEase holds another
+/// song's lyrics and loads none, with `load` it dispatches what its playing page dispatches when it
+/// opens: NetEase loads the lyrics of the song it plays (its cache, else its server) and changes
+/// nothing it shows. Returns `{ status }`: "store", "changed" (another song plays), "loading"
+/// (NetEase is loading lyrics), "asked" (just dispatched), "failed" (after asking: NetEase could not
+/// load them), "none" (none for this song: not loaded, instrumental or none at all), or "ready" with
+/// `offset` (seconds), `lines` ([time or null, text]), `translations` (aligned with them, or empty),
+/// `words` and `wordsTranslation` (NetEase's own texts, or "" when it has none or they are over
+/// their limits).
+const LYRICS_BODY: &str = r#"
+  const store = findStore();
+  if (!store) return { status: 'store' };
+  const state = store.getState();
+  const playing = state.playing || {};
+  if (playing.resourceTrackId == null || String(playing.resourceTrackId) !== id) return { status: 'changed' };
+  const lyric = state['async:lyric'];
+  if (!lyric || typeof lyric !== 'object') return { status: 'store' };
+  const online = playing.onlineResourceId == null || playing.onlineResourceId === '' ? id : String(playing.onlineResourceId);
+  const owner = lyric.resourceTrackId == null ? '' : String(lyric.resourceTrackId);
+  if (owner === '' || (owner !== id && owner !== online)) {
+    if (lyric.isLoading) return { status: 'loading' };
+    if (!load) return { status: lyric.isLyricFetchFailed === true ? 'failed' : 'none' };
+    // Not awaited: NetEase reads its cache, else its server.
+    store.dispatch({ type: 'async:lyric/fetchLyric', payload: { force: true } });
+    return { status: 'asked' };
+  }
+  if (lyric.displayType !== 'default') return { status: 'none' };
+  const source = Array.isArray(lyric.lyricLines) ? lyric.lyricLines : [];
+  const others = Array.isArray(lyric.tlyricLines) && lyric.tlyricLines.length === source.length ? lyric.tlyricLines : null;
+  const text = (line) => (line && typeof line.lyric === 'string' ? line.lyric.slice(0, 300) : '');
+  const lines = [], translations = [];
+  let room = 50000, translationRoom = 30000;
+  for (let index = 0; index < source.length && lines.length < 2000; index += 1) {
+    const line = source[index];
+    const words = text(line);
+    room -= words.length;
+    if (room < 0) break;
+    lines.push([line && typeof line.time === 'number' && Number.isFinite(line.time) ? line.time : null, words]);
+    if (others) {
+      const translation = text(others[index]);
+      translationRoom -= translation.length;
+      translations.push(translation);
+    }
+  }
+  const timed = lyric.yrcInfo && typeof lyric.yrcInfo === 'object' ? lyric.yrcInfo : {};
+  const whole = (value, limit) => (typeof value === 'string' && value.length <= limit ? value : '');
+  return {
+    status: 'ready',
+    offset: typeof lyric.offset === 'number' && Number.isFinite(lyric.offset) ? lyric.offset : 0,
+    lines,
+    translations: translationRoom >= 0 && translations.some((line) => line) ? translations : [],
+    words: whole(timed.yrc, 60000),
+    wordsTranslation: whole(timed.yrcTrans, 10000),
+  };
+"#;
+
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugState {
@@ -172,6 +292,33 @@ pub struct DebugState {
     pub position: Option<f64>,
 }
 
+/// The lyrics NetEase has loaded for the song it plays (`lyrics`); only kept in the page's memory.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugLyrics {
+    /// "ready", "loading" (NetEase is loading lyrics), "asked" (Rhine just asked it to load this
+    /// song's), "failed" (NetEase could not load them), "none" (none for this song now) or "changed"
+    /// (NetEase plays another song).
+    pub status: String,
+    /// NetEase's own adjustment of the lyrics' times (seconds, positive sooner): already in `lines`,
+    /// not in `words` or `words_translation`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: f64,
+    /// Each line's start in seconds (none for unsynchronised lyrics) and its text, as NetEase
+    /// shows them (credit lines included, its offset applied).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<(Option<f64>, String)>,
+    /// Each line's translation ("" for a line without one), aligned with `lines`; empty for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub translations: Vec<String>,
+    /// NetEase's word-timed lyrics (its "yrc" text, credit lines removed) and their translation
+    /// (LRC text), when it has them.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub words: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub words_translation: String,
+}
+
 enum Failure {
     /// Port closed, no reply in time, or no NetEase player page.
     Unavailable,
@@ -186,10 +333,23 @@ pub fn play(track_id: &str) -> Result<(), String> {
     play_at(PORT, track_id)
 }
 
+/// Play the user's NetEase playlist `playlist_id` from its song `track_id` (NetEase's decimal
+/// ids): NetEase's queue becomes the playlist. `name` is saved with the queue as its source.
+pub fn play_playlist(playlist_id: &str, track_id: &str, name: &str) -> Result<(), String> {
+    play_playlist_at(PORT, playlist_id, track_id, name)
+}
+
 /// Seek in the song `track_id`, which must still be the one NetEase plays. Returns the
 /// position NetEase was sent to, which a trial clip can limit.
 pub fn seek(track_id: &str, position: f64) -> Result<f64, String> {
     seek_at(PORT, track_id, position)
+}
+
+/// The lyrics NetEase has loaded for its song `track_id`, which must still be the one it plays.
+/// With `load`, when it holds none for it and is loading none, NetEase is first asked to load
+/// them (its own action; the reply is then "asked", and the lyrics come with a later read).
+pub fn lyrics(track_id: &str, load: bool) -> Result<DebugLyrics, String> {
+    lyrics_at(PORT, track_id, load)
 }
 
 fn state_at(port: u16) -> Result<DebugState, String> {
@@ -211,6 +371,17 @@ fn play_at(port: u16, track_id: &str) -> Result<(), String> {
     }
 }
 
+fn play_playlist_at(port: u16, playlist_id: &str, track_id: &str, name: &str) -> Result<(), String> {
+    let (Some(playlist), Some(track)) = (script_id(playlist_id), script_id(track_id)) else {
+        return Err(ERR_PLAYLIST_ID.into());
+    };
+    match run(port, &playlist_script(playlist, track, name), Instant::now() + PLAY_BUDGET) {
+        Ok(value) => playlist_outcome(&value),
+        Err(Failure::Unavailable) => Err(ERR_PORT.into()),
+        Err(Failure::Protocol(message)) => Err(message),
+    }
+}
+
 fn seek_at(port: u16, track_id: &str, position: f64) -> Result<f64, String> {
     if !valid_track_id(track_id) {
         return Err(ERR_ID.into());
@@ -225,6 +396,17 @@ fn seek_at(port: u16, track_id: &str, position: f64) -> Result<f64, String> {
     }
 }
 
+fn lyrics_at(port: u16, track_id: &str, load: bool) -> Result<DebugLyrics, String> {
+    if !valid_track_id(track_id) {
+        return Err(ERR_ID.into());
+    }
+    match run(port, &lyrics_script(track_id, load), Instant::now() + LYRICS_BUDGET) {
+        Ok(value) => map_lyrics(&value),
+        Err(Failure::Unavailable) => Err(ERR_PORT.into()),
+        Err(Failure::Protocol(message)) => Err(message),
+    }
+}
+
 fn valid_position(position: f64) -> bool {
     position.is_finite() && (0.0..=MAX_POSITION).contains(&position)
 }
@@ -234,6 +416,16 @@ fn valid_track_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// A NetEase id that a script carries as an exact JavaScript number: decimal digits only, at
+/// least 1 and at most 2^53 - 1.
+fn script_id(id: &str) -> Option<u64> {
+    const MAX_SAFE: u64 = (1 << 53) - 1;
+    if id.is_empty() || id.len() > 16 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    id.parse::<u64>().ok().filter(|value| (1..=MAX_SAFE).contains(value))
 }
 
 fn valid_page_id(id: &str) -> bool {
@@ -253,11 +445,26 @@ fn play_script(track_id: &str) -> String {
     format!("(() => {{\n  const id = {id};{FIND_STORE}{PLAY_BODY}}})()")
 }
 
+fn playlist_script(playlist: u64, track: u64, name: &str) -> String {
+    // The ids are checked numbers; the name reaches the script only as a JSON string literal.
+    let name: String = name.trim().chars().take(MAX_NAME).collect();
+    let name = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "(() => {{\n  const playlist = {playlist};\n  const track = {track};\n  const name = {name};{FIND_STORE}{PLAYLIST_BODY}}})()"
+    )
+}
+
 fn seek_script(track_id: &str, position: f64) -> String {
     // Both reach the script only as JSON literals.
     let id = serde_json::to_string(track_id).unwrap_or_else(|_| "\"\"".into());
     let seconds = serde_json::to_string(&position).unwrap_or_else(|_| "0".into());
     format!("(() => {{\n  const id = {id};\n  const seconds = {seconds};{FIND_STORE}{SEEK_BODY}}})()")
+}
+
+fn lyrics_script(track_id: &str, load: bool) -> String {
+    // The id reaches the script only as a JSON string literal.
+    let id = serde_json::to_string(track_id).unwrap_or_else(|_| "\"\"".into());
+    format!("(() => {{\n  const id = {id};\n  const load = {load};{FIND_STORE}{LYRICS_BODY}}})()")
 }
 
 /// The id of NetEase's player page in a `/json/list` body.
@@ -347,6 +554,85 @@ fn play_outcome(value: &Value) -> Result<(), String> {
         Some("store") => Err(ERR_STORE.into()),
         _ => Err(ERR_PROTOCOL.into()),
     }
+}
+
+fn playlist_outcome(value: &Value) -> Result<(), String> {
+    match value.as_str() {
+        Some("sent") => Ok(()),
+        Some("fm") => Err(ERR_PLAYLIST_FM.into()),
+        Some("store") => Err(ERR_STORE.into()),
+        _ => Err(ERR_PROTOCOL.into()),
+    }
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+/// The largest lyrics offset taken from NetEase (it moves them half a second a step).
+const MAX_LYRIC_OFFSET: f64 = 60.0;
+
+/// A lyrics reply, held to the script's shapes and limits (checked again here).
+fn map_lyrics(value: &Value) -> Result<DebugLyrics, String> {
+    let status = value.get("status").and_then(Value::as_str).ok_or(ERR_PROTOCOL)?;
+    match status {
+        "ready" => {}
+        "loading" | "asked" | "failed" | "none" | "changed" => {
+            return Ok(DebugLyrics { status: status.into(), ..DebugLyrics::default() })
+        }
+        "store" => return Err(ERR_STORE.into()),
+        _ => return Err(ERR_PROTOCOL.into()),
+    }
+    let mut room = MAX_LYRIC_TEXT;
+    let mut lines = Vec::new();
+    let given = value.get("lines").and_then(Value::as_array).ok_or(ERR_PROTOCOL)?;
+    for line in given.iter().take(MAX_LYRIC_LINES) {
+        let (Some(time), Some(text)) = (line.get(0), line.get(1).and_then(Value::as_str)) else {
+            return Err(ERR_PROTOCOL.into());
+        };
+        let text: String = text.chars().take(MAX_LYRIC_LINE).collect();
+        let Some(left) = room.checked_sub(text.chars().count()) else { break };
+        room = left;
+        // NetEase's own offset can move a first line a little before the song's start.
+        let time = time.as_f64().filter(|seconds| seconds.is_finite() && *seconds <= MAX_POSITION);
+        lines.push((time.map(|seconds| seconds.max(0.0)), text));
+    }
+    // Aligned with the lines or not at all.
+    let translations: Vec<String> = value
+        .get("translations")
+        .and_then(Value::as_array)
+        .filter(|items| items.len() >= lines.len())
+        .map(|items| {
+            items[..lines.len()]
+                .iter()
+                .map(|item| item.as_str().map(|text| text.chars().take(MAX_LYRIC_LINE).collect()))
+                .collect::<Option<Vec<String>>>()
+                .unwrap_or_default()
+        })
+        .filter(|items| {
+            items.iter().map(|text| text.chars().count()).sum::<usize>() <= MAX_LYRIC_TRANSLATION
+                && items.iter().any(|text| !text.is_empty())
+        })
+        .unwrap_or_default();
+    let whole = |name: &str, limit: usize| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| text.chars().count() <= limit)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let words = whole("words", MAX_LYRIC_WORDS);
+    let words_translation = if words.is_empty() { String::new() } else { whole("wordsTranslation", MAX_LYRIC_WORDS_TRANSLATION) };
+    if lines.iter().all(|(_, text)| text.trim().is_empty()) && words.trim().is_empty() {
+        return Ok(DebugLyrics { status: "none".into(), ..DebugLyrics::default() });
+    }
+    let offset = value
+        .get("offset")
+        .and_then(Value::as_f64)
+        .filter(|seconds| seconds.is_finite() && seconds.abs() <= MAX_LYRIC_OFFSET)
+        .unwrap_or(0.0);
+    Ok(DebugLyrics { status: "ready".into(), offset, lines, translations, words, words_translation })
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, Failure> {
@@ -907,7 +1193,7 @@ mod tests {
         assert!(play.contains("type: 'playing/playOneTrackInPlayingList'"));
         assert!(play.contains("switchType: 'call', flag: 0, triggerScene: 'playingList'"));
         assert!(!state_script().contains("dispatch({"));
-        for script in [play, state_script(), seek_script("1234567890", 12.0)] {
+        for script in [play, state_script(), seek_script("1234567890", 12.0), playlist_script(770077, 1234567890, "List"), lyrics_script("1234567890", true)] {
             for word in ["cookie", "localStorage", "sessionStorage", "window.", "globalThis", "fetch("] {
                 assert!(!script.contains(word), "{word}");
             }
@@ -973,6 +1259,135 @@ mod tests {
         assert_eq!(play_at(port, "42").unwrap_err(), ERR_MISSING);
         let (port, _) = fake_devtools(targets(), json!("fm"));
         assert_eq!(play_at(port, "42").unwrap_err(), ERR_FM);
+    }
+
+    #[test]
+    fn playlist_ids_are_exact_javascript_numbers() {
+        assert_eq!(script_id("1"), Some(1));
+        assert_eq!(script_id("2463839102"), Some(2_463_839_102));
+        assert_eq!(script_id("9007199254740991"), Some(9_007_199_254_740_991));
+        for id in ["", "0", "9007199254740992", "12345678901234567", "1 2", "12a", "-1", "1.5", "１２", "1\";alert(1)//"] {
+            assert_eq!(script_id(id), None, "{id}");
+        }
+        // Nothing is tried for an id that is not one, not even a connection.
+        assert_eq!(play_playlist_at(closed_port(), "77", "1\");//", "x").unwrap_err(), ERR_PLAYLIST_ID);
+        assert_eq!(play_playlist_at(closed_port(), "list", "42", "x").unwrap_err(), ERR_PLAYLIST_ID);
+        assert_eq!(play_playlist_at(closed_port(), "77", "42", "x").unwrap_err(), ERR_PORT);
+    }
+
+    #[test]
+    fn a_playlist_plays_through_netease_own_play_all_from_the_chosen_song() {
+        let (port, expressions) = fake_devtools(targets(), json!("sent"));
+        play_playlist_at(port, "770077", "1234567890", "  A \"fictional\" list\u{2028}</script>  ").unwrap();
+        let expressions = expressions.lock().unwrap();
+        assert_eq!(expressions.len(), 1);
+        let script = &expressions[0];
+        assert!(script.contains("const playlist = 770077;\n  const track = 1234567890;"), "checked numbers");
+        assert!(script.contains("const name = \"A \\\"fictional\\\" list\u{2028}</script>\";"), "a JSON string, trimmed");
+        assert!(script.contains("type: 'async:action/doAction'"));
+        assert!(script.contains("actionId: 'playAll',"));
+        assert!(script.contains("resource: { id: playlist },\n        resourceType: 'playlist',"));
+        assert!(script.contains(
+            "from: { scene: 'playlist', text: name, href: '/playlist/' + playlist, sourceData: { id: playlist, name }, assignedPlayId: start },"
+        ));
+        // The song to start with in the type of NetEase's own song ids (it compares them strictly).
+        assert!(script.contains(
+            "const sample = first ? (first.track && first.track.id != null ? first.track.id : first.resourceId) : playing.resourceTrackId;\n  const start = typeof sample === 'number' ? track : String(track);"
+        ));
+        assert!(script.contains("if (playing.playingMode === 'playFm') return 'fm';"));
+        assert!(!script.contains("playOneTrackInPlayingList") && !script.contains("setPlayingPosition"));
+        drop(expressions);
+        let long = "名".repeat(400);
+        assert!(playlist_script(1, 2, &long).contains(&format!("const name = \"{}\";", "名".repeat(MAX_NAME))));
+
+        let (port, _) = fake_devtools(targets(), json!("fm"));
+        assert_eq!(play_playlist_at(port, "77", "42", "x").unwrap_err(), "私人 FM 模式下不能播放歌单");
+        let (port, _) = fake_devtools(targets(), json!("store"));
+        assert_eq!(play_playlist_at(port, "77", "42", "x").unwrap_err(), ERR_STORE);
+        for reply in [json!("current"), json!("missing"), json!(null)] {
+            assert_eq!(playlist_outcome(&reply).unwrap_err(), ERR_PROTOCOL, "{reply}");
+        }
+    }
+
+    #[test]
+    fn lyrics_replies_keep_lines_translations_and_words_within_their_limits() {
+        let reply = json!({ "status": "ready", "offset": -1.5,
+            "lines": [[0, "作词 : 虚构"], [12.5, "第一行"], [-0.3, "提前"], [null, "无时间"], ["7", "坏时间"], [90_000, "太晚"]],
+            "translations": ["", "line one", "", "", "", ""],
+            "words": "[12500,2000](12500,500,0)第(13000,500,0)一",
+            "wordsTranslation": "[00:12.50]line one" });
+        let lyrics = map_lyrics(&reply).unwrap();
+        assert_eq!(lyrics.status, "ready");
+        let times: Vec<_> = lyrics.lines.iter().map(|(time, _)| *time).collect();
+        assert_eq!(times, [Some(0.0), Some(12.5), Some(0.0), None, None, None]);
+        assert_eq!(lyrics.lines[1].1, "第一行");
+        assert_eq!(lyrics.translations[1], "line one");
+        assert!(lyrics.words.starts_with("[12500,2000]") && lyrics.words_translation == "[00:12.50]line one");
+        let shown = serde_json::to_value(&lyrics).unwrap();
+        assert_eq!(shown["lines"][3], json!([null, "无时间"]));
+        assert_eq!(shown["wordsTranslation"], "[00:12.50]line one");
+        assert_eq!(shown["offset"], -1.5);
+        for offset in [json!(90), json!("1"), json!(null)] {
+            let reply = json!({ "status": "ready", "offset": offset, "lines": [[1, "a"]] });
+            let shown = serde_json::to_value(map_lyrics(&reply).unwrap()).unwrap();
+            assert!(shown.get("offset").is_none(), "{offset}: no offset (0) is not sent");
+        }
+
+        // Over the limits the lines stop; a translation or word timing over its own is left out whole.
+        let many: Vec<Value> = (0..MAX_LYRIC_LINES + 10).map(|second| json!([second, "a"])).collect();
+        let lyrics = map_lyrics(&json!({ "status": "ready", "lines": many, "translations": [] })).unwrap();
+        assert_eq!(lyrics.lines.len(), MAX_LYRIC_LINES);
+        assert!(lyrics.translations.is_empty());
+        let long = "字".repeat(MAX_LYRIC_LINE + 50);
+        let lyrics = map_lyrics(&json!({ "status": "ready", "lines": [[1, long]],
+            "words": "x".repeat(MAX_LYRIC_WORDS + 1), "wordsTranslation": "[00:01.00]y" })).unwrap();
+        assert_eq!(lyrics.lines[0].1.chars().count(), MAX_LYRIC_LINE);
+        assert_eq!((lyrics.words.as_str(), lyrics.words_translation.as_str()), ("", ""));
+        let full: Vec<Value> = (0..400).map(|second| json!([second, "字".repeat(200)])).collect();
+        assert_eq!(map_lyrics(&json!({ "status": "ready", "lines": full })).unwrap().lines.len(), MAX_LYRIC_TEXT / 200);
+        let lyrics = map_lyrics(&json!({ "status": "ready", "lines": [[1, "a"], [2, "b"]], "translations": ["x"] })).unwrap();
+        assert!(lyrics.translations.is_empty(), "translations not aligned with the lines");
+        let lyrics = map_lyrics(&json!({ "status": "ready", "lines": [[1, "a"]], "translations": [""] })).unwrap();
+        assert!(lyrics.translations.is_empty(), "no translation at all");
+
+        // Nothing to show is none; the other states carry nothing.
+        assert_eq!(map_lyrics(&json!({ "status": "ready", "lines": [[1, " "]], "words": "" })).unwrap().status, "none");
+        for status in ["loading", "asked", "failed", "none", "changed"] {
+            let reply = map_lyrics(&json!({ "status": status, "lines": [[1, "a"]], "words": "x" })).unwrap();
+            assert_eq!(serde_json::to_value(reply).unwrap(), json!({ "status": status }));
+        }
+        assert_eq!(map_lyrics(&json!({ "status": "store" })).unwrap_err(), ERR_STORE);
+        for reply in [json!("ready"), json!({ "status": "sent" }), json!({ "status": "ready" }),
+            json!({ "status": "ready", "lines": [[1]] }), json!({ "status": "ready", "lines": [[1, 2]] })] {
+            assert_eq!(map_lyrics(&reply).unwrap_err(), ERR_PROTOCOL, "{reply}");
+        }
+    }
+
+    #[test]
+    fn lyrics_are_read_for_the_playing_song_and_loaded_by_netease_own_action_only_when_asked() {
+        // Nothing is tried for an id that is not one, not even a connection.
+        assert_eq!(lyrics_at(closed_port(), "1\");//", true).unwrap_err(), ERR_ID);
+        assert_eq!(lyrics_at(closed_port(), "42", true).unwrap_err(), ERR_PORT);
+
+        let (port, asked) = fake_devtools(targets(), json!({ "status": "asked" }));
+        assert_eq!(lyrics_at(port, "1234567890", true).unwrap().status, "asked");
+        let (port, read) = fake_devtools(targets(), json!({ "status": "ready", "lines": [[3.5, "虚构的一行"]] }));
+        assert_eq!(lyrics_at(port, "1234567890", false).unwrap().lines, [(Some(3.5), "虚构的一行".to_string())]);
+        assert!(read.lock().unwrap()[0].contains("const id = \"1234567890\";\n  const load = false;"));
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        let script = &asked[0];
+        assert!(script.contains("const id = \"1234567890\";\n  const load = true;"));
+        // Only for the song that plays, only while NetEase holds none of its lyrics and loads none, and
+        // only the action NetEase's playing page dispatches when it opens.
+        assert!(script.contains("if (playing.resourceTrackId == null || String(playing.resourceTrackId) !== id) return { status: 'changed' };"));
+        assert!(script.contains("if (owner === '' || (owner !== id && owner !== online)) {\n    if (lyric.isLoading) return { status: 'loading' };\n    if (!load) return { status: lyric.isLyricFetchFailed === true ? 'failed' : 'none' };"));
+        assert!(script.contains("store.dispatch({ type: 'async:lyric/fetchLyric', payload: { force: true } });"));
+        assert_eq!(script.matches("dispatch(").count(), 1);
+        assert!(script.contains("if (lyric.displayType !== 'default') return { status: 'none' };"));
+        for other in ["playOneTrackInPlayingList", "setPlayingPosition", "doAction", "curPlayingList", "localTrack", "filename"] {
+            assert!(!script.contains(other), "{other}");
+        }
     }
 
     #[test]

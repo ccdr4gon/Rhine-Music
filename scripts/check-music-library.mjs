@@ -268,6 +268,52 @@ test('the main folder\'s subfolders are its playlists; earlier extra folders are
   assert.ok(store.index.albums.every((album) => album._root === root), 'the earlier second folder is not scanned')
 })
 
+// The details' lyrics (the owner, 2026-10-17: ".lrc files and song tags"), as the client reads them:
+// a same-named .lrc beside the song first, as its own bytes, else the lyrics of its tags; made-up lyrics.
+test('a song\'s lyrics: its .lrc beside it as its bytes, else its tags as written (synchronised ones as LRC), 204 when none', async (t) => {
+  const sylt = (syncText) => ({ 'ID3v2.4': [{ id: 'SYLT', value: { contentType: 1, timeStampFormat: 2, syncText } }] })
+  const tags = {
+    '02.flac': sylt([{ text: '虚构', timestamp: 1500 }, { text: '第二行 ', timestamp: 63000 }]),
+    '03.flac': sylt([{ text: 'Made', timestamp: 1000 }, { text: ' up', timestamp: 1400 }, { text: '\nwords', timestamp: 2000 }, { text: '\n', timestamp: 3000 }, { text: '', timestamp: 3400 }]),
+    // As written: the library's own reading would keep only the timed line.
+    '04.flac': { vorbis: [{ id: 'LYRICS', value: '[offset:+500]\n[00:04.00][00:09.00]Plain text in a tag' }] },
+    '07.flac': { vorbis: [{ id: 'UNSYNCEDLYRICS', value: 'Unsynchronised made-up words' }] },
+    '08.flac': { vorbis: [{ id: 'LYRICS', value: 'a'.repeat(512 * 1024 + 1) }] },
+    '09.flac': { 'ID3v2.4': [{ id: 'USLT', value: { language: 'zho', descriptor: '', text: '[00:02.00]USLT 的虚构歌词' } }] },
+  }
+  const { root, store, temporary } = await fixture(t, {
+    metadataParser: async (file) => ({ common: { album: 'Album' }, native: tags[path.basename(file)] ?? {}, format: { duration: 1 } }),
+  })
+  const folder = await fakeAlbum(root, 'Album', ['01.flac', '02.flac', '03.flac', '04.flac', '05.flac', '06.dsf', '07.flac', '08.flac', '09.flac'])
+  const gbk = Buffer.from([0x5b, 0x30, 0x30, 0x3a, 0x30, 0x31, 0x2e, 0x30, 0x30, 0x5d, 0xd0, 0xe9, 0xb9, 0xb9])
+  await fs.writeFile(path.join(folder, '01.lrc'), gbk)
+  await fs.writeFile(path.join(folder, '06.lrc'), '')
+  await store.scan()
+  const id = new Map(store.snapshot().albums.flatMap((album) => album.tracks).map((track) => [track.title, track.id]))
+  const distDir = path.join(temporary, 'dist')
+  await fs.mkdir(distDir)
+  await fs.writeFile(path.join(distDir, 'index.html'), '<h1>fixture</h1>')
+  const { server } = await createMusicServer({ store, distDir, autoScan: false })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)) })
+  const origin = `http://127.0.0.1:${server.address().port}`
+  const lyrics = async (title) => fetch(`${origin}/api/lyrics/${id.get(title) ?? title}`)
+  const beside = await lyrics('01')
+  assert.equal(beside.status, 200)
+  assert.equal(beside.headers.get('content-type'), 'application/octet-stream')
+  assert.equal(beside.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(Buffer.from(await beside.arrayBuffer()), gbk, 'the .lrc as its bytes: the page decodes them')
+  assert.equal(await (await lyrics('02')).text(), '[00:01.50]虚构\n[01:03.00]第二行')
+  assert.equal(await (await lyrics('03')).text(), '[00:01.00]<00:01.00>Made<00:01.40> up\n[00:02.00]words\n[00:03.00]', 'timed parts without words: a pause')
+  assert.equal(await (await lyrics('04')).text(), '[offset:+500]\n[00:04.00][00:09.00]Plain text in a tag')
+  assert.equal(await (await lyrics('07')).text(), 'Unsynchronised made-up words')
+  assert.equal((await lyrics('08')).status, 204, 'over the .lrc\'s limit')
+  assert.equal(await (await lyrics('09')).text(), '[00:02.00]USLT 的虚构歌词')
+  assert.equal((await lyrics('05')).status, 204)
+  assert.equal((await lyrics('06')).status, 204, 'an empty .lrc, and a DSD file\'s tags are not read')
+  assert.equal((await lyrics('not-indexed')).status, 404)
+})
+
 test('Windows roots require a drive or UNC share and deduplicate case and separators', { skip: process.platform !== 'win32' }, () => {
   assert.deepEqual(safeRootList(['D:\\音乐 库', 'd:/音乐 库', 'd:/音乐 库/Album', 'E:\\Music']), ['D:\\音乐 库', 'E:\\Music'])
   assert.deepEqual(safeRootList(['D:\\', 'd:/Music']), ['D:\\'])

@@ -14,6 +14,28 @@ const normalized = (value) => text(value).normalize('NFKC').toLocaleLowerCase().
 const exists = async (file) => { try { await fs.access(file); return true } catch { return false } }
 const timestamp = () => new Date().toISOString()
 const METADATA_VERSION = 2
+// An .lrc larger than this is not lyrics (ordinary ones have a few kilobytes).
+const MAX_LYRICS_BYTES = 512 * 1024
+const lrcStamp = (ms) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}.${String(Math.floor((ms % 1000) / 10)).padStart(2, '0')}`
+// ID3v2 synchronised lyrics as LRC text, as the client's reader writes them (metadata.rs): a part that
+// starts with a line break starts a line and the others in it are timed words; without such breaks
+// each part is a line.
+function syncedLrc(parts) {
+  const breaks = (value) => /^[\r\n]/.test(value)
+  const marked = parts.slice(1).some((part) => breaks(String(part?.text ?? '')))
+  const lines = []
+  for (const part of parts) {
+    const words = String(part?.text ?? ''), time = Math.max(0, Number(part?.timestamp) || 0)
+    if (!lines.length || !marked || breaks(words)) lines.push([])
+    lines.at(-1).push([time, words.replace(/^[\r\n]+/, '')])
+  }
+  // Timed parts without words make a pause, not stamps alone.
+  const lrc = lines.map((line) => `[${lrcStamp(line[0][0])}]${line.length === 1 ? line[0][1].trimEnd() : line.every(([, words]) => !words.trim()) ? '' : line.map(([time, words]) => `<${lrcStamp(time)}>${words}`).join('').trimEnd()}`).join('\n')
+  return lrc.trim() ? lrc : ''
+}
+// The tags whose text is lyrics (native ids, compared in capitals): ID3v2 USLT, Vorbis LYRICS and
+// UNSYNCEDLYRICS, MP4 ©lyr, APE Lyrics.
+const LYRIC_TAGS = new Set(['USLT', 'LYRICS', 'UNSYNCEDLYRICS', '©LYR'])
 // QQ Music's encrypted downloads (.mflac, .mgg, .qmc* and their numbered variants): not audio this
 // service can read, never decrypted; only counted for the scan's summary (as library.rs does).
 const ENCRYPTED_DOWNLOAD = /^\.(?:qmc|mflac|mgg)/i
@@ -497,6 +519,40 @@ export class MusicLibraryStore {
   artworkFile(id) {
     const album = this.index.albums.find((entry) => entry.id === id && this.inLibrary(entry))
     return album?._cover ? { ...album._cover, allowedRoot: album._cover.embedded ? this.dataDir : album._root } : null
+  }
+
+  // A song's lyrics (the owner, 2026-10-17), only read: a same-named .lrc beside it inside its folder,
+  // else the lyrics of its tags (synchronised ones timed in milliseconds as LRC lines). Their bytes,
+  // which the page decodes; null when it has none, undefined for a song not in the index.
+  async lyrics(id) {
+    const file = this.trackFile(id)
+    if (!file) return undefined
+    const [song, root] = await Promise.all([fs.realpath(file.path), fs.realpath(file.allowedRoot)])
+    const inside = (target) => {
+      const relative = path.relative(root, target)
+      return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+    }
+    if (!inside(song)) throw Object.assign(new Error('文件已移出配置的音乐目录'), { status: 403 })
+    try {
+      const sidecar = await fs.realpath(path.join(path.dirname(song), `${path.parse(song).name}.lrc`))
+      const stat = await fs.stat(sidecar)
+      if (inside(sidecar) && stat.isFile() && stat.size > 0 && stat.size <= MAX_LYRICS_BYTES) return await fs.readFile(sidecar)
+    } catch {}
+    if (/\.(?:dsf|dff)$/i.test(song)) return null
+    try {
+      // The tags as written (`native`): the library's own reading of lyrics text keeps only some of
+      // its lines and drops [offset:] and the like. Synchronised ID3v2 lyrics timed in milliseconds
+      // first, else the first lyrics text; over the .lrc's limit, none.
+      const { native } = await this.parseFile(song, { duration: false, skipCovers: true })
+      const tags = Object.values(native ?? {}).flat()
+      const timed = tags.find((tag) => tag?.id === 'SYLT' && tag.value?.timeStampFormat === 2 && [0, 1].includes(tag.value.contentType) && tag.value.syncText?.length)
+      const text = timed
+        ? syncedLrc(timed.value.syncText)
+        : tags.map((tag) => (LYRIC_TAGS.has(String(tag?.id).toUpperCase()) ? (typeof tag.value === 'string' ? tag.value : tag.value?.text) : undefined)).find((value) => typeof value === 'string' && value.trim())
+      return text && Buffer.byteLength(text) <= MAX_LYRICS_BYTES ? Buffer.from(text, 'utf8') : null
+    } catch {
+      return null
+    }
   }
 
   async musicBrainz(endpoint, params = {}) {

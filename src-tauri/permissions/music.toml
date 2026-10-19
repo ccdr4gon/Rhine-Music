@@ -20,5 +20,5 @@ commands.allow = ["netease_queue", "netease_playlists"]
 
 [[permission]]
 identifier = "allow-netease-debug"
-description = "Control NetEase Cloud Music through its local DevTools port (127.0.0.1:9233) while its queue is shown and playing the selected song with the play button is not turned off."
-commands.allow = ["netease_debug_state", "netease_debug_play", "netease_debug_seek", "netease_debug_restart"]
+description = "Control NetEase Cloud Music through its local DevTools port (127.0.0.1:9233) while its queue is shown: play a song of its queue, play one of the user's playlists from one of its songs (its queue becomes that playlist), seek in the current song, read the lyrics it has loaded for the song it plays (asking it to load them as its playing page does), and restart it with the port after the user's confirmed click."
+commands.allow = ["netease_debug_state", "netease_debug_play", "netease_debug_play_playlist", "netease_debug_seek", "netease_debug_lyrics", "netease_debug_restart"]

@@ -1,5 +1,4 @@
 import { escapeHtml } from "./html.ts";
-import type { MusicAlbum } from "./music-types.ts";
 import type { PlayerTrack } from "./external_player/player-track.ts";
 
 /**
@@ -16,11 +15,24 @@ export interface SongRow {
   artist: string;
   /** Right-aligned, e.g. "FLAC · 4:05" or "4:05". */
   meta: string;
-  /** Album rows: rendered as data-track (the document click handler plays it). */
+  /**
+   * Rendered as data-track. No list model sets it since the album lists went (albumSongModel,
+   * removed 2026-10-08), and the page has no click action for it; nor does any set `group`.
+   */
   track?: string;
   /** Queue rows: rendered as data-select, the record index of that song's box. */
   select?: number;
   disabled?: boolean;
+  /**
+   * The row's song can be played from the list (data-playable): ▶ takes its number's place when
+   * it is hovered, focused or selected, while the section allows it (data-play). Never a song
+   * without a box, one without a file or one the browser cannot play (↗: the row only selects,
+   * and its tooltip says why). (A song of another NetEase playlist is played with its playlist
+   * since 2026-10-10; until then such a column was only for browsing.)
+   */
+  playable?: boolean;
+  /** The row's tooltip: what its marks mean (↗ a format that needs another player, 目录离线). */
+  hint?: string;
   /** Heading shown before this row when it differs from the previous row's group. */
   group?: string;
 }
@@ -43,17 +55,19 @@ export interface SongListModel {
   /** The selected song (an album: its title), and its artist · album (an album: artist · year). */
   title: string;
   subtitle: string;
-  /** The tag: 共 N 首; under it, quietly, why the list is cut or an album's length. */
+  /** The tag: 共 N 首; under it, quietly, why the list is cut, an album's length or 目录离线. */
   count: string;
   countNote?: string;
   /** The column's name, bottom left. */
   label: string;
   /** The list's accessible name. */
   listLabel: string;
-  note?: string;
   empty?: string;
   rows: SongRow[];
 }
+
+/** What a row's marks mean, in its tooltip (no note under the list: the owner, 2026-10-07). */
+const OFFLINE_HINT = "目录离线", KERNEL_HINT = "需要兼容的播放内核";
 
 const pad = (value: number, width: number) => String(value).padStart(width, "0");
 
@@ -68,52 +82,6 @@ function digest(parts: Iterable<string | number>) {
   return (hash >>> 0).toString(36);
 }
 
-export function albumSongModel(
-  album: MusicAlbum,
-  options: {
-    number: number;
-    demo: boolean;
-    time(seconds: number): string;
-    /** How many albums the library holds (the tab's "/ total"). */
-    total?: number;
-    /** The shelf column the album stands in (its genre, artist or group): the name bottom left. */
-    column?: string;
-  },
-): SongListModel {
-  const { tracks } = album;
-  const discs = album.discCount || Math.max(1, ...tracks.map((track) => track.discNumber || 1));
-  const rows: SongRow[] = tracks.map((track, index) => ({
-    key: track.id,
-    number: pad(track.trackNumber || index + 1, 2),
-    title: track.title,
-    artist: track.artist,
-    meta: [`${track.format}${track.browserPlayable ? "" : " ↗"}`.trim(), options.time(track.duration)].filter(Boolean).join(" · "),
-    track: track.id,
-    disabled: album.offline,
-    group: discs > 1 ? `DISC ${pad(track.discNumber || 1, 2)}` : undefined,
-  }));
-  const notes = [
-    album.offline ? "目录离线，曲目暂时无法播放。" : "",
-    tracks.some((track) => !track.browserPlayable) ? "↗ 需要兼容的播放内核。" : "",
-  ].filter(Boolean);
-  const total = options.total;
-  return {
-    kind: "album",
-    id: `album:${album.id}:${digest(rows.flatMap((row) => [row.key, row.number, row.title, row.artist, row.meta, row.group ?? "", row.disabled ? 1 : 0]))}`,
-    tab: { label: "ALBUM", number: options.number, total, digits: 3, name: `专辑 ${options.number}${total ? ` / ${total}` : ""}` },
-    title: album.title,
-    subtitle: [album.artist, album.year ? String(album.year) : ""].filter(Boolean).join(" · "),
-    count: `共 ${tracks.length} 首`,
-    countNote: tracks.length ? options.time(tracks.reduce((sum, track) => sum + track.duration, 0)) : undefined,
-    label: options.column ?? album.artist,
-    listLabel: `${album.title} 曲目`,
-    note: notes.join(" ") || undefined,
-    empty: tracks.length ? undefined
-      : options.demo ? "这是一张封面演示卡片，扫描本地音乐库后这里会显示真实曲目。" : "这个专辑还没有可播放曲目。",
-    rows,
-  };
-}
-
 export function queueSongModel(
   tracks: readonly PlayerTrack[],
   options: {
@@ -123,7 +91,6 @@ export function queueSongModel(
     keyOf(track: PlayerTrack): string;
     indexOf(key: string): number;
     time(seconds: number): string;
-    note?: string;
     /** The playlist column this list is, when the shelf's columns are playlists. */
     lane?: { name: string; live: boolean };
     /** That column's place among the columns (from 1), and how many there are. */
@@ -131,6 +98,10 @@ export function queueSongModel(
   },
 ): SongListModel {
   const total = tracks.length;
+  // Every song with a box can be asked for: one of NetEase's queue (the one column, or the
+  // playlist it came from) as it is, one of another playlist column with its playlist, which then
+  // becomes NetEase's queue (the owner, 2026-10-10).
+  const lane = options.lane;
   // The stamp covers what the queue says; the boxes the rows point at come from the shelf.
   const boxes: number[] = [];
   const rows: SongRow[] = tracks.map((track, index) => {
@@ -145,14 +116,15 @@ export function queueSongModel(
       meta: track.duration ? options.time(track.duration) : "",
       select: select < 0 ? undefined : select,
       disabled: select < 0,
+      playable: select >= 0,
     };
   });
   const selected = options.selected;
   // A playlist column names itself; NetEase's own queue, the one column, is the QUEUE.
-  const lane = options.lane, name = lane?.name ?? "播放队列", column = lane ? options.column : undefined;
+  const name = lane?.name ?? "播放队列", column = lane ? options.column : undefined;
   return {
     kind: "queue",
-    id: `queue:${options.stamp}:${total}:${digest(boxes)}`,
+    id: `queue:${options.stamp}:${lane && !lane.live ? "browse" : "live"}:${total}:${digest(boxes)}`,
     tab: lane
       ? { label: "PLAYLIST", number: column?.number, total: column?.total, digits: 2, name: `歌单${column ? ` ${column.number} / ${column.total}` : ""}` }
       : { label: "QUEUE", digits: 2, name: "播放队列" },
@@ -163,7 +135,6 @@ export function queueSongModel(
     countNote: options.truncated ? (lane && !lane.live ? "未显示全部" : "前 3000 首") : undefined,
     label: name,
     listLabel: name,
-    note: options.note,
     empty: total ? undefined : lane ? "这个歌单是空的。" : "播放队列是空的。",
     rows,
   };
@@ -185,7 +156,10 @@ export interface PlaylistSong {
 /**
  * A local folder playlist (the owner, 2026-10-06: each playlist is a subfolder of the main
  * folder): one row per song in the order its column holds them. A row selects that song's case,
- * as a row of NetEase's queue does: moving never plays; the play button does.
+ * as a row of NetEase's queue does: moving never plays; its ▶ does (a song with a file the browser
+ * can play: not a demonstration cover, not in an offline folder, not marked ↗, such as DSF / DFF,
+ * which are only indexed: the review of 2026-10-08). What a row's marks mean is in its tooltip, and
+ * an offline folder says so under the count (目录离线), with no note under the list.
  */
 export function playlistSongModel(
   songs: readonly PlaylistSong[],
@@ -212,25 +186,24 @@ export function playlistSongModel(
       meta: options.demo ? "演示" : [`${song.format}${song.browserPlayable ? "" : " ↗"}`, options.time(song.duration)].join(" · "),
       select: select < 0 ? undefined : select,
       disabled: select < 0,
+      playable: select >= 0 && !options.demo && !song.offline && song.browserPlayable,
+      hint: options.demo ? undefined : song.offline ? OFFLINE_HINT : song.browserPlayable ? undefined : KERNEL_HINT,
     };
   });
   const selected = songs.find((song) => song.id === options.selected);
   const column = options.column;
-  const notes = [
-    songs.some((song) => song.offline) ? "目录离线，歌曲暂时无法播放。" : "",
-    !options.demo && songs.some((song) => !song.browserPlayable) ? "↗ 需要兼容的播放内核。" : "",
-  ].filter(Boolean);
+  const offline = songs.some((song) => song.offline);
   return {
     kind: "playlist",
-    id: `playlist:${digest(rows.flatMap((row) => [row.key, row.number, row.title, row.artist, row.meta, row.select ?? -1]))}`,
+    id: `playlist:${digest(rows.flatMap((row) => [row.key, row.number, row.title, row.artist, row.meta, row.select ?? -1, row.playable ? 1 : 0, row.hint ?? ""]))}`,
     tab: { label: "PLAYLIST", number: column?.number, total: column?.total, digits: 2, name: `歌单${column ? ` ${column.number} / ${column.total}` : ""}` },
     title: selected?.title ?? options.name,
     subtitle: selected ? [selected.artist || "歌手未提供", selected.album].filter(Boolean).join(" · ") : "",
     count: `共 ${songs.length} 首`,
-    countNote: songs.length && !options.demo ? options.time(songs.reduce((sum, song) => sum + song.duration, 0)) : undefined,
+    countNote: offline ? OFFLINE_HINT
+      : songs.length && !options.demo ? options.time(songs.reduce((sum, song) => sum + song.duration, 0)) : undefined,
     label: options.name,
     listLabel: options.name,
-    note: notes.join(" ") || undefined,
     empty: songs.length ? undefined : "这个歌单是空的。",
     rows,
   };
@@ -242,14 +215,14 @@ export function songSceneMarkup(): string {
     <i class="song-rail song-rail-top" aria-hidden="true"></i><i class="song-rail song-rail-bottom" aria-hidden="true"></i><i class="song-marker" aria-hidden="true"></i>
     <div class="song-exits">
       <button class="music-back" data-action="back"><span>← <span id="song-back-label">返回专辑架</span></span> <kbd>ESC</kbd></button>
-      <button class="music-back song-details" data-action="details"><span>↗ <span id="song-details-label">专辑详情</span></span> <kbd>S</kbd></button>
     </div>
+    <button class="music-back song-details" data-action="details"><span>↗ <span id="song-details-label">专辑详情</span></span> <kbd>S</kbd></button>
     <p class="song-caption"><i aria-hidden="true"></i><span id="song-label"></span></p>
   </div>
   <div id="song-glass" class="song-glass">
     <div class="song-head">
       <div class="song-tab"><span id="song-tab-text" class="song-tab-text"></span><span class="song-tab-label" aria-hidden="true"><span id="song-tab-label"></span><i class="song-tab-dot"></i></span><span class="song-tab-figure" aria-hidden="true"><b id="song-tab-number" class="song-tab-number"></b><span id="song-tab-total" class="song-tab-total"></span></span></div>
-      <div class="song-tally"><span id="song-count" class="song-count"></span><small id="song-count-note" class="song-count-note" hidden></small></div>
+      <div class="song-tally"><span class="song-tally-row"><button id="song-go-playing" class="song-go-playing" data-action="go-playing" aria-label="回到正在播放的歌" hidden><i aria-hidden="true"></i><span></span></button><span id="song-count" class="song-count"></span></span><small id="song-count-note" class="song-count-note" hidden></small></div>
     </div>
     <div class="song-selected">
       <h2 id="song-title" class="song-title"></h2>
@@ -257,7 +230,6 @@ export function songSceneMarkup(): string {
       <div class="song-steps" role="group" aria-label="切换专辑"><button id="song-prev" data-action="prev" aria-label="上一张专辑"><i class="chevron chevron-up" aria-hidden="true"></i></button><button id="song-next" data-action="next" aria-label="下一张专辑"><i class="chevron chevron-down" aria-hidden="true"></i></button></div>
     </div>
     <div id="song-list" class="song-list" role="group" tabindex="-1"></div>
-    <p id="song-note" class="song-note" hidden></p>
   </div>`;
 }
 
@@ -267,7 +239,11 @@ export const SONG_BLOCK_ROWS = 40;
 /**
  * The list's rows (or its empty text); every field is plain text. Rows and headings have
  * fixed heights, so each block states its exact size (--rows, --groups) and the list's
- * length never changes while blocks come and go.
+ * length never changes while blocks come and go. Each row's number shares its cell with a ▶
+ * (data-action="play-row", shown by song-scene.css in the number's place on a playable row that is
+ * hovered, focused or selected; the owner, 2026-10-08, after NetEase's own list). It is not a
+ * button of its own (a button cannot hold one): the row is the button, P plays its song, and so
+ * does a double-click or a double tap on the row (rowClickKind; a single click only selects it).
  */
 export function songRowsMarkup(model: Pick<SongListModel, "rows" | "empty">): string {
   const { rows } = model;
@@ -286,7 +262,8 @@ export function songRowsMarkup(model: Pick<SongListModel, "rows" | "empty">): st
       group = row.group;
       const target = row.track !== undefined ? ` data-track="${escapeHtml(row.track)}"`
         : row.select !== undefined ? ` data-select="${escapeHtml(String(row.select))}"` : "";
-      block += `<button type="button" class="song-row" data-row="${index}"${target} tabindex="-1"${row.disabled ? " disabled" : ""}><span class="song-row-number">${escapeHtml(row.number)}</span><span class="song-row-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.artist)}</small></span><span class="song-row-meta">${escapeHtml(row.meta)}</span></button>`;
+      const marks = `${row.playable ? " data-playable" : ""}${row.hint ? ` title="${escapeHtml(row.hint)}"` : ""}`;
+      block += `<button type="button" class="song-row" data-row="${index}"${target}${marks} tabindex="-1"${row.disabled ? " disabled" : ""}><span class="song-row-number">${escapeHtml(row.number)}</span>${row.playable ? '<span class="song-row-play" data-action="play-row" aria-hidden="true"></span>' : ""}<span class="song-row-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.artist)}</small></span><span class="song-row-meta">${escapeHtml(row.meta)}</span></button>`;
     }
     html += `<div class="song-block" style="--rows:${end - start};--groups:${groups}">${block}</div>`;
   }
@@ -353,10 +330,10 @@ export interface SongSceneLayout {
   /** The glass pane before its transform (centre and size) and the transform itself. */
   glass: { x: number; y: number; width: number; height: number; tilt: number; perspective: number; side: number };
   /**
-   * Where the note goes: "side" is the bottom of the column left of the list, under the
-   * selected song (wide only, when that column is tall enough); "under" is below the list.
+   * Where 这首歌 stands over the card (song-scene.css): the right edge of the case as it is seen
+   * (its face, without the reach of its glow), and the drawn card's top edge.
    */
-  note: "side" | "under";
+  card: { right: number; top: number };
 }
 
 /**
@@ -376,8 +353,6 @@ const SIDE = 0.407;
 export const PANE = { start: 3.3333, end: 3.1111, head: 12, gap: 2.6667 } as const;
 /** Viewport widths the browser adds around a row before deciding whether to paint it (1.5), with a margin. */
 const PAINT_REACH = 1.6;
-/** Room kept for the note, in ems of its font: the longest one the app writes is 53 full-width characters. */
-const NOTE_EMS = 56;
 /** The least the wide arrangement leaves the list and the selected song, in units. */
 const WIDE_LIST = 40;
 const WIDE_SIDE = 20;
@@ -388,19 +363,6 @@ const WIDE_SIDE = 20;
  * handed over instead.
  */
 export const CARD_REACH = { right: 0.075, top: 0.07, bottom: 0.055 } as const;
-
-/** Type sizes of the pane in pixels (song-scene.css): the selected title, its second line, the note. */
-export function songPaneType(unit: number) {
-  return { title: Math.max(16, 2.4444 * unit), subtitle: Math.max(11, 1.2222 * unit), note: Math.max(10, 1.2222 * unit) };
-}
-/**
- * The tallest the selected song's block gets (song-scene.css): 8 px from the list's top rule,
- * a title of at most three lines, its second line, the two step buttons 20 px below.
- */
-export function selectedBlockHeight(unit: number) {
-  const type = songPaneType(unit), gap = 1.1111 * unit;
-  return 0.8889 * unit + 3 * 1.2 * type.title + gap + 1.4 * type.subtitle + 2 * gap + Math.max(24, 2.8889 * unit);
-}
 
 /** How a pane turned by `tilt` degrees projects: edge magnifications and reach from its centre. */
 function sheetProjection(tilt: number) {
@@ -498,18 +460,7 @@ export function songSceneLayout(width: number, height: number, card: SongCard, p
     x: glassX, y: glassY, width: glassWidth, height: glassHeight, tilt,
     perspective: PERSPECTIVE * glassWidth, side: SIDE * glassWidth,
   };
-
-  // The note is bottom-aligned in the side column, under the selected song's block (both lie in
-  // the pane's plane). A short window leaves less than the note needs there: it goes under the list.
-  let note: SongSceneLayout["note"] = "under";
-  if (mode === "wide") {
-    const type = songPaneType(unit);
-    const column = glass.side - (PANE.start + PANE.gap) * unit;
-    const lines = Math.ceil(NOTE_EMS / Math.max(1, Math.floor(column / type.note)));
-    const room = glassHeight - (PANE.start + PANE.head + PANE.end) * unit - 2;
-    note = room >= selectedBlockHeight(unit) + 2 * unit + lines * 1.7 * type.note ? "side" : "under";
-  }
-  return { mode, unit, rail, glass, note };
+  return { mode, unit, rail, glass, card: { right: card.x + card.width / 2, top: edgeTop } };
 }
 
 /** The layout as the CSS variables song-scene.css reads from the section. */
@@ -522,6 +473,7 @@ export function songLayoutStyle(layout: SongSceneLayout): Record<string, string>
     "--songs-rail-x": px(Math.round(rail.x)),
     "--songs-card-top": px(rail.top),
     "--songs-card-bottom": px(rail.bottom),
+    "--songs-card-right": px(layout.card.right),
     "--songs-marker-y": px(rail.marker),
     "--songs-glass-x": px(glass.x - glass.width / 2),
     "--songs-glass-y": px(glass.y - glass.height / 2),
@@ -533,6 +485,126 @@ export function songLayoutStyle(layout: SongSceneLayout): Record<string, string>
   };
 }
 
+/** The press a click on a row's ▶ came from (SongListView keeps the last primary pointerdown). */
+export interface RowPress {
+  /** The pointerdown's pointerType: "mouse", "pen" or "touch" ("" when the browser does not say). */
+  pointer: string;
+  /** The list's row it landed on, if any. */
+  row: object | null;
+  /** Whether that row's ▶ was displayed at the press, before a tap could hover the row. */
+  shown: boolean;
+}
+
+/**
+ * Whether a click on a row's ▶ plays the row's song; otherwise it only selects the row. A mouse
+ * plays: it hovers the row before it presses, so ▶ is what it clicked. Touch has no hover, yet
+ * Chromium hovers the tapped row as the tap lands, so ▶ turns up under the finger before the click
+ * is hit-tested (the review of 2026-10-08: a tap on a row's number played it). A tap or a pen's
+ * press therefore plays only on the row it pressed, and only if that row showed ▶ before it (the
+ * selected or the keyboard-focused row, or one a hovering pen was over); otherwise it selects.
+ */
+export function rowPressPlays(press: RowPress | undefined, row: object): boolean {
+  if (!press || (press.pointer !== "touch" && press.pointer !== "pen")) return true;
+  return press.row === row && press.shown;
+}
+
+/** A click on a song row (its ▶ or the rest of it), as SongListView keeps the last one. */
+export interface RowClick {
+  /** The clicks on the page so far, this one included (the one just before it: one less). */
+  serial: number;
+  /** Its timeStamp (ms) and where it was (client pixels). */
+  at: number;
+  x: number;
+  y: number;
+  /** Its pointerType: "mouse", "pen" or "touch" ("" when the browser does not say). */
+  pointer: string;
+  /** Its `detail`: how many clicks in a row the browser counted there (0 from the keyboard). */
+  count: number;
+}
+export type RowClickKind = "single" | "double" | "more";
+/**
+ * A double tap, or a pen's double press: the second within this many ms and px of the first (the
+ * shelf's DOUBLE_PRESS), for a browser that counts only a mouse's clicks (Chromium counts taps
+ * too). `counted`: the longest a click the browser counted with the one before can follow it (the
+ * longest double-click time Windows allows).
+ */
+export const ROW_DOUBLE = { ms: 500, px: 16, counted: 5000 } as const;
+
+/**
+ * What a click on a song row is (the owner, 2026-10-08: "double-click a song in the list to switch
+ * to it"): "double" when it is the second click of a double-click or a double tap whose first, the
+ * click just before it on the page (`previous`), was a "single" on a row; "more" for a further
+ * click of that burst (a triple click), which does nothing; else "single". A mouse's double-click
+ * is the system's: the browser counts it with the click before (detail one more, within the
+ * system's double-click time and distance). A tap or a pen's press is also one when it comes
+ * within ROW_DOUBLE of the click before, by the same kind of pointer. Where it landed is not
+ * asked: the first click can scroll the list to reveal its row, so the second may find another
+ * row under the pointer, and the burst is the first click's row's (SongListView.rowClick). A click
+ * from the keyboard (detail 0: Enter on a focused row) is always "single", and no double begins
+ * with it.
+ */
+export function rowClickKind(previous: (RowClick & { kind: RowClickKind }) | undefined, click: RowClick): RowClickKind {
+  if (click.count <= 0 || !previous || previous.count <= 0 || click.serial !== previous.serial + 1) return "single";
+  const after = click.at - previous.at;
+  const counted = click.count === previous.count + 1 && after >= 0 && after < ROW_DOUBLE.counted;
+  const near = click.pointer !== "mouse" && click.pointer === previous.pointer && after >= 0 && after < ROW_DOUBLE.ms
+    && Math.hypot(click.x - previous.x, click.y - previous.y) <= ROW_DOUBLE.px;
+  if (!counted && !near) return "single";
+  return previous.kind === "single" ? "double" : "more";
+}
+
+/**
+ * The level meter's bars (song-scene.css): each between 45% of its height and all of it, on its own
+ * period (ms), starting `delay` ms after the meter does; the design's animation, ease-in-out either way.
+ */
+export const SONG_METER = [
+  { period: 700, delay: 0 },
+  { period: 820, delay: 120 },
+  { period: 940, delay: 240 },
+] as const;
+/** CSS's ease-in-out, cubic-bezier(0.42, 0, 0.58, 1), at `x` (0..1): its x(t) solved for t, then y(t). */
+export function easeInOut(x: number) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const ax = 0.52, bx = -0.78, cx = 1.26;
+  const curve = (t: number) => ((ax * t + bx) * t + cx) * t;
+  let t = x;
+  for (let i = 0; i < 8; i++) {
+    const error = curve(t) - x;
+    if (Math.abs(error) < 1e-7) break;
+    const slope = (3 * ax * t + 2 * bx) * t + cx;
+    if (Math.abs(slope) < 1e-6) break;
+    t -= error / slope;
+  }
+  if (!(t >= 0 && t <= 1) || Math.abs(curve(t) - x) > 1e-5) {
+    // Bisection where Newton's steps do not settle (x(t) rises monotonically on 0..1).
+    let low = 0, high = 1;
+    for (let i = 0; i < 40; i++) {
+      t = (low + high) / 2;
+      if (curve(t) < x) low = t;
+      else high = t;
+    }
+  }
+  return t * t * (3 - 2 * t);
+}
+/** A bar's height (its scaleY) `elapsed` ms after its animation began: whole before it starts. */
+export function meterScale(elapsed: number, period: number) {
+  if (elapsed < 0) return 1;
+  const phase = (elapsed % period) / period;
+  return phase < 0.5
+    ? 0.45 + 0.55 * easeInOut(phase * 2)
+    : 1 - 0.55 * easeInOut(phase * 2 - 1);
+}
+
+/** The playing row's level meter (song-scene.css): three bars in the number's place, decorative. */
+function songMeter() {
+  const meter = document.createElement("i");
+  meter.className = "song-meter";
+  meter.setAttribute("aria-hidden", "true");
+  for (let bar = 0; bar < 3; bar++) meter.append(document.createElement("i"));
+  return meter;
+}
+
 type RowMark = "playing" | "selected" | "pending";
 export interface SongRowState {
   playing?: string;
@@ -542,6 +614,13 @@ export interface SongRowState {
   paused?: boolean;
   /** The listed column holds what plays (NetEase's queue, the loaded album): the tab's dot. */
   live?: boolean;
+  /**
+   * The playable rows show ▶ (data-play): it plays their song, or, for NetEase's queue while its
+   * port may not be used for a reason the user can change, says why (the page's requestPlay).
+   */
+  play?: boolean;
+  /** The playing row's song is paused and ▶ can resume it (data-resume). */
+  resume?: boolean;
 }
 
 export class SongListView {
@@ -553,13 +632,26 @@ export class SongListView {
   readonly tabNumber: HTMLElement;
   private readonly title: HTMLElement;
   private readonly steps: HTMLElement;
-  private readonly text: Record<"subtitle" | "tab" | "tabLabel" | "tabTotal" | "count" | "countNote" | "label" | "note", HTMLElement>;
+  private readonly glass: HTMLElement;
+  private readonly details: HTMLElement;
+  /** The pane's layout and the card as setCard last placed them, for alignDetails. */
+  private placed: { layout: SongSceneLayout; card: SongCard; portrait: boolean } | undefined;
+  private detailsY = "";
+  private readonly text: Record<"subtitle" | "tab" | "tabLabel" | "tabTotal" | "count" | "countNote" | "label", HTMLElement>;
   private rows: HTMLButtonElement[] = [];
   private rowKeys: string[] = [];
   private keys = new Map<string, HTMLButtonElement>();
   private id: string | undefined;
   private state: SongRowState = {};
   private marks: Partial<Record<RowMark, HTMLButtonElement>> = {};
+  /**
+   * The playing row's level meter (songMeter): one element, moved into whichever row plays, its bars
+   * scaled by tickMeter. Drawn as the number cell's background, its animated heights restyled and
+   * repainted the list on every display frame (measured 2026-10-10).
+   */
+  private meter: HTMLElement | undefined;
+  /** When the meter's bars began to move (tickMeter); NaN while they stand still. */
+  private meterStart = NaN;
   private current: HTMLButtonElement | undefined;
   private tabStop: HTMLButtonElement | undefined;
   private firstEnabled: HTMLButtonElement | undefined;
@@ -570,6 +662,15 @@ export class SongListView {
   /** Rows were rebuilt while the list had no box: the old offset comes back with the box. */
   private stale = false;
   private layoutKey = "";
+  /** The last primary press anywhere on the page (playAllowed). */
+  private press: RowPress | undefined;
+  /** Clicks on the page so far (RowClick.serial). */
+  private clicks = 0;
+  /**
+   * The last click on a row (rowClick): what it was, the row its burst began on, and whether the
+   * burst has played that row's song.
+   */
+  private lastClick: (RowClick & { kind: RowClickKind; row: HTMLButtonElement; played: boolean }) | undefined;
 
   constructor(private readonly root: HTMLElement) {
     const find = <T extends HTMLElement = HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
@@ -578,17 +679,66 @@ export class SongListView {
     this.tabNumber = find("#song-tab-number");
     this.title = find(".song-title");
     this.steps = find(".song-steps");
+    this.glass = find(".song-glass");
+    this.details = find(".song-details");
+    // The pane's type settles once its fonts arrive: 这首歌 follows the title's line.
+    document.fonts?.addEventListener?.("loadingdone", () => this.alignDetails());
     this.text = {
       subtitle: find(".song-subtitle"),
       tab: find("#song-tab-text"), tabLabel: find("#song-tab-label"), tabTotal: find("#song-tab-total"),
       count: find(".song-count"), countNote: find(".song-count-note"),
-      label: find("#song-label"), note: find(".song-note"),
+      label: find("#song-label"),
     };
     // The tab stop follows the focus, so Tab returns to the row the user left.
     this.list.addEventListener("focusin", (event) => {
       const row = (event.target as HTMLElement).closest<HTMLButtonElement>(".song-row");
       if (row) this.setTabStop(row);
     });
+    // Every primary press, before the page answers it (capture): by which pointer, on which of
+    // the list's rows, and whether that row's ▶ was displayed then.
+    document.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary) return;
+      const hit = event.target instanceof Element ? event.target.closest<HTMLElement>(".song-row") : null;
+      const row = hit && this.list.contains(hit) ? hit : null;
+      const play = row?.querySelector<HTMLElement>(".song-row-play");
+      this.press = { pointer: event.pointerType, row, shown: !!play && getComputedStyle(play).display !== "none" };
+    }, true);
+    // Every click on the page, before the page answers it: a double-click is two clicks in a row.
+    document.addEventListener("click", () => {
+      this.clicks++;
+    }, true);
+  }
+
+  /**
+   * Whether a click on `row`'s ▶ may play its song, or only select the row: a tap or a pen's
+   * press plays only where ▶ showed before it (rowPressPlays); a mouse always plays.
+   */
+  playAllowed(row: HTMLElement) {
+    return rowPressPlays(this.press, row);
+  }
+
+  /**
+   * A click on `row`, its ▶ or the rest of it (rowClickKind): a "single" one, the second of a
+   * double-click or a double tap ("double"), or a further click of that burst ("more"). `row` in
+   * the answer is the row the burst began on, which the first click may have scrolled away from
+   * under the pointer; `played`: a click before it in the burst has played that row's song already
+   * (rowPlayed), so the double plays nothing more. A burst whose row the list no longer holds (the
+   * rows were rebuilt in between) ends: the click is a single one. The click's pointer is its own,
+   * else that of the press before it.
+   */
+  rowClick(row: HTMLButtonElement, event: MouseEvent): { kind: RowClickKind; row: HTMLButtonElement; played: boolean } {
+    const pointer = (event as Partial<PointerEvent>).pointerType || this.press?.pointer || "";
+    const click: RowClick = { serial: this.clicks, at: event.timeStamp, x: event.clientX, y: event.clientY, pointer, count: event.detail };
+    // A burst whose row the list no longer holds (its rows were rebuilt in between) ends there.
+    const kind = this.lastClick && this.list.contains(this.lastClick.row) ? rowClickKind(this.lastClick, click) : "single";
+    const burst = kind === "single" || !this.lastClick ? { row, played: false } : this.lastClick;
+    this.lastClick = { ...click, kind, row: burst.row, played: burst.played };
+    return { kind, row: burst.row, played: burst.played };
+  }
+
+  /** The click rowClick has just answered played the row's song: the rest of its burst plays nothing. */
+  rowPlayed() {
+    if (this.lastClick) this.lastClick.played = true;
   }
 
   /**
@@ -619,15 +769,14 @@ export class SongListView {
     text.countNote.hidden = !model.countNote;
     set(text.label, model.label);
     if (this.list.getAttribute("aria-label") !== model.listLabel) this.list.setAttribute("aria-label", model.listLabel);
-    set(text.note, model.note ?? "");
-    text.note.hidden = !model.note;
     this.setTitle(model.title, !reduced && !root.hidden);
     if (model.id !== this.id) this.rebuild(model);
   }
 
   /**
-   * Row keys, whether the playing song is paused (mirrored as data-paused on the section) and
-   * whether the listed column holds what plays (data-live, the tab's dot). Touches at most the
+   * Row keys, whether the playing song is paused (mirrored as data-paused on the section),
+   * whether the listed column holds what plays (data-live, the tab's dot) and whether ▶ can play
+   * the playable rows or resume the paused one (data-play, data-resume). Touches at most the
    * rows whose state changed, so it can run on every poll.
    */
   sync(state: SongRowState) {
@@ -640,9 +789,18 @@ export class SongListView {
       next?.classList.add(mark);
       this.marks[mark] = next;
     }
-    const paused = String(!!state.paused), live = String(!!state.live);
-    if (this.root.dataset.paused !== paused) this.root.dataset.paused = paused;
-    if (this.root.dataset.live !== live) this.root.dataset.live = live;
+    // The meter goes with the playing row, also into the new rows of a rebuilt list, and starts
+    // over there (as the design's animation did on a new row).
+    const cell = this.marks.playing?.querySelector<HTMLElement>(".song-row-number") ?? null;
+    if (cell && this.meter?.parentElement !== cell) {
+      cell.append(this.meter ??= songMeter());
+      this.meterStart = NaN;
+    } else if (!cell) this.meter?.remove();
+    const flags = { paused: state.paused, live: state.live, play: state.play, resume: state.resume };
+    for (const [name, on] of Object.entries(flags)) {
+      const value = String(!!on);
+      if (this.root.dataset[name] !== value) this.root.dataset[name] = value;
+    }
     const current = row(state.selected) ?? row(state.playing);
     if (current !== this.current) {
       this.current?.removeAttribute("aria-current");
@@ -651,6 +809,33 @@ export class SongListView {
     }
     // Until the user focuses a row, Tab enters the list at the current one.
     if (!this.list.contains(document.activeElement)) this.setTabStop(this.focusable(current));
+  }
+
+  /**
+   * Moves the playing row's meter to `now` (ms), from the page's frame loop: about 60 times a second
+   * where the scene rests (FramePacing), so the pane under it is composited that often instead of at
+   * the display's rate, as a running animation had it (240 Hz here; measured 2026-10-10). The bars
+   * stand whole while the song is paused, with reduced motion and while the view is hidden; they start
+   * over when they move again. Returns whether they move.
+   */
+  tickMeter(now: number, reduced: boolean) {
+    const meter = this.meter;
+    const running = !!meter?.isConnected && !this.state.paused && !reduced && !this.root.hidden;
+    if (!running) {
+      if (!Number.isNaN(this.meterStart)) {
+        this.meterStart = NaN;
+        if (meter) for (const bar of meter.children) (bar as HTMLElement).style.removeProperty("transform");
+      }
+      return false;
+    }
+    if (Number.isNaN(this.meterStart)) this.meterStart = now;
+    SONG_METER.forEach(({ period, delay }, index) => {
+      const bar = meter!.children[index] as HTMLElement | undefined;
+      const scale = meterScale(now - this.meterStart - delay, period);
+      const transform = scale === 1 ? "" : `scaleY(${scale.toFixed(4)})`;
+      if (bar && bar.style.transform !== transform) bar.style.transform = transform;
+    });
+    return true;
   }
 
   /** Scrolls the row into a comfortable position unless it already is in one. */
@@ -677,15 +862,16 @@ export class SongListView {
 
   /**
    * Roving focus inside the list: ArrowUp/ArrowDown/Home/End/PageUp/PageDown. Returns true
-   * (after preventDefault) only when the focus is inside the list and the key was handled.
+   * (after preventDefault) only when the focus is inside the list and the key was handled. `key`
+   * is the key it counts as (a user's key for 上一首 / 下一首 counts as an arrow: 设置 → 快捷键).
    */
-  handleKey(event: KeyboardEvent): boolean {
+  handleKey(event: KeyboardEvent, key = event.key): boolean {
     if (event.ctrlKey || event.metaKey || event.altKey) return false;
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || !this.list.contains(active)) return false;
     const row = active.closest<HTMLElement>(".song-row");
     const from = Number(row?.dataset.row ?? -1);
-    const to = rovingIndex(event.key, from, this.rows.length, Math.floor(this.list.clientHeight / (row?.offsetHeight || 48)) - 1,
+    const to = rovingIndex(key, from, this.rows.length, Math.floor(this.list.clientHeight / (row?.offsetHeight || 48)) - 1,
       (index) => !this.rows[index].disabled);
     if (to === undefined || to < 0) return false;
     event.preventDefault();
@@ -707,13 +893,46 @@ export class SongListView {
     const portrait = this.root.closest<HTMLElement>("[data-layout]")?.dataset.layout === "portrait";
     const layout = songSceneLayout(width, height, rect, portrait, chromeBottom);
     const style = songLayoutStyle(layout);
-    const key = JSON.stringify([layout.mode, layout.note, layout.rail.shown, layout.rail.markerShown, style]);
-    if (key === this.layoutKey) return;
-    this.layoutKey = key;
-    for (const [name, value] of Object.entries(style)) this.root.style.setProperty(name, value);
-    this.root.dataset.panel = layout.mode;
-    this.root.dataset.note = layout.note;
-    this.root.dataset.rail = layout.rail.shown ? (layout.rail.markerShown ? "marker" : "line") : "none";
+    const key = JSON.stringify([layout.mode, layout.rail.shown, layout.rail.markerShown, style]);
+    this.placed = { layout, card: rect, portrait };
+    if (key !== this.layoutKey) {
+      this.layoutKey = key;
+      for (const [name, value] of Object.entries(style)) this.root.style.setProperty(name, value);
+      this.root.dataset.panel = layout.mode;
+      this.root.dataset.rail = layout.rail.shown ? (layout.rail.markerShown ? "marker" : "line") : "none";
+    }
+    this.alignDetails();
+  }
+
+  /**
+   * 这首歌 level with the second line of the selected song's title on the pane (the owner,
+   * 2026-10-10: "parallel with this", beside a two-line title's second line): where that line is,
+   * or would be, in the pane's own layout (its offsets, which the pane's turn and its entrance do
+   * not change), projected as the pane is turned (projectSheet). It keeps clear above the case, and
+   * its place does not move with the title's length. Not in portrait (the title is in the pane under
+   * the card) and not before the pane has a box: there the card's top edge places it (song-scene.css).
+   */
+  alignDetails() {
+    const placed = this.placed;
+    if (!placed || placed.portrait) return this.setDetailsY("");
+    if (this.root.hidden || !this.glass.offsetWidth) return;
+    let x = 0, y = 0;
+    for (let at: HTMLElement | null = this.title; at && at !== this.glass; at = at.offsetParent as HTMLElement | null) {
+      x += at.offsetLeft;
+      y += at.offsetTop;
+    }
+    const line = Number.parseFloat(getComputedStyle(this.title).lineHeight);
+    if (!Number.isFinite(line) || line <= 0) return;
+    const { layout: { glass }, card } = placed;
+    const second = projectSheet(glass, x - glass.width / 2, y + 1.5 * line - glass.height / 2).y;
+    const centre = Math.min(second, card.y - card.height / 2 - 4 - this.details.offsetHeight / 2);
+    if (Number.isFinite(centre)) this.setDetailsY(`${Math.round(centre * 4) / 4}px`);
+  }
+  private setDetailsY(value: string) {
+    if (value === this.detailsY) return;
+    this.detailsY = value;
+    if (value) this.root.style.setProperty("--songs-details-y", value);
+    else this.root.style.removeProperty("--songs-details-y");
   }
 
   private focusable(preferred?: HTMLButtonElement) {

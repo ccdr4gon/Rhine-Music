@@ -1,13 +1,13 @@
 //! The local music's routes under `/api/`: the library and its scan, the settings, the genre
-//! rules, the online introductions, the foobar2000 / Beefweb bridge, and the audio and covers of
-//! indexed songs (streamed from their files, which are only read). The page server
+//! rules, the online introductions, the foobar2000 / Beefweb bridge, and the audio, covers and
+//! lyrics of indexed songs (from their files, which are only read). The page server
 //! (`app_server`) checks the Host, the Origin and the path and reads a POST's JSON body before it
 //! hands a route here.
 use crate::{
     http::{self, json_response, serve_file},
     local_music::data::{
         library::{SharedStore, Store},
-        online,
+        lyrics, online,
     },
 };
 use serde_json::{json, Value};
@@ -106,6 +106,30 @@ pub fn respond(
                 ),
                 None => json_response(request, 404, json!({"error":"索引中没有此文件"})),
             };
+        }
+    }
+    // A song's lyrics (its .lrc beside it, else its tags; the owner, 2026-10-17) as their bytes,
+    // which the page decodes; 204 when it has none.
+    if let Some(id) = route.strip_prefix("/api/lyrics/") {
+        if get && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            let song = store.lock().unwrap().file(id, false);
+            let Some(song) = song else {
+                return json_response(request, 404, json!({"error":"索引中没有此文件"}));
+            };
+            let response = match lyrics::read(&song) {
+                Ok(Some(bytes)) => Response::from_data(bytes)
+                    .with_header(http::header("Content-Type", "application/octet-stream")),
+                Ok(None) => Response::from_data(Vec::new()).with_status_code(204),
+                Err((status, error)) => {
+                    return json_response(request, status, json!({"error":error}))
+                }
+            };
+            let _ = request.respond(
+                response
+                    .with_header(http::header("Cache-Control", "no-store"))
+                    .with_header(http::header("X-Content-Type-Options", "nosniff")),
+            );
+            return;
         }
     }
     match result {

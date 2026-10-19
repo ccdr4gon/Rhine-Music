@@ -55,22 +55,38 @@ export class FramePacing {
 
   /** Called on every display frame (seconds); false skips this frame's update. */
   due(time: number, always = false) {
-    const elapsed = time - this.previousTick;
-    this.previousTick = time;
-    if (elapsed > 0 && elapsed < 0.1) {
-      // An interval across a host's wait is not a display frame.
-      if (!this.hostWaited) {
-        this.intervals[this.intervalIndex] = elapsed;
-        this.intervalIndex = (this.intervalIndex + 1) % 9;
-      }
-    } else {
-      // First frame, or the first after a pause (hidden page, open viewer).
-      this.forced = true;
-    }
-    this.hostWaited = false;
+    const elapsed = this.measure(time);
+    // First frame, or the first after a pause (hidden page, open viewer).
+    if (!(elapsed > 0 && elapsed < 0.1)) this.forced = true;
     if (always || this.forced || this.awake || !this.resting) return true;
     const frame = this.displayFrame();
     return time - this.lastUpdate >= (this.restEvery(frame) - 0.5) * frame;
+  }
+
+  /**
+   * A display frame the host passes over without an update (a 帧率上限 holds it back): it still
+   * measures the display. One stamped like the frame before it (an animation frame requested
+   * between two display frames runs at once, stamped with the earlier one) is no new frame.
+   */
+  skip(time: number) {
+    const elapsed = this.measure(time);
+    if (!(elapsed >= 0 && elapsed < 0.1)) this.forced = true;
+  }
+
+  /** The host waits (a timer) before its next frame: the interval across the wait is not a display frame. */
+  waited() {
+    this.hostWaited = true;
+  }
+
+  private measure(time: number) {
+    const elapsed = time - this.previousTick;
+    this.previousTick = time;
+    if (elapsed > 0 && elapsed < 0.1 && !this.hostWaited) {
+      this.intervals[this.intervalIndex] = elapsed;
+      this.intervalIndex = (this.intervalIndex + 1) % 9;
+    }
+    this.hostWaited = false;
+    return elapsed;
   }
 
   /** Every Nth display frame, N = floor(refresh / 60): 240 Hz rests on every fourth, 144 Hz every second. */
@@ -82,20 +98,20 @@ export class FramePacing {
    * For a host loop that can wait between display frames instead of requesting
    * every one: the time (seconds, animation-frame clock) of the next frame
    * this scene needs, or 0 when it needs the very next one. Input and mutators
-   * call onWake to end a wait early.
+   * call onWake to end a wait early; a host that waits calls waited().
    */
   nextFrameAt() {
     if (!this.isResting || this.awake) return 0;
     const frame = this.displayFrame();
     const every = this.restEvery(frame);
     if (every < 2) return 0;
-    this.hostWaited = true;
     // An animation frame requested between two display frames runs at once,
     // stamped with the earlier one: ask just after the slot's frame began.
     return this.lastUpdate + (every + 0.25) * frame;
   }
 
-  private displayFrame() {
+  /** The display's frame (seconds): the median of the last nine intervals between display frames. */
+  displayFrame() {
     if (!this.intervals.length) return REST_INTERVAL;
     const sorted = [...this.intervals].sort((a, b) => a - b);
     return sorted[sorted.length >> 1];

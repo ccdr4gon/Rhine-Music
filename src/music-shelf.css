@@ -108,7 +108,8 @@
   white-space: nowrap !important;
 }
 
-/* The actions: the play ring (42 px) and its note on the left, the two quiet links on the right. */
+/* The actions: the play ring (42 px, the selected song's play button) and its note on the left, the
+   two quiet links on the right. */
 .music-app .shelf-actions {
   display: flex;
   flex-wrap: wrap;
@@ -143,7 +144,10 @@
   width: 2.5px;
   height: 12px;
 }
-.music-app .shelf-play-note {
+/* Beside the ring: the playing song's number while another song is selected, a button back to it
+   (● 012; the owner, 2026-10-07), or 正在切换… while NetEase has not answered (a status). */
+.music-app .shelf-play-note,
+.music-app .shelf-play-status {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -155,16 +159,25 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.music-app .shelf-play-note > i {
+.music-app .shelf-play-status:empty {
   display: none;
+}
+.music-app .shelf-play-note {
+  height: 28px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  transition: color 120ms ease;
+}
+.music-app .shelf-play-note:hover {
+  color: var(--ink);
+}
+.music-app .shelf-play-note > i {
+  display: block;
   flex: none;
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--state);
-}
-.music-app .shelf-play-note[data-dot="true"] > i {
-  display: block;
 }
 .music-app .shelf-links {
   display: flex;
@@ -282,6 +295,8 @@
   -webkit-mask-image: linear-gradient(180deg, transparent, #000 var(--drum-fade), #000 calc(100% - var(--drum-fade)), transparent);
   mask-image: linear-gradient(180deg, transparent, #000 var(--drum-fade), #000 calc(100% - var(--drum-fade)), transparent);
 }
+/* A layer of its own at rest too: painted into the page instead, its rows' fractional place rounds
+   one device pixel lower (compared 2026-10-10). */
 .music-app .drum-track {
   display: flex;
   flex-direction: column;
@@ -452,16 +467,26 @@
   letter-spacing: 0.08em;
   color: var(--ink);
 }
+/* P's triangle and SPACE's two bars (pause / resume) in place of words. */
 .music-app .music-keyhint .hint-play {
   display: block;
   align-self: center;
-  /* The design leaves an empty word between SPACE and the triangle: two gaps. */
+  /* The design leaves an empty word between the key and its mark: two gaps. */
   margin-left: 6px;
   width: 0;
   height: 0;
   border-left: 6px solid var(--muted);
   border-top: 3.5px solid transparent;
   border-bottom: 3.5px solid transparent;
+}
+.music-app .music-keyhint .hint-pause {
+  display: block;
+  align-self: center;
+  margin-left: 6px;
+  width: 6px;
+  height: 7px;
+  border-left: 2px solid var(--muted);
+  border-right: 2px solid var(--muted);
 }
 
 /* ---- the selection bracket: four squares on the lifted case's box ------------------------ */
@@ -495,44 +520,98 @@
   transform: translate3d(calc(var(--br, 0px) - 3px), calc(var(--bb, 0px) - 3px), 0);
 }
 
-/* ---- the playlists' names on the shelf (lane-names.ts): flat text over the picture ------- */
-/* Above the canvas, under everything else; the pointer passes through. Each name is laid out
-   at one size and placed by the scene (translate, rotate, scale, opacity) at the slot of its
-   role. Text only: no background, border, outline or shadow box; a thin soft rim in the ground
-   colour (1 and 2.5 screen pixels whatever the name's scale: --lane-unscale is 1 / scale) keeps
-   it readable on lit and shaded cases. The sizes are the scene's former writing: the number
-   34 / 54 of the name, 20 / 54 of it apart. */
+/* ---- the playlists' names on the shelf (lane-names.ts): the selected flat, the others on a plane */
+/* The selected column's name flat, facing the viewer, by the lifted case; the names of the two
+   columns beside it in perspective on a plane of their column that faces right (lane-labels.ts).
+   The scene places each by an inline transform from its top left (a translation, or its slot's
+   matrix3d) and fades it (opacity) at its slot. Text only: no background, border, outline,
+   shadow or rim; the place gives the contrast. The layer sits above the picture's vignette and
+   the reading veil (z-index 2 in the page's stacking order: #three-scene makes no stacking
+   context), under the bracket, the right column (3), the counter (4) and the header (6); the
+   pointer passes through. The type follows the overlay's: the neighbours' names as the artist
+   line (600), the selected one as the song title (below). The neighbours' size is their size
+   upright on their plane; foreshortened there, their letters stay at least 11 px tall, and their
+   numbers, in ink like their names, at least 10 px (2026-10-08 review: at 10 px muted they were
+   7 px tall and all but unreadable). */
 .music-app .lane-names {
   position: absolute;
+  z-index: 2;
   inset: 0;
   overflow: hidden;
   pointer-events: none;
 }
 .music-app .lane-name {
-  --lane-rim: color-mix(in srgb, var(--page-bg) 70%, transparent);
   position: absolute;
   left: 0;
   top: 0;
   transform-origin: 0 0;
   white-space: nowrap;
+  font-size: 16px;
   font-weight: 600;
   line-height: 1;
-  letter-spacing: normal;
+  letter-spacing: 0;
   color: var(--ink);
-  text-shadow:
-    0 0 calc(1px * var(--lane-unscale, 1)) var(--lane-rim),
-    0 0 calc(2.5px * var(--lane-unscale, 1)) var(--lane-rim);
+}
+/* The selected column's name (2026-10-18: the owner chose "A · Display name" from five designs)
+   is a heading by the lifted case: its kicker as the playlist list's head (PLAYLIST 04 / 11:
+   10 px, 700, .14em, the count 400), then its name as the song title is set (700, -0.015em,
+   1.14) at 32 px, in one line or two (lane-names.ts breaks it: nothing is clipped). All in ink:
+   grey reads at about 2.4:1 over the shelf. Its block is as wide as its slot; left of the
+   bracket its lines end where the slot ends. */
+.music-app .lane-name[data-role="selected"] {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.music-app .lane-name[data-align="end"] {
+  text-align: end;
+}
+.music-app .lane-name-kicker {
+  overflow: hidden;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-overflow: ellipsis;
+}
+.music-app .lane-name-of {
+  font-weight: 400;
+}
+.music-app .lane-name[data-role="selected"] .lane-name-text {
+  display: block;
+  line-height: 1.14;
+  white-space: pre;
 }
 .music-app .lane-name-index {
-  margin-right: calc(20em / 34);
-  font-size: calc(34em / 54);
-  font-weight: 400;
-  color: var(--muted);
+  margin-right: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.music-app .lane-name[data-role="selected"] .lane-name-index {
+  margin-right: 0;
+  font-size: inherit;
+  letter-spacing: inherit;
+  color: inherit;
 }
 /* The playing queue's column: its number in the playback colour (as the list's dot). */
 .music-app .lane-name[data-live="true"] .lane-name-index {
   color: var(--state);
 }
+/* The compact and portrait layouts set the selected name smaller, as the overlay's type there
+   (the song title 38 to 28 px: 24 px, its kicker 9 px); the neighbours keep their size, which
+   their plane foreshortens. */
+.music-app:is([data-layout="compact"], [data-layout="portrait"]) .lane-name[data-role="selected"] {
+  gap: 7px;
+  font-size: 24px;
+}
+.music-app:is([data-layout="compact"], [data-layout="portrait"]) .lane-name-kicker {
+  font-size: 9px;
+}
+/* Large windows enlarge them with the rest of the overlay (below, min-width 1700px). */
 
 /* ---- short windows: tighter steps between the groups -------------------------------------- */
 @media (max-height: 650px) {
@@ -592,7 +671,8 @@
   .music-app[data-layout="desktop"] .shelf-play {
     gap: 16px;
   }
-  .music-app[data-layout="desktop"] .shelf-play-note {
+  .music-app[data-layout="desktop"] .shelf-play-note,
+  .music-app[data-layout="desktop"] .shelf-play-status {
     font-size: 13px;
   }
   .music-app[data-layout="desktop"] .shelf-links {
@@ -674,6 +754,23 @@
   }
   .music-app[data-layout="desktop"] .music-keyhint kbd {
     font-size: 11px;
+  }
+  /* The playlists' names on the shelf: the neighbours as the artist (16 to 18 px), their numbers
+     15 to 17 px; the selected one as the song title (38 to 44 px: 32 to 37 px), its kicker as the
+     tag's row (10 to 12 px). */
+  .music-app[data-layout="desktop"] .lane-name {
+    font-size: 18px;
+  }
+  .music-app[data-layout="desktop"] .lane-name[data-role="selected"] {
+    gap: 10px;
+    font-size: 37px;
+  }
+  .music-app[data-layout="desktop"] .lane-name-kicker {
+    font-size: 12px;
+  }
+  .music-app[data-layout="desktop"] .lane-name-index {
+    margin-right: 9px;
+    font-size: 17px;
   }
 }
 

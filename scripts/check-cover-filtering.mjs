@@ -257,6 +257,38 @@ test('slots showing the same album share one tile and appear only once it is pai
   atlas.dispose();
 });
 
+// 2026-10-10: NetEase's queue moving to another playlist gives the same songs new keys (a playlist's
+// case and the queue's); the shelf shows the same pictures and must not paint them again.
+test('a case with a new key but the same picture keeps its painted tile', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const listed = { id: 'netease-list:7:42', title: 'Song', album: { coverUrl: '/covers/42.jpg' } };
+  atlas.setSlot(0, listed);
+  await painter.finish([...painter.jobs.keys()][0]);
+  showSlots(atlas, 1);
+  const scale = atlas.array.geometry.getAttribute('coverScale');
+  const revision = atlas.revision;
+  atlas.setSlot(0, { ...listed, id: 'netease-track:42' });
+  assert.equal(painter.jobs.size, 0, 'nothing painted again');
+  showSlots(atlas, 1);
+  assert.deepEqual([scale.getX(0), scale.getY(0)], [0.5, 0.75], 'shown at once, never hidden for a repaint');
+  assert.equal(atlas.revision, revision, 'nothing uploaded: the frame is unchanged');
+  // NetEase gives one picture on any of its image servers (2026-10-16): the album's coverKey names
+  // it, and the case keeps its tile whatever address it loads from.
+  const served = (host) => ({ ...listed, id: 'netease-track:42', album: { coverUrl: `https://${host}.music.126.net/a.jpg`, coverKey: 'netease-picture:/a.jpg' } });
+  atlas.setSlot(1, served('p1'));
+  await painter.finish([...painter.jobs.keys()][0]);
+  atlas.setSlot(1, served('p3'));
+  assert.equal(painter.jobs.size, 0, 'the same picture on another server is not painted again');
+  // A picture of its own (another cover, another title, an external card) is another tile.
+  for (const other of [{ ...listed, album: { coverUrl: '/covers/43.jpg' } }, { ...listed, title: 'Other' }, { ...listed, id: 'external:42' }]) {
+    atlas.setSlot(0, other);
+    assert.equal(painter.jobs.size, 1, JSON.stringify(other));
+    await painter.finish([...painter.jobs.keys()][0]);
+  }
+  atlas.dispose();
+});
+
 test('prints follow the shelf\'s draw order and upload only when the order or a print changes', async () => {
   const painter = fakePainter();
   const atlas = new CoverAtlas(8, 4096, 4, undefined, painter);

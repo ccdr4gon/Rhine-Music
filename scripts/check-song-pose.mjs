@@ -7,7 +7,10 @@ import {
 import { MUSIC_MODEL } from '../src/music-model.ts';
 import { COLUMN_SPACING, ROW_SPACING } from '../src/archive-loop.ts';
 import { songCardRect, songFraming, isPortraitViewport } from '../src/viewport-layout.ts';
-import { damp } from '../src/motion.ts';
+import { damp, musicSelectionWave } from '../src/motion.ts';
+import { MUSIC_LENS } from '../src/music-camera.ts';
+import { FOCAL_GUARD, FOCAL_NO_BOX, focalBoxes, focalGuardWeight } from '../src/depth-of-field.ts';
+import { readFileSync } from 'node:fs';
 
 const radians = (degrees) => degrees * Math.PI / 180;
 // The card's axes in the camera-aligned frame: roll · yaw · pitch, as the scene applies them.
@@ -75,6 +78,92 @@ test('neighbouring cards are parallel sheets that never touch, nearer ones in fr
     assert.ok(normal[2] > 0.7, 'cards face the camera');
     const gap = dot([far.x - near.x, far.y - near.y, far.z - near.z], normal);
     assert.ok(gap < -MUSIC_MODEL.depth * near.scale * 1.5, `card ${u + 1} stands clear behind card ${u} (gap ${gap.toFixed(3)})`);
+  }
+});
+
+test('the large card stands sharp in front of the chain where its far branch passes behind the card\'s lower-left corner', () => {
+  // The large card in the chain's frame (camera-aligned, z towards the camera): it faces the
+  // shelf's +z, turned by the song camera's direction (scene.ts createSongBasis).
+  const yaw = radians(SONG_VIEW.yaw), elevation = radians(SONG_VIEW.elevation);
+  const forward = [-Math.sin(yaw) * Math.cos(elevation), Math.sin(elevation), Math.cos(yaw) * Math.cos(elevation)];
+  const length = Math.hypot(forward[2], forward[0]), right = [forward[2] / length, 0, -forward[0] / length];
+  const up = [forward[1] * right[2] - forward[2] * right[1], forward[2] * right[0] - forward[0] * right[2], forward[0] * right[1] - forward[1] * right[0]];
+  const box = (centre, axes, scale) => {
+    const points = [];
+    for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) {
+      const local = [x * MUSIC_MODEL.width / 2, y * MUSIC_MODEL.height / 2, z * MUSIC_MODEL.depth / 2];
+      points.push([0, 1, 2].map((k) => centre[k] + scale * (local[0] * axes[0][k] + local[1] * axes[1][k] + local[2] * axes[2][k])));
+    }
+    return points;
+  };
+  // The chain's axes in world terms; the card's own axes are the world's, so in chain terms
+  // they are the rows of that frame.
+  const card = box([0, 0, 0], [0, 1, 2].map((k) => [right[k], up[k], forward[k]]), 1);
+  // A chain case at place `u`, `rise` above its pose (the play gesture's wave lifts the chain
+  // along the camera's up). The pose places the middle of its top edge.
+  const chainCase = (u, rise) => {
+    const pose = songChainPose(u), { right: across, up: along, normal } = axes(pose), s = pose.scale;
+    const centre = [0, 1, 2].map((k) => [pose.x, pose.y + rise, pose.z][k] - along[k] * MUSIC_MODEL.height / 2 * s);
+    return box(centre, [across, along, normal], s);
+  };
+  const hull = (points) => {
+    const sorted = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]), lower = [], upper = [];
+    const turn = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    for (const p of sorted) { while (lower.length > 1 && turn(lower.at(-2), lower.at(-1), p) <= 0) lower.pop(); lower.push(p); }
+    for (const p of sorted.reverse()) { while (upper.length > 1 && turn(upper.at(-2), upper.at(-1), p) <= 0) upper.pop(); upper.push(p); }
+    return lower.slice(0, -1).concat(upper.slice(0, -1));
+  };
+  // How far apart two convex outlines are on screen (separating axes): negative where they overlap.
+  const apart = (a, b) => {
+    let separation = -Infinity;
+    for (const outline of [a, b]) outline.forEach((p, i) => {
+      const q = outline[(i + 1) % outline.length], size = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      const n = [(q[1] - p[1]) / size, (p[0] - q[0]) / size], along = (o) => o.map((r) => r[0] * n[0] + r[1] * n[1]);
+      const [sa, sb] = [along(a), along(b)];
+      separation = Math.max(separation, Math.min(...sa) - Math.max(...sb), Math.min(...sb) - Math.max(...sa));
+    });
+    return separation;
+  };
+  // The play gesture's wave at its crest, at each place (scene.ts chainRipple, one gesture).
+  const crest = (u) => {
+    let most = 0;
+    for (let age = 0; age <= 3.2; age += 0.01) most = Math.max(most, musicSelectionWave(Math.abs(u - SONG_CHAIN_CENTRE), age));
+    return Math.min(most, 0.24);
+  };
+  // The lens is focused on the large card's centre, SONG_VIEW.distance away; the depth it reads
+  // is rounded by up to 0.3 either way (check-music-camera.mjs).
+  const distance = SONG_VIEW.distance, rounding = 0.3;
+  const cardFar = Math.min(...card.map((p) => p[2])), cardNear = Math.max(...card.map((p) => p[2]));
+  for (const [width, height] of [[1225, 772], [1440, 900], [1920, 1080], [2560, 1392], [1280, 720], [1024, 768], [2560, 1080], [3440, 1440], [800, 1200], [390, 844]]) {
+    const framing = songFraming(width, height, SONG_VIEW.span), across = (width / height) * framing.span;
+    // As the scene aims it: the camera stands SONG_VIEW.distance in front of the picture's centre.
+    const eye = [(0.5 - framing.x) * across, (framing.y - 0.5) * framing.span];
+    const project = (p) => { const k = distance / (distance - p[2]); return [eye[0] + (p[0] - eye[0]) * k, eye[1] + (p[1] - eye[1]) * k]; };
+    const outline = hull(card.map(project));
+    // The blur gathers from up to 0.4 of maxblur (0.011, scene.ts) of the picture's width away,
+    // and the guard reads the depth a few texels around each sample (focalFootprint), at most
+    // FOCAL_GUARD.reach pixels beyond.
+    const reach = 0.4 * 0.011 * across + FOCAL_GUARD.reach * framing.span / height;
+    const met = new Set();
+    // Every place a case passes through while the row flows, but the lifted case's own slot.
+    for (let u = SONG_CHAIN_FIRST; u <= SONG_CHAIN_CARDS + 1e-9; u += 0.05) {
+      if (Math.abs(u - SONG_CHAIN_CENTRE) < 0.5 - 1e-9) continue;
+      for (const rise of [0, crest(u)]) {
+        const points = chainCase(u, rise), gap = apart(hull(points.map(project)), outline);
+        if (gap > reach) continue;
+        met.add(Math.round(u));
+        // A pixel of this case beside the card, read as near as it may be, and the card's
+        // farthest corner, read as far as it may be: the card's samples stay out of its blur.
+        const nearest = Math.max(...points.map((p) => p[2]));
+        const label = `${width}x${height}: place ${u.toFixed(2)}${rise ? ' on the wave' : ''}`;
+        assert.equal(focalGuardWeight(distance - nearest - rounding, distance - cardFar + rounding, distance, MUSIC_LENS.song.range), 0, `${label}: the card's far corner is kept out (${(cardFar - nearest).toFixed(2)} in front)`);
+        assert.equal(focalGuardWeight(distance - nearest - rounding, distance - cardNear - rounding, distance, MUSIC_LENS.song.range), 0, `${label}: and so is its near corner`);
+      }
+    }
+    // The original curve: the far branch rises to the upper left right through the card's
+    // lower-left corner, and the case four places along tucks its top-right corner behind it.
+    assert.ok(apart(hull(chainCase(SONG_CHAIN_CENTRE + 4, 0).map(project)), outline) < 0, `${width}x${height}: place ${SONG_CHAIN_CENTRE + 4} passes behind the large card`);
+    assert.ok(met.has(SONG_CHAIN_CENTRE + 4), `${width}x${height}: and is one of the places checked (${[...met].join(', ')})`);
   }
 });
 
@@ -275,6 +364,27 @@ test('a lifted case sheds the chain displacement early in its rise', () => {
   assert.equal(songLiftHold(-3, lift), 1);
   for (let value = 0; value < lift; value += 0.1) assert.ok(songLiftHold(value + 0.1, lift) <= songLiftHold(value, lift));
   assert.ok(SONG_SHELF_DROP >= 8, 'the sunken shelf is below the picture at the song camera');
+});
+
+test('on a step the copy leaving the large card keeps the depth-of-field guard for as long as it is the card', () => {
+  // scene.ts (it needs a browser to load) hands the guard the lifted case and every copy on its
+  // way back to the chain, each with its song-card share, the one the light gives it.
+  const scene = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8');
+  // The lifted case and every departing copy hold their whole box (2026-10-08 check: weighted by
+  // their share, the boxes let go while the cases were still partly sharp, and the veil came back
+  // for 120-200 ms at night); the shader's own sharpness test leaves a case out of focus alone.
+  assert.match(scene, /\{ group: this\.model, share: 1 \},\s*\.\.\.this\.outgoing\.map\(\(o\) => \(\{ group: o\.group, share: 1 \}\)\)/,
+    'the lifted case and the outgoing copies are the guard\'s cards, at full weight');
+  assert.match(scene, /focalBoxes\(cards, this\.container\.clientWidth, this\.container\.clientHeight\)/);
+  assert.match(scene, /const copyHold = songLiftHold\(o\.lift\.value, MUSIC_INSPECTION_LIFT\);/);
+  assert.match(scene, /this\.appearance\.setSongCard\(o\.group, 1 - copyHold\);/);
+  // focalBoxes itself still weights a box by the share it is given (kept for callers that fade one).
+  const lift = MUSIC_MODEL.height + 0.12, rect = { left: 285, top: 328, right: 622, bottom: 587 };
+  const weight = (value) => focalBoxes([{ share: 1 - songLiftHold(value, lift), ...rect }], 1440, 900)[0].weight;
+  assert.equal(weight(lift), 1, 'at the card\'s height');
+  assert.equal(weight(0.45 * lift), 1, 'and while it is still the card');
+  for (let value = 0.45 * lift; value > 0; value -= 0.05) assert.ok(weight(value - 0.05) <= weight(value), `it lets go as it sinks (${value.toFixed(2)})`);
+  assert.deepEqual(focalBoxes([{ share: 1 - songLiftHold(0, lift), ...rect }], 1440, 900)[0], { box: [...FOCAL_NO_BOX], weight: 0 }, 'and has no box back in the chain');
 });
 
 test('the shelf sinks below the picture in every window, and by the same amount in landscape', () => {

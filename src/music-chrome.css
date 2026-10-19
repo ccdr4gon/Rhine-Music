@@ -39,10 +39,12 @@
   align-items: flex-start;
   column-gap: 32px;
   row-gap: 12px;
-  /* Only the wordmark and the row take the pointer: the picture between them stays the scene's. */
+  /* Only the wordmark, 回到当前 while it is shown and the row take the pointer: the picture between
+   them stays the scene's. */
   pointer-events: none;
 }
-.music-app .music-identity,
+.music-app .music-brand,
+.music-app .go-current,
 .music-app .music-topnav {
   pointer-events: auto;
 }
@@ -62,6 +64,47 @@
   font-weight: 700;
   letter-spacing: 0.01em;
   white-space: nowrap;
+}
+
+/* 回到当前 (the owner, 2026-10-17: "add 回到当前 button to top left", "add this button to every
+   scene, but show it only when a different song is selected"): beside the wordmark, in the row's
+   type, the playback dot before it and its key after it like the ways out (music-detail.css). It
+   always takes its room, hidden or not (fitChrome): only its visibility changes, never the header. */
+.music-app .go-current {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  margin-left: 28px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  transition: opacity 120ms ease;
+}
+.music-app .go-current[data-shown="false"] {
+  visibility: hidden;
+}
+.music-app .go-current:hover {
+  opacity: 0.65;
+}
+.music-app .go-current > i {
+  display: block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--state);
+}
+.music-app .go-current > kbd {
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
 }
 
 /* The row: right 40, top 44, 24 high, 22 apart, 12 px. Text only; every item a button. */
@@ -187,10 +230,12 @@
   border-left: 9px solid currentColor;
 }
 
-/* The play ring: a plain 1 px ink ring when a press plays the selection (or nothing is
-   loaded); otherwise the playing song's progress from 12 o'clock, 2 px, --state over --line,
-   all --line while the position is unknown. A triangle or two bars; words only in the title.
-   The header's ring (30 px) and the shelf's (42 px, music-shelf.css) share it. */
+/* The play ring: a plain 1 px ink ring while nothing is loaded; otherwise the playing song's
+   progress from 12 o'clock, 2 px, --state over --line, all --line while the position is unknown. A
+   triangle or two bars; words only in the title. The header's ring (30 px) pauses or resumes what
+   plays (the owner, 2026-10-08); the shelf's (42 px, music-shelf.css) is the selected song's own
+   (2026-10-09): that ring while the selection is what plays, else plain with ▶. The details draw
+   their own (music-detail.css). */
 .music-app .play-ring {
   position: relative;
   display: grid;
@@ -388,11 +433,17 @@
 }
 
 /* ---- toast: under the row, clear of the shelf's key hints ---------------------------------- */
+/* Its words, and at most one action after them (e.g. 打开播放器 for a song the port may not be asked
+   for: music-app.ts explainNoPlay). Hidden, it holds no focus and takes no press. */
 .music-app #music-toast {
   position: absolute;
   z-index: 50;
   top: calc(var(--chrome-bottom, 70px) + 14px);
   right: 40px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 14px;
   max-width: 360px;
   padding: 10px 14px;
   background: var(--tag-bg);
@@ -402,15 +453,34 @@
   line-height: 1.6;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
   opacity: 0;
+  visibility: hidden;
   transform: translateY(-6px);
   pointer-events: none;
   transition:
     opacity 200ms ease,
-    transform 200ms ease;
+    transform 200ms ease,
+    visibility 0s linear 200ms;
 }
 .music-app #music-toast.visible {
   opacity: 1;
+  visibility: visible;
   transform: none;
+  transition-delay: 0s;
+}
+.music-app #music-toast .toast-action {
+  flex: none;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  pointer-events: auto;
+  transition: opacity 120ms ease;
+}
+.music-app #music-toast .toast-action:hover {
+  opacity: 0.65;
+}
+.music-app #music-toast .toast-action:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 3px;
 }
 
 /* ---- sizes ---------------------------------------------------------------------------------- */
@@ -423,6 +493,15 @@
   }
   .music-app[data-layout="desktop"] .music-brand strong {
     font-size: 39px;
+  }
+  .music-app[data-layout="desktop"] .go-current {
+    gap: 9px;
+    height: 28px;
+    margin-left: 36px;
+    font-size: 14px;
+  }
+  .music-app[data-layout="desktop"] .go-current > kbd {
+    font-size: 10px;
   }
   .music-app[data-layout="desktop"] .music-topnav {
     gap: 26px;
@@ -453,6 +532,12 @@
 .music-app[data-layout="compact"] .music-brand strong {
   font-size: 25px;
 }
+.music-app[data-layout="compact"] .go-current,
+.music-app[data-layout="portrait"] .go-current {
+  gap: 7px;
+  margin-left: 20px;
+  font-size: 11px;
+}
 .music-app[data-layout="compact"] .music-topnav,
 .music-app[data-layout="portrait"] .music-topnav {
   gap: 14px;
@@ -469,6 +554,17 @@
 }
 .music-app[data-layout="compact"] #music-toast {
   right: 25px;
+}
+/* The song scene: the glass pane's head (the ● back to the playing song, 共 N 首) stands under the
+   row on the right, and in a compact window a notice there covered it (2026-10-09 review). There
+   the notice comes up at the bottom, centred, over the chain. */
+.music-app:not([data-layout="portrait"])[data-mode="detail"][data-menu="song"] #music-toast {
+  top: auto;
+  bottom: 28px;
+  left: 0;
+  right: 0;
+  width: max-content;
+  margin: 0 auto;
 }
 .music-app[data-layout="portrait"] .music-header {
   left: 20px;
@@ -487,4 +583,9 @@
   left: 20px;
   right: 20px;
   max-width: none;
+}
+/* The details' two ways out stand on one line under the header's row in portrait (music-detail.css):
+   a notice (e.g. the one a click on the lifted case can bring as it opens them) keeps below them. */
+.music-app[data-layout="portrait"][data-mode="detail"][data-menu="detail"] #music-toast {
+  top: calc(var(--chrome-bottom, 46px) + 52px);
 }

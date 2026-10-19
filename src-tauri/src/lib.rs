@@ -4,6 +4,7 @@ pub mod local_music;
 pub mod media;
 pub mod netease_music;
 pub mod qq_music;
+pub mod stale_webview;
 
 // The local-music modules keep their earlier public paths, which main.rs, the tests and the
 // metadata parity check use: `rhine_music::library` is `rhine_music::local_music::data::library`,
