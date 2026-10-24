@@ -107,8 +107,10 @@ test('a scan changes the shelf in place: the page is not loaded again, and only 
   assert.match(receive, /if \(panel === "library"\) refreshLibraryPanel\(\);/);
   const refresh = body('function refreshLibraryPanel(');
   assert.match(refresh, /if \(!node \|\| libraryPanelShown\.get\(selector\) === next\) continue;/);
-  assert.doesNotMatch(refresh, /renderLibraryPanel|#music-root|#online-config|panel-body"\)\.innerHTML/);
-  assert.match(app, /const libraryPanelParts: \[string, \(\) => string\]\[\] = \[\s*\["#library-metrics", libraryMetricsMarkup\], \["#library-lists", libraryListsMarkup\], \["#library-covers", libraryCoversMarkup\],\s*\];/);
+  assert.doesNotMatch(refresh, /renderLibraryPanel|renderLibrarySection|renderPanelSection|renderPanelIndex|#music-root|#online-config|panel-tabpanel|panel-body"\)\.innerHTML/);
+  assert.match(app, /const libraryPanelParts: \[string, \(\) => string\]\[\] = \[\s*\["#library-metrics", libraryMetricsMarkup\], \["#library-lists", libraryListsMarkup\],\s*\];/);
+  // 音乐库 is an index since 2026-10-24: a part is written only while its section (歌单) is shown.
+  assert.match(refresh, /const node = document\.querySelector<HTMLElement>\(`#panel-body \$\{selector\}`\), next = markup\(\);/);
   // The local player goes on through its playlist as the scan left it; a song the library no longer
   // has stops (MusicPlayer.setQueue, check-music-player.mjs).
   const apply = body('async function applyLibrary(');

@@ -1,5 +1,6 @@
 import type { MusicLibrary } from "../music-types";
 import { escapeHtml as esc } from "../html";
+import { consentSwitch } from "../panel-rows";
 
 export type MediaAction = "toggle" | "previous" | "next" | "stop" | "seek";
 export interface ExternalMediaSource {
@@ -398,7 +399,8 @@ export function mediaSourcesMarkup(connection: ExternalMediaConnection): string 
     : '<p class="external-unavailable">没有发现播放器。请在外部播放器中开始播放，再刷新来源。</p>';
 }
 
+/** The 播放器 panel's 网易云 section ends with it; its note under 说明 (panel-rows.ts). */
 export function mediaPermissionMarkup(connection: ExternalMediaConnection): string {
   if (connection.selected?.kind !== "netease") return "";
-  return `<label class="settings-row external-global-consent"><span>允许发送全局媒体键<small>仅在当前来源缺少定向控制时使用，可能影响其他播放器。每次重新连接都需要确认。</small></span><input type="checkbox" id="external-global-keys" ${connection.allowGlobalMediaKeys ? "checked" : ""}></label>`;
+  return consentSwitch("external-global-keys", "允许发送全局媒体键", "仅在当前来源缺少定向控制时使用，可能影响其他播放器。每次重新连接都需要确认。", connection.allowGlobalMediaKeys);
 }

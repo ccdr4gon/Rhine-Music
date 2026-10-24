@@ -314,7 +314,7 @@ test('QQ Music is listed like any player: connected by itself only once the user
   assert.equal(await connection.control('next'), true);
   assert.deepEqual(calls, [['q1', 'next', undefined, false]]);
   // None of NetEase's own features: no queue, no playing the selection, no playlist columns.
-  assert.equal(queueSettingMarkup(connection.selected, true, '', { enabled: true, available: true, status: '', restart: false }), '');
+  assert.equal(queueSettingMarkup(connection.selected, true, '', { enabled: true, available: true, status: '', restart: false, state: 'on' }), '');
   // Lost: nothing else is taken, NetEase included.
   set({ sources: [netease('n1')] });
   await connection.refresh();
@@ -514,7 +514,7 @@ test('a remembered NetEase comes back after a restart, without the global media-
   assert.equal(connection.allowGlobalMediaKeys, false, 'a reconnection is a new connection');
   assert.equal(connection.can('toggle'), false);
   assert.equal(await connection.control('toggle'), false);
-  assert.match(mediaPermissionMarkup(connection), /id="external-global-keys" >/, 'the consent is offered unticked');
+  assert.match(mediaPermissionMarkup(connection), /id="external-global-keys" aria-describedby="external-global-keys-note">/, 'the consent is offered unticked');
   assert.deepEqual(calls, []);
   assert.deepEqual(saved, []);
 });
@@ -608,7 +608,7 @@ test('selecting a source again, the remembered one included, asks for the global
   connection.select('w1');
   assert.equal(connection.allowGlobalMediaKeys, false, 'a new connection: the consent is asked for again');
   assert.equal(connection.can('toggle'), false);
-  assert.match(mediaPermissionMarkup(connection), /id="external-global-keys" >/);
+  assert.match(mediaPermissionMarkup(connection), /id="external-global-keys" aria-describedby="external-global-keys-note">/);
   assert.deepEqual(saved, [{ player: 'qqmusic' }, { player: 'netease' }], 'only the identity, each time it changed');
   assert.deepEqual(calls, []);
 });
@@ -966,7 +966,7 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   assert.match(app, /const warning = \[externalMedia\.warning, source\?\.warning\]\.filter\(Boolean\)\.join\("\\n"\);/);
   // The 播放器 panel's list is drawn again when what it says changes: which row is the default (断开连接),
   // or which empty-list words apply (nothing read yet: no "没有发现播放器" before the first read).
-  assert.match(app, /const markup = mediaSourcesMarkup\(externalMedia\);\s*if \(markup !== sourcesVisual\) \{\s*sourcesVisual = markup;\s*writeSources\(\$\("#external-sources"\), markup\);\s*\}/);
+  assert.match(app, /const list = document\.querySelector<HTMLElement>\("#external-sources"\);\s*const markup = mediaSourcesMarkup\(externalMedia\);\s*if \(list && markup !== sourcesVisual\) \{\s*sourcesVisual = markup;\s*writeSources\(list, markup\);\s*\}/);
   assert.match(app, /const markup = mediaSourcesMarkup\(playerChooser\);\s*if \(list && markup !== chooserVisual\) \{\s*chooserVisual = markup;\s*writeSources\(list, markup\);\s*\}/);
   // A control the session does not offer says why, in its title and name; the lone track's ring uses the header ring's words.
   assert.match(app, /if \(action === "toggle"\) \{\s*applyRing\(button, pauseResumeRing\(\)\);\s*return;\s*\}/);
@@ -995,14 +995,20 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   // A lone live card whose picture alone changed is painted again in place (no rebuild of the shelf).
   assert.match(app, /const coverOnly = playerCurrent && !netease\.shownQueue\(\) && oldBare === bareKey\(albums, genres\);/);
   assert.match(app, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
-  // The panel's opening words no longer promise a 切歌 switch (gone 2026-10-09: "do not make this a
-  // setting option"): the queue and its playlist columns are switched below, and NetEase plays a
-  // chosen song once started with its debugging port.
-  assert.doesNotMatch(app, /切歌在下方另行开关/);
-  // The debugging port's section is there only with NetEase's queue shown: the words point to it only then.
-  assert.match(app, /网易云的播放队列与按歌单分列在下方另行开关<span id=\\"sources-intro-port\\"><\/span>。/);
-  assert.match(app, /if \(pointer\) pointer\.textContent = queueSetting\.querySelector\("\.external-debug-port"\) \? "；要让网易云播放选中的歌，需以调试端口启动它（见下方）" : "";/);
-  assert.doesNotMatch(app, /需以调试端口启动它（见下方）。/);
+  // The panel has no opening paragraph since its redesign (the owner, 2026-10-24: "it has tooo much
+  // words now"): 关于 says it in short lines, and no 切歌 switch is promised (gone 2026-10-09).
+  assert.doesNotMatch(app, /切歌在下方另行开关|sources-intro-port|panel-intro/);
+  assert.match(app, /\["记住", "记住连接过的播放器（不保存它播放的内容）：它重新出现或下次启动时自动连接"\]/);
+  assert.match(app, /\["断开连接", "忘掉记住的播放器，之后不再自动连接任何播放器，直到再次选择"\]/);
+  // 网易云 is a section of its own while NetEase is the connected player (or restarts with its port),
+  // kept through a snapshot that could not be read, as NetEase's session keeps NetEase current then.
+  assert.match(body('function sourcesSections(', '\n}\n'), /const neteaseShown = !!externalMedia && \(netease\.isCurrent \|\| netease\.debugRestarting\);/);
+  assert.match(app, /const held = !source && externalMedia\.unreadable && netease\.isCurrent;/);
+  assert.match(app, /if \(permission && !held && permission\.dataset\.source !== \(source\?\.id \|\| ""\)\) \{/);
+  // ... written for the NetEase source seen last meanwhile, so a section first shown then is not blank.
+  assert.match(app, /const shown = source \?\? \(held \? neteaseShownSource : undefined\);/);
+  assert.match(app, /const queueKey = JSON\.stringify\(\[shown\?\.id, isNeteaseSource\(shown\),/);
+  assert.match(app, /: queueSettingMarkup\(shown, preferences\.neteaseQueue,/);
   // The native side: a failed enumeration keeps the sessions (their ids and covers); a cover goes
   // out only when the page does not hold it at its revision; the command takes what the page holds.
   const windowsMedia = read('src-tauri/src/media/windows_media.rs');
@@ -1081,38 +1087,45 @@ test('the playing song is NetEase\'s own ID when its debug port answers, otherwi
 test('queue settings: display is opt-in, song switching names the debug port and offers a restart only when a probe found it closed', async () => {
   const { queueSettingMarkup, queueControlStatus } = await import('../src/netease_music/connector/settings.ts');
   const netease = source('n', { player: 'netease' });
-  const on = { available: true, status: 'ok', restart: false };
-  const closed = { available: false, status: '<none>', restart: true };
-  const unprobed = { available: false, status: '正在检测网易云调试端口…', restart: false };
+  const on = { available: true, status: 'ok', restart: false, state: 'on' };
+  const closed = { available: false, status: '<none>', restart: true, state: 'closed' };
+  const unprobed = { available: false, status: '正在检测网易云调试端口…', restart: false, state: 'probing' };
   assert.equal(queueSettingMarkup(source('s'), true, '', on), '', 'only NetEase sources have a queue');
   const hidden = queueSettingMarkup(netease, false, '<status>', on);
-  assert.match(hidden, /id="netease-queue"(?! checked)/);
+  assert.match(hidden, /id="netease-queue" aria-describedby="netease-queue-note">/);
   assert.match(hidden, /&lt;status&gt;/);
   assert.match(hidden, /歌曲编号、歌名、歌手、专辑、时长和封面地址/, 'the consent names every field that is read');
   assert.doesNotMatch(hidden, /网易云调试端口|data-debug-status|netease-restart-debug/, 'the port is used only with the queue shown');
   const shown = queueSettingMarkup(netease, true, '', on);
-  assert.match(shown, /id="netease-queue" checked/);
+  assert.match(shown, /id="netease-queue" aria-describedby="netease-queue-note" checked>/);
+  // Each consent is folded under 说明 beside its switch, word for word (panel-rows.ts).
+  assert.match(shown, /<label for="netease-queue">显示网易云播放队列<\/label><button type="button" class="consent-toggle" data-action="consent-note" aria-expanded="false" aria-controls="netease-queue-note" aria-label="说明：显示网易云播放队列">说明<\/button>/);
+  assert.match(shown, /<div class="consent-note" id="netease-queue-note" hidden><p>读取网易云保存在本机的当前播放队列，仅取歌曲编号、歌名、歌手、专辑、时长和封面地址；/);
   assert.match(shown, /127\.0\.0\.1:9233/);
   assert.match(shown, /data-debug-restart hidden/, 'no restart button while the port answers');
   // The owner, 2026-10-09: "do not make this a setting option". The port is no switch: the panel says
   // what it is used for, with its status and the restart; no input, no saved key.
   assert.doesNotMatch(shown, /netease-control|neteaseControl|点 ▶ 时让网易云播放选中的歌/);
   assert.equal((shown.match(/<input /g) || []).length, 2, 'the queue and the playlist columns, nothing else');
-  assert.match(shown, /<div class="settings-row external-queue-consent external-debug-port"><span>网易云调试端口<small>/);
+  assert.match(shown, /<div class="consent-group external-debug-port"><div class="settings-row consent-row"><span class="consent-name"><span>调试端口<\/span><button type="button" class="consent-toggle" data-action="consent-note" aria-expanded="false" aria-controls="netease-debug-note" aria-label="说明：调试端口">说明<\/button><\/span><span class="port-state" data-debug-state="on" title="ok" role="status">已连接<\/span>/);
   const absent = queueSettingMarkup(netease, true, '', closed);
-  assert.match(absent, /data-debug-restart ><button id="netease-restart-debug" data-action="netease-restart-debug">/);
+  assert.match(absent, /data-debug-restart><button id="netease-restart-debug" data-action="netease-restart-debug">/);
+  // Its state in a word on its line, its full status under 说明 with the consent.
+  assert.match(absent, /data-debug-state="closed" title="&lt;none&gt;" role="status">未开启<\/span>/);
+  assert.match(absent, /<p class="consent-status" data-debug-status>&lt;none&gt;<\/p>/);
   assert.match(absent, /&lt;none&gt;/);
   assert.match(queueSettingMarkup(netease, true, '', unprobed), /data-debug-restart hidden/, 'not before the port was actually asked');
+  assert.match(queueSettingMarkup(netease, true, '', unprobed), /data-debug-state="probing"[^>]*>正在检测…</);
   assert.match(queueControlStatus({ available: false }), /未检测到网易云调试端口/);
   // The owner's play mode (2026-10-05): browsing never switches the song. Since 2026-10-08 the
   // selection plays by ▶ or P (the header's ring and Space pause or resume): the panel says so.
   assert.match(queueControlStatus({ available: true }, { available: true, mode: 'playOrder' }), /浏览时不切歌，点 ▶（或按 P）时网易云播放选中的歌/);
   assert.match(queueControlStatus({ available: false }), /点 ▶ 或按 P 才能播放选中的歌/);
-  assert.match(shown, /网易云调试端口<small>浏览时不切歌。以调试端口启动网易云后，点队列中一首歌的 ▶（或选中它后按 P、打开它的详情），通过网易云的调试端口（仅本机 127\.0\.0\.1:9233）让它播放这首歌，不改变队列顺序；/);
+  assert.match(shown, /id="netease-debug-note" hidden><p>浏览时不切歌。以调试端口启动网易云后，点队列中一首歌的 ▶（或选中它后按 P、打开它的详情），通过网易云的调试端口（仅本机 127\.0\.0\.1:9233）让它播放这首歌，不改变队列顺序；/);
   // The consent's scope: those actions, the progress, and since 2026-10-17 (the owner: "Rhine asks
   // NetEase to load them") the lyrics of the song that plays, which NetEase is asked to load as its
   // playing page does, kept in memory only.
-  assert.match(shown, /同时显示播放进度，并可拖动进度条。正在播放的歌的详情里显示它的歌词：Rhine 请网易云载入这首歌的歌词（与打开网易云的播放页时相同，网易云从它的缓存或服务器取得，界面不变），再读取每行歌词的时间、文字、翻译与逐字时间；只读取正在播放的这首歌的歌词，只留在 Rhine 的内存里，不保存、不发送。端口开启期间，本机其他程序也能控制网易云。<\/small>/);
+  assert.match(shown, /同时显示播放进度，并可拖动进度条。正在播放的歌的详情里显示它的歌词：Rhine 请网易云载入这首歌的歌词（与打开网易云的播放页时相同，网易云从它的缓存或服务器取得，界面不变），再读取每行歌词的时间、文字、翻译与逐字时间；只读取正在播放的这首歌的歌词，只留在 Rhine 的内存里，不保存、不发送。端口开启期间，本机其他程序也能控制网易云。<\/p>/);
   const said = shown + queueControlStatus({ available: true }, { available: true, mode: 'playOrder' }) + queueControlStatus({ available: false });
   assert.doesNotMatch(said, /约半秒|选中盒子时让网易云切歌|点播放|按空格/);
   assert.match(queueControlStatus({ available: true }, { available: true, mode: 'playFm' }), /私人 FM/);
@@ -1556,14 +1569,14 @@ test('a NetEase picture is one picture on any of its image servers, and the shel
 test('playlist columns are on by default once the queue is shown, say what is read, and have no style setting', async () => {
   const { queueSettingMarkup } = await import('../src/netease_music/connector/settings.ts');
   const netease = source('n', { player: 'netease' });
-  const control = { enabled: true, available: true, status: 'ok', restart: false };
+  const control = { enabled: true, available: true, status: 'ok', restart: false, state: 'on' };
   // The queue itself stays opt-in; its consent says that playlist columns come with it.
   const hidden = queueSettingMarkup(netease, false, '', control);
   assert.doesNotMatch(hidden, /netease-playlists/, 'offered only with the queue shown');
   assert.match(hidden, /打开后默认同时按歌单分列（读取本机歌单，见下方），可单独关闭。/);
   const on = queueSettingMarkup(netease, true, '', control);
-  assert.match(on, /id="netease-playlists" checked/, 'on unless switched off');
-  assert.match(on, /<span>按歌单分列<small>默认打开。/);
+  assert.match(on, /id="netease-playlists" aria-describedby="netease-playlists-note" checked>/, 'on unless switched off');
+  assert.match(on, /<label for="netease-playlists">按歌单分列<\/label>[\s\S]*?<p>默认打开。/);
   for (const said of [/webdb\.dat，只读/, /你创建的歌单（含“我喜欢的音乐”）/, /编号、名称、歌曲数与封面地址/, /编号、歌名、歌手、专辑、时长和封面地址/, /来源歌单编号与名称/, /列旁标出歌单名称/, /其余各列里点一首歌的 ▶，网易云从这首歌开始播放那个歌单（见上方的网易云调试端口）/, /不读取收藏的歌单、账号、Cookie 或播放历史/, /Rhine 不保存歌单名称和歌曲列表/, /封面图片从网易云公开图片服务器加载，会留在界面缓存里/])
     assert.match(on, said, 'the consent names what is read and what is not');
   // Since 2026-10-10 ("Play that playlist from the song you picked") the other columns play with their
@@ -1571,7 +1584,7 @@ test('playlist columns are on by default once the queue is shown, say what is re
   assert.doesNotMatch(on, /只供浏览|不会切歌/);
   assert.match(on, /点其他歌单里一首歌的 ▶（同样可按 P、打开详情），让网易云从这首歌开始播放这个歌单，与在网易云的歌单里双击这首歌相同：网易云的播放队列换成这个歌单，歌单的编号与名称交给网易云作为队列的来源。/);
   const off = queueSettingMarkup(netease, true, '<q>', control, { enabled: false, status: '<3 lists>' });
-  assert.match(off, /id="netease-playlists" ><\/label>/);
+  assert.match(off, /id="netease-playlists" aria-describedby="netease-playlists-note"><\/div>/);
   assert.match(off, /data-playlist-status role="status"><\/p>/, 'no status while it is off');
   assert.match(queueSettingMarkup(netease, true, '', control, { enabled: true, status: '<3 lists>' }), /data-playlist-status role="status">&lt;3 lists&gt;<\/p>/);
   // There is one way to show the names (flat text at fixed places over the shelf): no style to choose.
@@ -2172,7 +2185,7 @@ test('a reading NetEase\'s port does not answer in time is no closed port: no re
     answer = 'late';
     await session.refresh();
     assert.equal(session.portBlock(), 'error');
-    assert.deepEqual({ ...session.queueControl() }, { available: false, status: PORT_NO_REPLY, restart: false });
+    assert.deepEqual({ ...session.queueControl() }, { available: false, status: PORT_NO_REPLY, state: 'noreply', restart: false });
     // The timeline keeps the last reading (a second past it at most, as between any two), and can be dragged.
     const kept = session.timeline(connection.selected);
     assert.ok(kept && kept.duration === 100 && kept.seekable && kept.debug && kept.position >= 30 && kept.position <= 31, JSON.stringify(kept));
@@ -2193,12 +2206,14 @@ test('a reading NetEase\'s port does not answer in time is no closed port: no re
     await session.refresh();
     assert.equal(session.timeline(connection.selected), undefined);
     assert.equal(session.queueControl().restart, false);
+    assert.equal(session.queueControl().state, 'error', 'an error is no closed port');
     // A closed port: the restart is offered, as before.
     answer = 'ok';
     debug = { available: false };
     await session.refresh();
     assert.equal(session.portBlock(), 'port');
     assert.equal(session.queueControl().restart, true);
+    assert.equal(session.queueControl().state, 'closed');
     // A play request that reached NetEase without an answer in time is waited for, and said nothing of.
     debug = { available: true, trackId: '23', playback: 'playing', mode: 'playOrder', duration: 100, position: 30 };
     await session.refresh();

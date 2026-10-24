@@ -259,16 +259,6 @@
   justify-content: center;
   padding: 28px;
 }
-.music-panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  width: min(650px, 100%);
-  max-height: calc(100% - 20px);
-  padding: 30px 35px;
-  overflow: auto;
-  scrollbar-width: thin;
-  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.13);
-}
 .panel-heading {
   display: flex;
   align-items: flex-start;
@@ -289,43 +279,6 @@
   font-size: 29px;
   line-height: 1;
   color: var(--muted);
-}
-.panel-intro {
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 1.85;
-  margin: 0 0 21px;
-}
-.field-label {
-  font-size: 11px;
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 9px;
-}
-.field-label span {
-  font-size: 9px;
-  color: var(--muted);
-}
-.music-panel textarea,
-.music-panel input[type="search"],
-.music-panel input[type="text"],
-.music-panel input[type="url"] {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 0;
-  width: 100%;
-  padding: 12px 13px;
-  font-size: 12px;
-  line-height: 1.7;
-  resize: vertical;
-  color: var(--ink);
-}
-.panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  margin-top: 15px;
-  font-size: 11px;
 }
 .primary-button {
   background: var(--ink) !important;
@@ -423,21 +376,6 @@
   font-size: 11px;
   color: var(--accent) !important;
   margin: 10px 20px 0 0;
-}
-.genre-filters {
-  display: flex;
-  gap: 7px;
-  flex-wrap: wrap;
-  margin: 16px 0;
-}
-.genre-filters button {
-  font-size: 10px;
-  border: 1px solid var(--line);
-  padding: 5px 10px;
-}
-.genre-filters button.active {
-  background: var(--ink);
-  color: var(--surface);
 }
 .album-result {
   display: grid;
@@ -554,8 +492,10 @@
   height: 16px;
 }
 
-/* 设置 (design A, the owner chose it 2026-10-24): an index of numbered sections on the left and the
-   one section it shows on the right, at one size so nothing jumps from section to section. The
+/* 设置 (design A, the owner chose it 2026-10-24), and since the same day every panel (播放器, 音乐库,
+   搜索: "make it just like setting panel"): an index of numbered sections on the left (搜索's: its
+   playlists, a filter) and the one section it shows on the right, at one size so nothing jumps from
+   section to section. The
    sheet is drawn by ::before, so the entrance can draw the four corner squares (the shelf's
    selection marks) before it; the rule between index and section is ::after. A narrow window (the
    scrim's own width, a container query) stacks the index as a row above the section. */
@@ -645,6 +585,8 @@
   position: relative;
   display: flex;
   flex: none;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 12px;
   min-height: 36px;
@@ -659,7 +601,8 @@
   font-variant-numeric: tabular-nums;
 }
 .music-app .settings-tabs > button:hover,
-.music-app .settings-tabs > button[aria-selected="true"] {
+.music-app .settings-tabs > button[aria-selected="true"],
+.music-app .settings-tabs > button[aria-checked="true"] {
   color: var(--ink);
 }
 /* The chosen section's mark: a 6 px ink square, as the shelf marks the selected case. */
@@ -675,8 +618,29 @@
   transform: scale(0);
   transition: transform 200ms var(--settings-ease);
 }
-.music-app .settings-tabs > button[aria-selected="true"]::before {
+.music-app .settings-tabs > button:is([aria-selected="true"], [aria-checked="true"])::before {
   transform: none;
+}
+/* 搜索's playlists: a long name ends in an ellipsis (the results name it in full); the name is
+   not the small number before it. */
+.music-app .settings-tabs > button > .filter-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: normal;
+  font-variant-numeric: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 网易云 in 播放器's index while its debugging port needs a look (closed, not answering). */
+.music-app .settings-tabs > button[data-alert="true"]::after {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--paused);
 }
 .music-app .settings-tabs > button:focus-visible {
   outline: 1px solid var(--ink);
@@ -726,6 +690,7 @@
 }
 .music-app .settings-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
@@ -749,7 +714,7 @@
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
-.music-app .settings-panel #settings-tabpanel > .settings-row:last-child {
+.music-app .settings-panel .panel-rows > .settings-row:last-child {
   border-bottom: 0;
 }
 .music-app .settings-panel .settings-row small {
@@ -1038,9 +1003,421 @@
   transform: rotate(90deg);
 }
 
-/* The entrance (playSettingsMotion "enter", under a second): the corner squares come out to the
+/* What 播放器, 音乐库 and 搜索 add to the frame (2026-10-24). A heading may carry a status on its
+   right (播放器's connection: a dot, the playing colour while a player is connected). */
+.music-app .settings-heading > #external-connection-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.music-app #external-connection-status::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--muted);
+}
+.music-app #external-connection-status[data-connected="true"]::before {
+  background: var(--playing);
+  box-shadow: 0 0 0 1px var(--playing);
+}
+.music-app #external-connection-status:empty::before {
+  display: none;
+}
+/* A row of quiet actions under a section (刷新来源 · 断开连接, 保存并扫描 · 重新扫描). */
+.music-app .settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  margin-top: 18px;
+}
+.music-app .settings-link:disabled {
+  opacity: 0.45;
+  cursor: default;
+  text-decoration: none;
+}
+.music-app .settings-panel .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.music-app .settings-panel .primary-button:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 3px;
+}
+/* 关于: what the opening paragraphs said, a word and a line each. */
+.music-app .settings-panel .about-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  column-gap: 20px;
+  align-items: baseline;
+  min-height: 0;
+  padding: 15px 0;
+  line-height: 1.6;
+}
+.music-app .settings-panel .about-row > span:first-child {
+  font-size: 12px;
+  color: var(--muted);
+}
+/* A switch and its consent (panel-rows.ts): one rule under the group; 说明 opens the consent, word
+   for word, under the line. */
+.music-app .consent-group {
+  border-bottom: 1px solid var(--line);
+}
+.music-app .settings-panel .consent-group > .settings-row {
+  border-bottom: 0;
+}
+.music-app .consent-name {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+.music-app .consent-name label {
+  cursor: pointer;
+}
+.music-app .consent-toggle {
+  font-size: 11px;
+  color: var(--muted);
+}
+.music-app .consent-toggle::after {
+  content: "›" / "";
+  display: inline-block;
+  margin-left: 4px;
+  transition: transform 200ms var(--settings-ease);
+}
+.music-app .consent-toggle[aria-expanded="true"]::after {
+  transform: rotate(90deg);
+}
+.music-app .consent-toggle:hover {
+  color: var(--ink);
+}
+.music-app .consent-toggle:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 3px;
+}
+.music-app .consent-note {
+  max-width: 540px;
+  margin: -4px 0 0;
+  padding: 0 0 12px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+.music-app .consent-note p {
+  margin: 0;
+}
+.music-app .consent-note p + p {
+  margin-top: 8px;
+}
+.music-app .consent-note .consent-status {
+  color: var(--ink);
+}
+/* A switch's status line (已读取播放队列 30 首…); an empty one takes no room (it stays, a live region). */
+.music-app .settings-panel .external-note {
+  margin: -6px 0 14px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.music-app .settings-panel .external-note:empty {
+  margin: 0;
+}
+.music-app .settings-panel #external-queue > .external-note:only-child {
+  margin: 8px 0 14px;
+}
+.music-app .settings-panel .external-warning {
+  margin: 12px 0 0;
+}
+.music-app .settings-panel .external-warning:empty {
+  margin: 0;
+}
+/* The debugging port's state in a word: a dot in the playing colour while it answers, a ring in
+   the paused colour while it needs a look, pulsing while it is being checked or NetEase restarts. */
+.music-app .port-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.music-app .port-state::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--muted);
+}
+.music-app .port-state:is([data-debug-state="on"], [data-debug-state="fm"])::before {
+  background: var(--playing);
+  box-shadow: 0 0 0 1px var(--playing);
+}
+.music-app .port-state:is([data-debug-state="closed"], [data-debug-state="noreply"], [data-debug-state="error"])::before {
+  box-shadow: 0 0 0 1px var(--paused);
+}
+.music-app .port-state:is([data-debug-state="probing"], [data-debug-state="restarting"]) {
+  color: var(--muted);
+}
+.music-app .port-state:is([data-debug-state="probing"], [data-debug-state="restarting"])::before {
+  animation: music-pulse 1.2s ease-in-out infinite;
+}
+/* 以调试端口重新启动网易云: outlined; inked while it asks for the second, confirming press. */
+.music-app .port-restart {
+  padding: 2px 0 16px;
+}
+.music-app .port-restart button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--ink);
+  font-size: 12px;
+  color: var(--ink);
+  transition: background-color 160ms ease, color 160ms ease;
+}
+.music-app .port-restart button::after {
+  content: "↗" / "";
+  color: var(--accent);
+}
+.music-app .port-restart button[data-confirm="true"] {
+  background: var(--ink);
+  color: var(--panel-solid);
+}
+.music-app .port-restart button[data-confirm="true"]::after {
+  color: inherit;
+}
+.music-app .port-restart button:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 3px;
+}
+/* 音乐库's fields: a line of words over an ink rule (the folder, the MusicBrainz contact). */
+.music-app .settings-field {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ink);
+}
+.music-app .settings-panel .settings-field input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.music-app .settings-panel .settings-field input::placeholder {
+  color: var(--muted);
+}
+.music-app .settings-panel .settings-field input:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 4px;
+}
+.music-app .settings-field .settings-link {
+  flex: none;
+}
+.music-app .settings-field-block {
+  padding: 16px 0 6px;
+  font-size: 13px;
+}
+.music-app .settings-field-block > label {
+  display: block;
+  margin-bottom: 10px;
+}
+.music-app .settings-panel .settings-field-block .settings-field input {
+  font-size: 14px;
+}
+.music-app .settings-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.music-app .settings-empty {
+  margin: 16px 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.music-app .settings-panel .scan-status {
+  margin: 0;
+  padding: 14px 0 0;
+  font-size: 11px;
+}
+.music-app .settings-panel .library-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 4px 0 18px;
+  border-top: 0;
+}
+.music-app .settings-panel .library-metrics b {
+  font-size: 36px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.music-app .settings-panel .library-metrics span {
+  font-size: 11px;
+}
+.music-app .settings-panel .library-playlists {
+  max-height: none;
+  margin: 0 0 4px;
+  overflow: visible;
+  border-top: 0;
+}
+.music-app .settings-panel .library-playlists li {
+  padding: 13px 0;
+  font-size: 13px;
+}
+.music-app .settings-panel .library-playlists li > span > i {
+  margin-right: 14px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.music-app .settings-panel .library-playlists small {
+  margin-left: 10px;
+  font-size: 10px;
+}
+.music-app .settings-panel .library-playlists b {
+  font-size: 11px;
+}
+.music-app #library-lists > .settings-link {
+  margin-top: 14px;
+}
+/* 搜索: the field and its count in the head, beside ×. */
+.music-app .settings-panel[data-panel="search"] .settings-head {
+  gap: 22px;
+}
+.music-app .panel-search {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ink);
+}
+.music-app .panel-search:focus-within {
+  box-shadow: 0 1px 0 var(--ink);
+}
+.music-app .panel-search svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+}
+.music-app .settings-panel .panel-search input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--ink);
+  outline: none;
+}
+.music-app .panel-search input::placeholder {
+  color: var(--muted);
+}
+.music-app .panel-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.music-app .search-count {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* A song found: its cover, its title, then artist · album (· playlist while all are shown), ↗. */
+.music-app .settings-panel .album-result {
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 9px 0;
+}
+.music-app .settings-panel .album-result:hover {
+  color: inherit;
+}
+.music-app .settings-panel .album-result:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 2px;
+}
+.music-app .settings-panel .result-cover {
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border: 0;
+}
+.music-app .settings-panel .album-result .result-copy {
+  overflow-wrap: normal;
+}
+.music-app .settings-panel .album-result :is(strong, small) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.music-app .settings-panel .album-result strong {
+  font-size: 13px;
+  font-weight: 400;
+}
+.music-app .settings-panel .album-result small {
+  font-size: 11px;
+}
+.music-app .settings-panel .album-result i {
+  font-size: 13px;
+  color: var(--accent);
+  opacity: 0.45;
+  transition: opacity 160ms ease, translate 160ms ease;
+}
+.music-app .settings-panel .album-result:is(:hover, :focus-visible) i {
+  opacity: 1;
+  translate: 2px -2px;
+}
+.music-app .settings-panel .no-results {
+  margin: 0;
+  padding: 30px 0 0;
+  font-size: 12px;
+  text-align: left;
+}
+.music-app .settings-panel #panel-tabpanel {
+  scroll-margin-top: 24px;
+}
+.music-app .settings-panel #panel-tabpanel:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
+}
+/* The entrance (playPanelMotion "enter", under a second): the corner squares come out to the
    corners, then the sheet, the title, the index one by one and the rows; a section chosen later
-   ("reveal") lets its rows rise. Never when reduced (the attribute is not set, and not played). */
+   ("reveal", 搜索's filter too) lets its rows rise. Never when reduced (the attribute is not set, and
+   not played). */
 .music-app .settings-panel[data-motion="enter"]::before {
   animation: settings-sheet 320ms var(--settings-ease) 90ms both;
 }
@@ -1059,10 +1436,13 @@
 .music-app .settings-panel[data-motion="enter"] .settings-head {
   animation: settings-fade 280ms ease 200ms both;
 }
-.music-app .settings-panel[data-motion="enter"] #settings-tabpanel > * {
+.music-app .settings-panel[data-motion="enter"] .panel-rows > * {
   animation: settings-rise 300ms var(--settings-ease) calc(280ms + var(--i) * 30ms) both;
 }
-.music-app .settings-panel #settings-tabpanel[data-reveal] > * {
+.music-app .settings-panel[data-motion="enter"] .panel-rows[data-typed] > * {
+  animation: none;
+}
+.music-app .settings-panel .panel-rows[data-reveal] > * {
   animation: settings-rise 260ms var(--settings-ease) calc(var(--i) * 30ms) both;
 }
 /* Reduced: nothing moves, the pseudo-elements' marks and knobs included (.music-app.reduce-motion *
@@ -1160,6 +1540,49 @@
   }
   .music-app .settings-fine {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .music-app .settings-panel .about-row {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+  /* 搜索: its field (with ×) a row of its own under the title, its playlists one row that scrolls
+     sideways. */
+  .music-app .music-panel.settings-panel[data-panel="search"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "title" "head" "tabs" "body";
+  }
+  .music-app .settings-panel[data-panel="search"] .settings-head {
+    padding: 14px 10px 0 22px;
+  }
+  .music-app .settings-panel[data-panel="search"] .settings-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .music-app .settings-panel[data-panel="search"] .settings-tabs > button {
+    max-width: 180px;
+    min-height: 30px;
+    margin-block: 5px;
+  }
+  .music-app .settings-panel[data-panel="search"] .settings-tabs > button::before {
+    bottom: -5px;
+  }
+}
+/* A phone-wide panel: 歌单's three counts with their words under them, a size smaller. */
+@container settings-scrim (max-width: 480px) {
+  .music-app .settings-panel .library-metrics {
+    column-gap: 14px;
+  }
+  .music-app .settings-panel .library-metrics > div {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    min-width: 0;
+  }
+  .music-app .settings-panel .library-metrics span {
+    white-space: nowrap;
+  }
+  .music-app .settings-panel .library-metrics b {
+    font-size: 30px;
   }
 }
 
@@ -1438,10 +1861,6 @@
   }
   .music-panel-scrim {
     padding: 12px;
-  }
-  .music-panel {
-    padding: 23px 21px;
-    max-height: calc(100% - 16px);
   }
   .panel-heading h2 {
     font-size: 21px;

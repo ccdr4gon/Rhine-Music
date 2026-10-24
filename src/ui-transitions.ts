@@ -36,11 +36,11 @@ export const DETAIL_SWAP: SurfaceMotion = { from: "translateY(-6px)", to: "trans
  */
 export const SONG_SCENE: SurfaceMotion = { from: "none", to: "none", rise: "0 6px" };
 /**
- * 设置 (design A, the owner, 2026-10-24): the panel itself does not move in; its corners, sheet,
- * index and rows draw themselves (music.css .settings-panel[data-motion="enter"]). It leaves as
- * the other panels do.
+ * The panels (设置's design A, the owner, 2026-10-24, and since the same day every panel): a panel
+ * itself does not move in; its corners, sheet, index and rows draw themselves (music.css
+ * .settings-panel[data-motion="enter"]). It sinks 8 px as it fades out.
  */
-export const SETTINGS_PANEL: SurfaceMotion = { from: "none", to: "translateY(8px)" };
+export const PANEL_MOTION: SurfaceMotion = { from: "none", to: "translateY(8px)" };
 
 /** Owns the visible lifetime, including a close that interrupts an opening. */
 export class SurfaceTransition {

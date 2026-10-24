@@ -1300,7 +1300,7 @@ test('no silent failure: a song NetEase may not be asked for now says why, with 
   // The notice: the session's words and the 播放器 panel's button; nothing else (the notice that a
   // column was only for browsing went with 2026-10-10). Nothing is sent, NetEase is never restarted.
   const explain = body(app, 'function explainNoPlay(', '\n}');
-  assert.match(explain, /^function explainNoPlay\(index: number\) \{\s*const block = playBlock\(index\);\s*if \(block\) notify\(PORT_BLOCK_NOTICE\[block\], \{ label: "打开播放器", panel: "sources" \}\);\s*$/);
+  assert.match(explain, /^function explainNoPlay\(index: number\) \{\s*const block = playBlock\(index\);\s*if \(block\) notify\(PORT_BLOCK_NOTICE\[block\], \{ label: "打开播放器", panel: "sources", section: "netease" \}\);\s*$/);
   assert.doesNotMatch(app, /browseNoticeShown|function browseOnly|这个歌单不是网易云的播放队列/);
   for (const fn of [explain, block, body(app, 'function requestPlay(', '\n}'), body(app, 'function ringPlay(', '\n}')])
     assert.doesNotMatch(fn, /restart|neteaseControl|controlSwitched|controlExternal|playQueueSong|\.debug\.|media_control|setPref|savePrefs/);
@@ -1311,7 +1311,7 @@ test('no silent failure: a song NetEase may not be asked for now says why, with 
     (index) => blocks[index], (...args) => notices.push(args), { port: 'PORT', error: 'ERROR', fm: 'FM' });
   for (const index of [1, 2, 3, 4, 8]) explainNoPlay(index);
   assert.deepEqual(notices, [
-    ['PORT', { label: '打开播放器', panel: 'sources' }], ['ERROR', { label: '打开播放器', panel: 'sources' }], ['FM', { label: '打开播放器', panel: 'sources' }],
+    ['PORT', { label: '打开播放器', panel: 'sources', section: 'netease' }], ['ERROR', { label: '打开播放器', panel: 'sources', section: 'netease' }], ['FM', { label: '打开播放器', panel: 'sources', section: 'netease' }],
   ], 'one notice per blocked request; nothing for a song with no reason to give');
   // The session's words (check-external-media.mjs runs its reasons).
   assert.match(session, /export const PORT_BLOCK_NOTICE: Record<PortBlock, string> = \{/);
@@ -1322,10 +1322,11 @@ test('no silent failure: a song NetEase may not be asked for now says why, with 
   // and closes it; hidden, it takes no press and no focus.
   assert.match(app, /<div id="music-toast" role="status" aria-live="polite"><span id="music-toast-text"><\/span><button id="music-toast-action" class="toast-action" type="button" hidden><\/button><\/div>/);
   const notify = body(app, 'function notify(', '\n}');
-  assert.match(notify, /button\.hidden = !action;\s*if \(action\) \{\s*button\.textContent = action\.label;\s*button\.dataset\.action = action\.panel;\s*\} else delete button\.dataset\.action;/);
+  assert.match(notify, /button\.hidden = !action;\s*if \(action\) \{\s*button\.textContent = action\.label;\s*button\.dataset\.action = action\.panel;\s*if \(action\.section\) button\.dataset\.section = action\.section;\s*else delete button\.dataset\.section;\s*\} else \{\s*delete button\.dataset\.action;\s*delete button\.dataset\.section;\s*\}/);
   assert.match(notify, /toastTimer = setTimeout\(hideToast, action \? 8000 : 5500\);/);
   assert.match(app, /\$\("#music-toast-action"\)\.addEventListener\("click", hideToast\);/);
-  assert.match(app, /if \(\["library", "search", "settings", "sources"\]\.includes\(action \|\| ""\)\) \{\s*searchGenre = "";\s*openPanel\(action as Panel\);/);
+  // The notice's button opens 播放器 on 网易云, where the port's state and the restart are.
+  assert.match(app, /if \(\["library", "search", "settings", "sources"\]\.includes\(action \|\| ""\)\) \{\s*searchGenre = "";\s*(\/\/[^\n]*\s*)*const section = target\.dataset\.section;\s*if \(section && isIndexed\(action as Panel\)\) keepSection\(action as IndexedPanel, section\);\s*openPanel\(action as Panel\);/);
   const chrome = readFileSync(new URL('../src/music-chrome.css', import.meta.url), 'utf8');
   assert.match(chrome, /\.music-app #music-toast \{[^}]*opacity: 0;\s*visibility: hidden;[^}]*pointer-events: none;[^}]*visibility 0s linear 200ms;/);
   assert.match(chrome, /\.music-app #music-toast\.visible \{\s*opacity: 1;\s*visibility: visible;\s*transform: none;\s*transition-delay: 0s;\s*\}/);
@@ -1343,31 +1344,37 @@ test('no silent failure: a song NetEase may not be asked for now says why, with 
 });
 
 // The owner, 2026-10-10: "a settings tab where users can customize the hotkeys"; 2026-10-24 (design
-// A): an index of sections beside the one it shows, 快捷键 one of them.
+// A): an index of sections beside the one it shows, 快捷键 one of them; the same day every panel got
+// that frame ("make it just like setting panel"): 播放器 and 音乐库 have sections, 搜索 its playlists.
 test('设置 is an index of sections, 快捷键 among them, whose keys take the next key pressed before the page does', () => {
-  const settings = body(app, 'function renderSettingsPanel() {', '\n}');
-  assert.match(settings, /<button role="tab" id="settings-tab-\$\{id\}" data-action="settings-tab" data-settings-tab="\$\{id\}" aria-selected="false" aria-controls="settings-tabpanel" tabindex="-1"/);
+  const settings = body(app, 'function renderPanelIndex() {', '\n}');
+  assert.match(settings, /<button role="tab" id="panel-tab-\$\{id\}" data-action="panel-tab" data-panel-tab="\$\{id\}" aria-selected="false" aria-controls="panel-tabpanel" tabindex="-1"/);
+  assert.match(body(app, 'function panelSections(kind: IndexedPanel): [string, string][] {', '\n}'), /return kind === "settings" \? settingsSections\(\) : kind === "sources" \? sourcesSections\(\) : LIBRARY_SECTIONS;/);
+  assert.match(app, /const LIBRARY_SECTIONS: \[LibrarySection, string\]\[\] = \[\["folder", "主文件夹"\], \["lists", "歌单"\], \["online", "在线资料"\]\];/);
+  // 搜索's index is a filter: radios, the chosen one the one Tab reaches, the arrows choose.
+  assert.match(body(app, 'function renderSearchPanel() {', '\n}'), /<button role="radio" data-filter="\$\{esc\(id\)\}" aria-checked="\$\{on\}" tabindex="\$\{on \? 0 : -1\}"/);
+  assert.match(body(app, 'function panelTabKey(e: KeyboardEvent) {', '\n}'), /if \(next\.dataset\.filter !== undefined\) setSearchFilter\(next\.dataset\.filter\);\s*else setPanelSection\(next\.dataset\.panelTab!\);\s*next\.focus\(\);/);
   assert.match(app, /const SETTINGS_SECTIONS: \[SettingsSection, string\]\[\] = \[\s*\["look", "外观"\], \["motion", "动效与显示"\], \["sound", "声音"\], \["quality", "画质"\],\s*\["notes", "专辑介绍"\], \["keys", "快捷键"\], \["about", "关于"\],\s*\];/);
-  assert.match(app, /<div class="settings-tabs" role="tablist" aria-orientation="vertical" aria-label="设置分类"><\/div>/);
-  assert.match(app, /<div id="panel-body" class="settings-body"><div id="settings-tabpanel" role="tabpanel"><\/div><\/div>/);
-  assert.match(app, /settings: \["SYSTEM SETTINGS", "设置"\],/);
+  assert.match(app, /<div class="settings-tabs" role="\$\{search \? "radiogroup" : "tablist"\}" aria-orientation="vertical" aria-label="\$\{titles\[next\]\[2\]\}"><\/div>/);
+  assert.match(app, /<div id="panel-body" class="settings-body">\$\{search \? '<div id="album-results" class="panel-rows"><\/div>' : '<div id="panel-tabpanel" class="panel-rows" role="tabpanel"><\/div>'\}<\/div>/);
+  assert.match(app, /settings: \["SYSTEM SETTINGS", "设置", "设置分类"\],/);
+  assert.match(app, /sources: \["CONNECT YOUR PLAYER", "播放器", "播放器分类"\],/);
   assert.match(app, /<button data-action="settings" aria-label="设置">设置<i/);
   // A player as the current source keeps the sound and the library in its own player: no 声音, no 专辑介绍.
   assert.match(body(app, 'function settingsSections() {', '\n}'), /!playerCurrent \|\| \(id !== "sound" && id !== "notes"\)/);
   // The chosen section is shown by itself (the one tabpanel), and its index button says so.
-  const section = body(app, 'function renderSettingsSection() {', '\n}');
-  assert.match(section, /button\.setAttribute\("aria-selected", String\(on\)\);\s*button\.tabIndex = on \? 0 : -1;/);
-  assert.match(section, /body\.setAttribute\("aria-labelledby", `settings-tab-\$\{settingsSection\}`\);/);
+  assert.match(body(app, 'function markPanelTab() {', '\n}'), /button\.setAttribute\("aria-selected", String\(on\)\);\s*button\.tabIndex = on \? 0 : -1;/);
+  assert.match(body(app, 'function renderPanelSection() {', '\n}'), /body\.setAttribute\("aria-labelledby", `panel-tab-\$\{chosen\}`\);/);
   // The entrance and a section's rise never play when motion is reduced; the rise has its own
   // attribute, so choosing a section during the entrance does not cut the entrance off.
-  assert.match(body(app, 'function playSettingsMotion(kind: "enter" | "reveal") {', '\n}'), /if \(preferences\.reduced\) \{\s*delete node\.dataset\[key\];\s*return;\s*\}/);
+  assert.match(body(app, 'function playPanelMotion(kind: "enter" | "reveal") {', '\n}'), /if \(preferences\.reduced\) \{\s*delete node\.dataset\[key\];\s*return;\s*\}/);
   const musicCss = readFileSync(new URL('../src/music.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(musicCss, /\.music-app \.settings-panel #settings-tabpanel\[data-reveal\] > \* \{\s*animation: settings-rise/);
+  assert.match(musicCss, /\.music-app \.settings-panel \.panel-rows\[data-reveal\] > \* \{\s*animation: settings-rise/);
   // Reduced: no animation and no transition, on the pseudo-elements (marks, knobs) too.
   assert.match(musicCss, /\.music-app\.reduce-motion \.settings-panel \*::before,\s*\.music-app\.reduce-motion \.settings-panel \*::after \{\s*animation: none !important;\s*transition: none !important;\s*\}/);
   // The index's keys in the open panel, before its Tab trap; the chosen section takes the focus.
   const keys = body(app, 'document.addEventListener("keydown", (e) => {', '\n});');
-  assert.ok(keys.indexOf('if (settingsTabKey(e)) return;') > keys.indexOf('if (panel) {') && keys.indexOf('if (settingsTabKey(e)) return;') < keys.indexOf('if (e.key === "Tab") {'));
+  assert.ok(keys.indexOf('if (panelTabKey(e)) return;') > keys.indexOf('if (panel) {') && keys.indexOf('if (panelTabKey(e)) return;') < keys.indexOf('if (e.key === "Tab") {'));
   assert.match(app, /document\.querySelector<HTMLElement>\('#music-panel-root \[role="tab"\]\[aria-selected="true"\]'\)/);
   // The capture: in the capture phase, before the panel's Esc; Tab moves on; combinations stay the system's.
   const capture = body(app, 'function captureShortcutKey(e: KeyboardEvent) {', '\n}');

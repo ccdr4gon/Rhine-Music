@@ -1,15 +1,20 @@
-.external-source-list { display: grid; gap: 10px; margin: 22px 0; }
-.music-app .external-source { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 16px; border: 1px solid var(--line); background: transparent; text-align: left; }
-.external-source[aria-pressed="true"] { border-color: var(--accent); }
-.external-source span { display: grid; gap: 6px; min-width: 0; }
+/* The 播放器 panel's players (its 来源 section, 2026-10-24): one line each, its name and what it
+   plays, then 已连接 or 连接 ↗; the connected one marked by the shelf's 6 px square. */
+.external-source-list { display: grid; margin: 0; }
+.music-app .external-source { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 20px; width: 100%; min-height: 64px; padding: 10px 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
+.external-source span { display: grid; gap: 5px; min-width: 0; }
+.external-source strong { font-size: 14px; font-weight: 400; }
+.external-source[aria-pressed="true"] strong { font-weight: 600; }
+.external-source[aria-pressed="true"]::before { content: ""; position: absolute; left: -15px; top: 50%; width: 6px; height: 6px; margin-top: -3px; background: var(--ink); }
 .external-source strong, .external-source small, #external-connection-status, #external-empty-note { overflow-wrap: anywhere; }
 .external-source small, .external-unavailable, .external-note, .external-warning { color: var(--muted); font-size: 12px; line-height: 1.8; }
-.external-source em { color: var(--accent); font-size: 12px; font-style: normal; flex-shrink: 0; }
+.external-source small { font-size: 11px; line-height: 1.5; }
+.external-source em { color: var(--ink); font-size: 12px; font-style: normal; flex-shrink: 0; }
+.external-source[aria-pressed="false"] em::after { content: "↗" / ""; margin-left: 6px; color: var(--accent); }
+.external-source[aria-pressed="false"]:hover em { text-decoration: underline; text-underline-offset: 4px; }
+.music-app .external-source:focus-visible { outline: 1px solid var(--ink); outline-offset: 3px; }
+.external-unavailable { margin: 16px 0; }
 .external-warning { white-space: pre-line; }
-.external-global-consent { margin: 16px 0; gap: 22px; }
-.external-global-consent small { max-width: 420px; line-height: 1.7; }
 .music-app[data-external="true"]:not([data-queue="true"]) .music-navigation { display: none; }
 .music-app[data-external="true"] .music-keyhint { pointer-events: none; }
 .music-app[data-external="true"] .music-empty p { max-width: 440px; margin-inline: auto; }
-.external-queue-consent { margin: 16px 0; gap: 22px; }
-.external-queue-consent small { max-width: 420px; line-height: 1.7; }

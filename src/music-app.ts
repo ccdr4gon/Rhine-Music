@@ -3,7 +3,7 @@ import { flushDesktopPreferences, isDesktop, saveDesktopPreferences } from "./de
 import { chooseMusicFolders } from "./local_music/connector/folders";
 import { LocalLyrics } from "./local_music/connector/lyrics-api";
 import {
-  readLibraryChange, scanLibrary, enrichLibrary, startIntroductions, readOnlineConfig, saveOnlineConfig,
+  readLibraryChange, scanLibrary, enrichLibrary, startIntroductions, readOnlineConfig, saveOnlineConfig, type OnlineConfig,
 } from "./local_music/connector/library-api";
 import "./style.css";
 import "./document-decryption.css";
@@ -22,7 +22,7 @@ import "./song-scene.css";
 import { caseSong, laneTrackKey, queueTrackKey } from "./netease_music/data/queue";
 import { NETEASE_NAME, isNeteaseSource } from "./netease_music/connector/player";
 import { NeteaseSession, PORT_BLOCK_NOTICE, type PortBlock } from "./netease_music/connector/session";
-import { queueSettingMarkup } from "./netease_music/connector/settings";
+import { PORT_NEEDS_LOOK, PORT_WORDS, queueSettingMarkup } from "./netease_music/connector/settings";
 import {
   playerLinks, playerMediaPort, pageSource, sourceAddress, markSourceSwitch, takeSourceSwitch, type SourceKind,
 } from "./music-sources";
@@ -33,13 +33,13 @@ import { FrameCap } from "./frame-cap";
 import {
   ExternalMediaConnection, nativeMediaPort, mediaLibrary, mediaVisualKey,
   mediaConnectionLabel, mediaTime, mediaSourcesMarkup,
-  mediaPermissionMarkup, spacedName, type MediaAction, type SourceLink,
+  mediaPermissionMarkup, spacedName, type ExternalMediaSource, type MediaAction, type SourceLink,
 } from "./external_player/external-media";
 import { SessionClock } from "./external_player/session-clock";
 import { DocumentDecryption } from "./document-decryption";
 import type { Lyrics } from "./lyrics";
 import { LyricsView, type LyricsClock } from "./lyrics-view";
-import { SurfaceTransition, DETAIL_SCENE, DETAIL_SWAP, SONG_SCENE, SETTINGS_PANEL } from "./ui-transitions";
+import { SurfaceTransition, DETAIL_SCENE, DETAIL_SWAP, SONG_SCENE, PANEL_MOTION } from "./ui-transitions";
 import { qualityRows, syncQualityUI } from "./quality-settings";
 import { ArchiveScene } from "./scene";
 import {
@@ -442,7 +442,7 @@ stage.innerHTML = `
     <article id="album-detail-content" tabindex="-1"><div id="detail-head" class="detail-head"></div><h1 id="detail-title" class="detail-title"></h1><div id="detail-body" class="detail-body"></div></article>
   </section>
   <section id="music-song" class="music-song" aria-label="歌曲选择" hidden>${songSceneMarkup()}</section>
-  <div id="music-empty" class="music-empty" hidden>${playerCurrent ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p id="external-empty-note" role="status" hidden></p><button data-action="sources" id="external-empty-sources">选择播放器 ↗</button><button data-action="local-source" class="subtle">改用本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><button data-action="library">选择音乐主文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示歌单</button>'}</div>
+  <div id="music-empty" class="music-empty" hidden>${playerCurrent ? '<small>YOUR PLAYER / THIS WINDOW</small><h1>让正在听的歌进入档案馆。</h1><p id="external-empty-note" role="status" hidden></p><button data-action="sources" data-section="sources" id="external-empty-sources">选择播放器 ↗</button><button data-action="local-source" class="subtle">改用本地音乐</button>' : '<small>YOUR PRIVATE COLLECTION</small><h1>让音乐进入这座档案馆。</h1><button data-action="library" data-section="folder">选择音乐主文件夹 ↗</button><button data-action="demo" class="subtle">先查看演示歌单</button>'}</div>
   <div id="music-panel-root"></div><div id="music-toast" role="status" aria-live="polite"><span id="music-toast-text"></span><button id="music-toast-action" class="toast-action" type="button" hidden></button></div>
   <div id="music-loading"><span class="loading-orbit"></span>${sourceSwitch
     ? `<strong>SWITCHING SOURCE</strong><small>${playerCurrent ? "正在切换到播放器" : "正在切换到本地音乐"}</small>`
@@ -675,16 +675,22 @@ stage.addEventListener("pointerdown", () => {
 /**
  * A notice under the header's row, for 5.5 s. `action`: one button in it that opens a panel (the
  * 播放器 panel for a song that cannot be played until the user changes something there:
- * explainNoPlay), and the notice stays 8 s; the button closes it.
+ * explainNoPlay), and the notice stays 8 s; the button closes it. `section`: the panel opens on it
+ * (网易云, where the debugging port is).
  */
-function notify(message: string, action?: { label: string; panel: Exclude<Panel, null> }) {
+function notify(message: string, action?: { label: string; panel: Exclude<Panel, null>; section?: string }) {
   const toast = $("#music-toast"), button = $<HTMLButtonElement>("#music-toast-action");
   $("#music-toast-text").textContent = message;
   button.hidden = !action;
   if (action) {
     button.textContent = action.label;
     button.dataset.action = action.panel;
-  } else delete button.dataset.action;
+    if (action.section) button.dataset.section = action.section;
+    else delete button.dataset.section;
+  } else {
+    delete button.dataset.action;
+    delete button.dataset.section;
+  }
   toast.classList.add("visible");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, action ? 8000 : 5500);
@@ -1032,18 +1038,25 @@ function choosePlayer(id: string) {
   updateChooser();
   switchSource("player", { panel: true, session: id });
 }
-/** What the panel says while 本地音乐 is current: who would be connected by itself, if anyone. */
+/**
+ * What the panel says while 本地音乐 is current, beside its heading: who would be connected by itself,
+ * if anyone (the rest is in 关于: the panels' redesign, 2026-10-24, "it has tooo much words now").
+ */
 function chooserLabel(chooser: ExternalMediaConnection) {
   const name = chooser.awaitsPreferred ? chooser.preferred!.name : "";
   if (chooser.selected) return `正在切换到${spacedName(chooser.selected.name)}…`;
   if (chooser.ambiguous) return `${name}有多个媒体会话，请选择要连接的一个`;
-  if (name && chooser.remembers) return `上次连接的是${spacedName(name)}：它出现后会自动连接，也可以选择其他播放器`;
-  if (name) return `未发现${name}；它出现后会自动连接，也可以选择其他播放器`;
-  return "选择一个播放器，它就成为当前来源";
+  if (name && chooser.remembers) return `上次连接的是${spacedName(name)}，它出现后自动连接`;
+  if (name) return `未发现${name}，它出现后自动连接`;
+  return "当前来源：本地音乐";
 }
-/** Where the 播放器 panel's focus goes when its own control goes away: 刷新来源, else the panel's ×. */
+/**
+ * Where the 播放器 panel's focus goes when its own control goes away: 刷新来源 (来源's), else the
+ * chosen section's name in the index, else the panel's ×.
+ */
 const sourcesPanelFocus = () =>
   document.querySelector<HTMLElement>('#music-panel-root [data-action="refresh-sources"]:not(:disabled)') ??
+  document.querySelector<HTMLElement>('#music-panel-root [data-panel-tab][aria-selected="true"]') ??
   document.querySelector<HTMLElement>('#music-panel-root [data-action="close-panel"]');
 /**
  * The 播放器 panel's list of players written again (a player came or went, or one changed its
@@ -1057,6 +1070,22 @@ function writeSources(list: HTMLElement, markup: string) {
   // A row that went (its player quit) leaves the focus on the panel's own control, never on another
   // player's row, where a stray key would connect that one instead.
   (list.querySelector<HTMLElement>(`[data-media-source="${CSS.escape(had)}"]`) ?? sourcesPanelFocus())?.focus({ preventScroll: true });
+}
+/** The consents opened under 说明 (panel-rows.ts), open again when their rows are written again. */
+const openNotes = new Set<string>();
+/** The NetEase source the 网易云 section was last written for (kept while a snapshot cannot be read). */
+let neteaseShownSource: ExternalMediaSource | undefined;
+function writeNotes(node: HTMLElement, markup: string) {
+  node.innerHTML = markup;
+  for (const toggle of node.querySelectorAll<HTMLElement>(".consent-toggle")) {
+    const note = toggle.getAttribute("aria-controls") ?? "";
+    if (!openNotes.has(note)) continue;
+    toggle.setAttribute("aria-expanded", "true");
+    const content = document.getElementById(note);
+    if (content) content.hidden = false;
+  }
+  // Controls came or went in the section (NetEase back after a restart, its queue switched).
+  syncPanelStop();
 }
 /** 断开连接 on or off; when it goes off under the focus, the focus moves on in the panel first. */
 function setDisconnect(button: HTMLButtonElement, off: boolean) {
@@ -2150,15 +2179,15 @@ function requestPlay(index: number, hop = true) {
 }
 /**
  * The error notice for a song that was asked to play and cannot be (requestPlay): NetEase's port
- * reason (playBlock) with a button to the 播放器 panel, where the port's status and the restart are
- * (Rhine never restarts NetEase by itself). Nothing for the rest (the song that plays, one asked for
+ * reason (playBlock) with a button to the 播放器 panel's 网易云 section, where the port's state and the
+ * restart are (Rhine never restarts NetEase by itself). Nothing for the rest (the song that plays, one asked for
  * already, a local song ▶ does not play): their rings and rows say why in their titles. (A playlist
  * column that was only for browsing said so once a page until 2026-10-10, when its songs became
  * playable with their playlist.)
  */
 function explainNoPlay(index: number) {
   const block = playBlock(index);
-  if (block) notify(PORT_BLOCK_NOTICE[block], { label: "打开播放器", panel: "sources" });
+  if (block) notify(PORT_BLOCK_NOTICE[block], { label: "打开播放器", panel: "sources", section: "netease" });
 }
 /**
  * Why there is nothing to play for the case at `index` (no ▶: playOffer is undefined), for the
@@ -3157,45 +3186,55 @@ function updateExternalControls() {
   const warning = [externalMedia.warning, source?.warning].filter(Boolean).join("\n");
   document.querySelectorAll<HTMLElement>("[data-media-warning]").forEach(node => { node.textContent = warning; });
   const connection = document.querySelector<HTMLElement>("#external-connection-status");
-  if (connection) connection.textContent = mediaConnectionLabel(externalMedia, mediaPlayback());
+  if (connection) {
+    connection.textContent = mediaConnectionLabel(externalMedia, mediaPlayback());
+    connection.dataset.connected = String(!!source);
+  }
   // Also while a remembered source is awaited: 断开连接 forgets it (nothing is connected by
   // itself afterwards, also after a restart), without picking another player first.
   const disconnected = document.querySelector<HTMLButtonElement>('[data-action="disconnect-source"]');
   if (disconnected) setDisconnect(disconnected, !externalMedia.selectedId && !externalMedia.remembers);
   if (panel === "sources") {
+    // 网易云 comes and goes with NetEase (its index first: the section shown may be the one that went).
+    syncSourcesIndex();
     // Written again when what it says changes: the rows, 已连接, 默认 (断开连接 with two sessions of
     // the remembered player selects nothing new) or which empty-list words apply (none read yet).
+    const list = document.querySelector<HTMLElement>("#external-sources");
     const markup = mediaSourcesMarkup(externalMedia);
-    if (markup !== sourcesVisual) {
+    if (list && markup !== sourcesVisual) {
       sourcesVisual = markup;
-      writeSources($("#external-sources"), markup);
+      writeSources(list, markup);
     }
-    const permission = $("#external-permission");
-    if (permission.dataset.source !== (source?.id || "")) {
+    // A snapshot that could not be read while NetEase is held: its section stays as it was written
+    // (its switches, a half-confirmed restart and the focus on them), not emptied for one read.
+    if (source) neteaseShownSource = isNeteaseSource(source) ? source : undefined;
+    const held = !source && externalMedia.unreadable && netease.isCurrent;
+    // The section is written for the NetEase source seen last meanwhile (also when it is first shown then).
+    const shown = source ?? (held ? neteaseShownSource : undefined);
+    const permission = document.querySelector<HTMLElement>("#external-permission");
+    if (permission && !held && permission.dataset.source !== (source?.id || "")) {
       permission.dataset.source = source?.id || "";
-      permission.innerHTML = mediaPermissionMarkup(externalMedia);
+      writeNotes(permission, mediaPermissionMarkup(externalMedia));
     }
     const consent = document.querySelector<HTMLInputElement>("#external-global-keys");
     if (consent) consent.checked = externalMedia.allowGlobalMediaKeys;
     const queueSetting = document.querySelector<HTMLElement>("#external-queue");
     const control = netease.queueControl();
     // The control switch is not part of the key: rebuilding under it would drop its focus.
-    const restarting = netease.debugRestarting && !isNeteaseSource(source);
-    const queueKey = JSON.stringify([source?.id, isNeteaseSource(source), preferences.neteaseQueue, preferences.playlistColumns, restarting, netease.playKey]);
+    const restarting = netease.debugRestarting && !isNeteaseSource(shown);
+    const queueKey = JSON.stringify([shown?.id, isNeteaseSource(shown), preferences.neteaseQueue, preferences.playlistColumns, restarting, netease.playKey]);
     if (queueSetting && queueKey !== queueSettingVisual) {
       queueSettingVisual = queueKey;
       debugSettingVisual = "";
       // NetEase's source disappears while it restarts; keep saying what is happening.
-      // The switch that was just operated is rebuilt with the rest: give it its focus back.
-      const focused = queueSetting.contains(document.activeElement) ? (document.activeElement as HTMLElement).id : "";
-      queueSetting.innerHTML = restarting
+      // The switch (or 说明) that was just operated is rebuilt with the rest: give it its focus back.
+      const focused = queueSetting.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+      const again = focused?.id ? `#${CSS.escape(focused.id)}` : focused?.getAttribute("aria-controls") ? `[aria-controls="${CSS.escape(focused.getAttribute("aria-controls")!)}"]` : "";
+      writeNotes(queueSetting, restarting
         ? '<p class="external-note" role="status">正在以调试端口重新启动网易云…</p>'
-        : queueSettingMarkup(source, preferences.neteaseQueue, netease.queueStatus, control,
-            { enabled: preferences.playlistColumns, status: netease.playlistStatus }, netease.playKey);
-      if (focused) queueSetting.querySelector<HTMLElement>(`#${CSS.escape(focused)}`)?.focus({ preventScroll: true });
-      // The opening words point to the debugging port's section only while it is there (with NetEase's queue shown).
-      const pointer = document.querySelector<HTMLElement>("#sources-intro-port");
-      if (pointer) pointer.textContent = queueSetting.querySelector(".external-debug-port") ? "；要让网易云播放选中的歌，需以调试端口启动它（见下方）" : "";
+        : queueSettingMarkup(shown, preferences.neteaseQueue, netease.queueStatus, control,
+            { enabled: preferences.playlistColumns, status: netease.playlistStatus }, netease.playKey));
+      if (focused) (again && queueSetting.querySelector<HTMLElement>(again) || sourcesPanelFocus())?.focus({ preventScroll: true });
     }
     const queueStatusNode = document.querySelector<HTMLElement>("[data-queue-status]");
     if (queueStatusNode) queueStatusNode.textContent = netease.queueStatus;
@@ -3203,13 +3242,24 @@ function updateExternalControls() {
     if (playlistStatusNode) playlistStatusNode.textContent = preferences.playlistColumns ? netease.playlistStatus : "";
     // The port's state changes with NetEase, not with the panel: update it in place so a
     // half-confirmed restart button is not rebuilt under the pointer.
-    const debugKey = JSON.stringify([control.status, control.restart]);
+    const debugKey = JSON.stringify([control.status, control.restart, control.state]);
     if (debugKey !== debugSettingVisual) {
       debugSettingVisual = debugKey;
       const debugStatusNode = document.querySelector<HTMLElement>("[data-debug-status]");
       if (debugStatusNode) debugStatusNode.textContent = control.status;
+      const state = document.querySelector<HTMLElement>(".port-state");
+      if (state) {
+        state.dataset.debugState = control.state;
+        state.title = control.status;
+        setText(state, PORT_WORDS[control.state]);
+      }
       const restart = document.querySelector<HTMLElement>("[data-debug-restart]");
-      if (restart) restart.hidden = !control.restart;
+      if (restart) {
+        // The restart going away under the focus (the port answered) hands it on in the panel.
+        if (!control.restart && restart.contains(document.activeElement)) sourcesPanelFocus()?.focus({ preventScroll: true });
+        restart.hidden = !control.restart;
+      }
+      syncSourcesAlert(control.state);
     }
   }
   updateQueueRows();
@@ -3411,26 +3461,94 @@ async function controlExternal(action: MediaAction, position?: number) {
   } else if (action === "seek" && !sent) sessionClock.release();
   await refreshExternal();
 }
-function renderSourcesPanel() {
+/**
+ * The 播放器 panel's sections (the panels' redesign, the owner, 2026-10-24: "make it just like
+ * setting panel, it has tooo much words now"): 来源 — the players and the connection (选择播放器
+ * while 本地音乐 is the current source: choosing one switches to it) —, 网易云 while NetEase is the
+ * connected player (also while it restarts with its port: its source is gone meanwhile) and 关于,
+ * which says in short lines what the opening paragraph said.
+ */
+type SourcesSection = "sources" | "netease" | "about";
+let sourcesSection: SourcesSection = "sources";
+function sourcesSections(): [SourcesSection, string][] {
+  // Kept through a snapshot that could not be read (the session holds NetEase meanwhile).
+  const neteaseShown = !!externalMedia && (netease.isCurrent || netease.debugRestarting);
+  return [["sources", playerCurrent ? "来源" : "选择播放器"], ...(neteaseShown ? [["netease", "网易云"] as [SourcesSection, string]] : []), ["about", "关于"]];
+}
+const SOURCES_ABOUT = [
+  ["记住", "记住连接过的播放器（不保存它播放的内容）：它重新出现或下次启动时自动连接"],
+  ["默认", "从未连接过播放器时，发现网易云音乐即自动连接"],
+  ["断开连接", "忘掉记住的播放器，之后不再自动连接任何播放器，直到再次选择"],
+  ["读取", "默认只读当前曲目、封面与可用控制，不导入曲库；来源消失后不换到别的播放器"],
+  ["本地音乐", "点页眉的“本地音乐”换回"],
+];
+const CHOOSER_ABOUT = [
+  ["选择", "选中的播放器成为当前来源，本地音乐与 BGM 停止播放"],
+  ["默认", "上次连接的播放器（从未连接过时是网易云音乐）在这里出现即自动连接"],
+  ["断开连接", "忘掉记住的播放器，之后不再自动连接任何播放器，直到再次选择"],
+  ["读取", "只记住是哪个播放器，不保存它播放的内容；只在这个面板打开时读取各播放器的当前曲目"],
+];
+const aboutRows = (rows: string[][]) =>
+  rows.map(([label, text]) => `<div class="settings-row about-row"><span>${label}</span><span>${text}</span></div>`).join("");
+/** The chosen section of the 播放器 panel, under its heading (renderPanelSection). */
+function renderSourcesSection(body: HTMLElement, name: string) {
   sourcesVisual = "";
   queueSettingVisual = "";
+  debugSettingVisual = "";
   chooserVisual = "";
-  // A player as the current source: its connection, NetEase's switches and the global media keys.
-  // 本地音乐 as the current source: the players to choose from (choosing one switches to it).
-  const intro = playerCurrent
-    ? "选择要连接的播放器，它就是当前来源。连接过的播放器会被记住：它断开后重新出现会自动接回；以它为当前来源退出后，下次直接启动 Rhine Music 会自动连接它，不用再选。还没有连接过播放器时，网易云音乐是默认连接，发现它即自动连接。选择另一个播放器会替换记住的那个；点“断开连接”则忘掉它，之后不再自动连接任何播放器（网易云也不），直到你再次选择。只记住是哪个播放器，不保存它播放的内容。默认只读取当前曲目、封面与可用控制；网易云的播放队列与按歌单分列在下方另行开关<span id=\"sources-intro-port\"></span>。不会导入曲库，来源消失后也不会自动换到别的播放器。改用本地音乐请点上方的“本地音乐”。"
-    : "当前来源是本地音乐。选择一个播放器，它就成为当前来源：Rhine 改为显示它正在播放的歌并提供它允许的控制，本地音乐与 BGM 停止播放；点上方的“本地音乐”可以换回。上次连接的播放器（还没有连接过播放器时是网易云音乐）是默认连接，打开这里时发现它即自动连接。点“断开连接”则忘掉它，之后不再自动连接任何播放器（网易云也不），直到你再次选择。只记住是哪个播放器，不保存它播放的内容；只在这个面板打开时读取各播放器的当前曲目。";
-  $("#panel-body").innerHTML = `<p class="panel-intro">${intro}</p><p id="external-connection-status" role="status"></p><div id="external-sources" class="external-source-list"></div>${playerCurrent ? '<div id="external-permission"></div><div id="external-queue"></div>' : ""}<p data-media-warning class="external-warning" role="status"></p><div class="panel-actions"><button data-action="refresh-sources">刷新来源 ↻</button><button data-action="disconnect-source">断开连接</button></div><p class="external-note">无法取得播放状态或时长时显示未知，没有读数时不推算进度。缺少封面时使用中性卡片。播放器是否提供信息取决于它当前的版本与运行状态。</p>`;
+  const heading = (extra = "") => `<div class="settings-heading"><h3>${name}</h3>${extra}</div>`;
+  if (sourcesSection === "sources")
+    body.innerHTML = `${heading('<p id="external-connection-status" role="status"></p>')}<div id="external-sources" class="external-source-list"></div><p data-media-warning class="external-warning" role="status"></p><div class="settings-actions"><button class="settings-link" data-action="refresh-sources">刷新来源<span aria-hidden="true">↻</span></button><button class="settings-link" data-action="disconnect-source">断开连接</button></div>`;
+  else if (sourcesSection === "netease") body.innerHTML = `${heading()}<div id="external-queue"></div><div id="external-permission"></div>`;
+  else body.innerHTML = heading() + aboutRows(playerCurrent ? SOURCES_ABOUT : CHOOSER_ABOUT);
   if (externalMedia) return updateExternalControls();
-  if (playerChooser) {
-    updateChooser();
-    void refreshChooser();
-    return;
-  }
+  if (playerChooser) return updateChooser();
   // A browser: no player can be connected here.
-  setText($("#external-connection-status"), "连接外部播放器需要 Windows 客户端。");
+  const status = document.querySelector<HTMLElement>("#external-connection-status");
+  if (!status) return;
+  setText(status, "连接外部播放器需要 Windows 客户端。");
   $<HTMLButtonElement>('[data-action="disconnect-source"]').disabled = true;
   $<HTMLButtonElement>('[data-action="refresh-sources"]').disabled = true;
+}
+/**
+ * 网易云 while it went away under the user (NetEase quit, or its session is gone a moment after a
+ * restart with its port): shown again when it comes back, unless another section was chosen meanwhile.
+ */
+let sourcesSectionAway: SourcesSection | undefined;
+/**
+ * NetEase connected or gone while the panel is open: its index again, and 来源 if 网易云 went (网易云
+ * again when it comes back: sourcesSectionAway). A section name that had the focus has it again; the
+ * focus in a section written again goes to the shown section's name (来源's 刷新来源 when 网易云 went).
+ */
+function syncSourcesIndex() {
+  if (panel !== "sources" || panelIndexShown === sourcesSections().map(([id]) => id).join()) return;
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const tab = active?.dataset.panelTab, inSection = !!active && !!document.querySelector("#panel-tabpanel")?.contains(active);
+  renderPanelIndex();
+  const sections = sourcesSections();
+  const gone = !sections.some(([id]) => id === sourcesSection);
+  const back = !gone && !!sourcesSectionAway && sourcesSectionAway !== sourcesSection && sections.some(([id]) => id === sourcesSectionAway);
+  if (gone) sourcesSectionAway = sourcesSection;
+  if (back) {
+    sourcesSection = sourcesSectionAway!;
+    sourcesSectionAway = undefined;
+  }
+  if (gone || back) renderPanelSection();
+  if (tab) (document.querySelector<HTMLElement>(`[data-panel-tab="${tab}"]`) ?? sourcesPanelFocus())?.focus({ preventScroll: true });
+  else if (inSection && gone) sourcesPanelFocus()?.focus({ preventScroll: true });
+  else if (inSection && back) document.querySelector<HTMLElement>(`[data-panel-tab="${sourcesSection}"]`)?.focus({ preventScroll: true });
+}
+/**
+ * 网易云 in the index carries a ring while its debugging port needs a look (closed, not answering):
+ * the eye finds it from any section; its name says so.
+ */
+function syncSourcesAlert(state = netease.queueControl().state) {
+  const tab = document.querySelector<HTMLElement>('[data-panel-tab="netease"]');
+  if (!tab) return;
+  const alert = preferences.neteaseQueue && PORT_NEEDS_LOOK.includes(state);
+  tab.dataset.alert = String(alert);
+  if (alert) tab.setAttribute("aria-label", `网易云（调试端口${PORT_WORDS[state]}）`);
+  else tab.removeAttribute("aria-label");
 }
 /**
  * The details' document (Claude Design, 2026-10-05, direction A; redesigned 2026-10-17 for the
@@ -3520,7 +3638,7 @@ function renderExternalDetail() {
   if (netease.shownQueue()) return renderQueueDetail();
   detailIdentity = "";
   writeDetailHead(detailHead("LIVE TRACK", "", undefined,
-    `<button data-action="sources" class="detail-source">${esc(source.name)}<i class="link-chevron" aria-hidden="true"></i></button>`));
+    `<button data-action="sources" data-section="sources" class="detail-source">${esc(source.name)}<i class="link-chevron" aria-hidden="true"></i></button>`));
   detailTitle.set(source.title || "曲名未提供");
   $("#detail-body").innerHTML = `${detailArtist(source.artist || "歌手未提供", source.album, "", " data-media-album")}${externalControls(false)}${detailNote}`;
   documentDecryption.reset($("#album-detail-content"), preferences.reduced || scene?.decryptionFrame.phase === "clear");
@@ -3551,8 +3669,8 @@ function closePanel(after?: () => void) {
   panelTransition?.hide(preferences.reduced, () => {
     panel = null;
     panelClosing = false;
-    settingsLayout?.disconnect();
-    settingsLayout = undefined;
+    panelLayout?.disconnect();
+    panelLayout = undefined;
     panelTransition?.dispose();
     panelTransition = undefined;
     $("#music-panel-root").innerHTML = "";
@@ -3592,11 +3710,11 @@ function focusScene() {
 /**
  * What Tab reaches in the open panel, in order, for its trap: not a control the keys skip (设置's
  * index but its chosen section, a radio but its group's chosen one) or one not shown (a closed
- * 精细设置's); 精细设置 itself is one.
+ * 精细设置's); 精细设置 itself is one, and so is a section with no control (syncPanelStop).
  */
 function panelTabStops() {
   const root = $("#music-panel-root");
-  return [...root.querySelectorAll<HTMLElement>("button, input, textarea, select, a[href], summary")].filter((el) => {
+  return [...root.querySelectorAll<HTMLElement>('button, input, textarea, select, a[href], summary, [tabindex="0"]')].filter((el) => {
     if (el.tabIndex < 0 || (el as HTMLButtonElement).disabled || !el.getClientRects().length) return false;
     // A closed <details> keeps its content's boxes (content-visibility), but Tab passes it by.
     const closed = el.closest("details:not([open])");
@@ -3613,24 +3731,31 @@ function openPanel(next: Panel, instant = false) {
   // The header's menu does not stay open under a panel (its focus returns to 菜单 first).
   setChromeMenu(false);
   cancelSearchTrack();
-  settingsLayout?.disconnect();
-  settingsLayout = undefined;
+  panelLayout?.disconnect();
+  panelLayout = undefined;
   panelTransition?.dispose();
   pendingPanelAfter = undefined;
   panelClosing = false;
   if (!panel) panelFocus = document.activeElement as HTMLElement;
   panel = next;
+  // The words the header has for each (播放器, 音乐库, 搜索, 设置), and the index's name.
   const titles = {
-    library: ["MUSIC LIBRARY", "本地音乐库"],
-    search: ["FIND MUSIC", "搜索歌曲"],
-    settings: ["SYSTEM SETTINGS", "设置"],
-    sources: ["CONNECT YOUR PLAYER", "连接外部播放器"],
+    library: ["MUSIC LIBRARY", "音乐库", "音乐库分类"],
+    search: ["FIND MUSIC", "搜索", "按歌单筛选"],
+    settings: ["SYSTEM SETTINGS", "设置", "设置分类"],
+    sources: ["CONNECT YOUR PLAYER", "播放器", "播放器分类"],
   };
-  // 设置 is an index beside one section (design A, the owner, 2026-10-24; renderSettingsPanel): its
-  // title heads the index, its × the section; four corner squares draw it in.
-  $("#music-panel-root").innerHTML = next === "settings"
-    ? `<div class="music-panel-scrim settings-scrim" data-action="dismiss-panel"><section class="music-panel settings-panel" role="dialog" aria-modal="true" aria-labelledby="music-panel-title">${["tl", "tr", "bl", "br"].map((corner, i) => `<i class="settings-corner" data-corner="${corner}" style="--c: ${i}" aria-hidden="true"></i>`).join("")}<div class="panel-heading settings-title"><small>${titles[next][0]}</small><h2 id="music-panel-title">${titles[next][1]}</h2></div><div class="settings-tabs" role="tablist" aria-orientation="vertical" aria-label="设置分类"></div><div class="settings-head"><span class="settings-count" aria-hidden="true"></span><button data-action="close-panel" aria-label="关闭">×</button></div><div id="panel-body" class="settings-body"><div id="settings-tabpanel" role="tabpanel"></div></div></section></div>`
-    : `<div class="music-panel-scrim" data-action="dismiss-panel"><section class="music-panel" role="dialog" aria-modal="true" aria-labelledby="music-panel-title"><div class="panel-heading"><div><small>${titles[next][0]}</small><h2 id="music-panel-title">${titles[next][1]}</h2></div><button data-action="close-panel" aria-label="关闭">×</button></div><div id="panel-body"></div></section></div>`;
+  // Every panel is an index beside one section (设置's design A, the owner, 2026-10-24, given to the
+  // others the same day: "make it just like setting panel"): its title heads the index, its count and
+  // × the section; four corner squares draw it in. 搜索's index is its playlists, a filter (radios),
+  // and its count is the search field's (renderSearchPanel).
+  const search = next === "search";
+  const head = `<div class="settings-head">${search
+    ? '<div class="panel-search"><svg viewBox="0 0 15 15" aria-hidden="true"><circle cx="6.2" cy="6.2" r="5"/><path d="M10 10l4 4"/></svg><input id="album-search" type="search" placeholder="歌曲、歌手、专辑、歌单…" aria-label="搜索歌曲" autocomplete="off" spellcheck="false"><span class="search-count" id="search-count" role="status"></span></div>'
+    : '<span class="settings-count" aria-hidden="true"></span>'}<button data-action="close-panel" aria-label="关闭">×</button></div>`;
+  const index = `<div class="settings-tabs" role="${search ? "radiogroup" : "tablist"}" aria-orientation="vertical" aria-label="${titles[next][2]}"></div>`;
+  // 搜索's field comes before its playlists, as a narrow window stacks them (and Tab goes field, ×, playlists, results).
+  $("#music-panel-root").innerHTML = `<div class="music-panel-scrim settings-scrim" data-action="dismiss-panel"><section class="music-panel settings-panel" data-panel="${next}" role="dialog" aria-modal="true" aria-labelledby="music-panel-title">${["tl", "tr", "bl", "br"].map((corner, i) => `<i class="settings-corner" data-corner="${corner}" style="--c: ${i}" aria-hidden="true"></i>`).join("")}<div class="panel-heading settings-title"><small>${titles[next][0]}</small><h2 id="music-panel-title">${titles[next][1]}</h2></div>${search ? head + index : index + head}<div id="panel-body" class="settings-body">${search ? '<div id="album-results" class="panel-rows"></div>' : '<div id="panel-tabpanel" class="panel-rows" role="tabpanel"></div>'}</div></section></div>`;
   // The empty page too (no player connected): nothing behind the dialog takes the focus.
   for (const node of [
     $("#music-browse"),
@@ -3643,16 +3768,22 @@ function openPanel(next: Panel, instant = false) {
     node.inert = true;
   const scrim = $(".music-panel-scrim");
   scrim.hidden = true;
-  panelTransition = new SurfaceTransition(scrim, $(".music-panel"), 300, 200, next === "settings" ? SETTINGS_PANEL : "up");
+  panelTransition = new SurfaceTransition(scrim, $(".music-panel"), 300, 200, PANEL_MOTION);
   panelTransition.show(preferences.reduced || instant);
   if (!instant) effects.play("page-open");
-  if (next === "library") renderLibraryPanel();
-  if (next === "search") renderSearchPanel();
-  if (next === "settings") {
-    renderSettingsPanel();
-    if (!instant) playSettingsMotion("enter");
+  // A narrow window lays the index out as rows of words: its aria-orientation follows.
+  panelLayout = new ResizeObserver(syncPanelOrientation);
+  panelLayout.observe(scrim);
+  libraryRootTyped = undefined;
+  sourcesSectionAway = undefined;
+  if (search) renderSearchPanel();
+  else {
+    renderPanelIndex();
+    renderPanelSection();
   }
-  if (next === "sources") renderSourcesPanel();
+  // The players are read while the 播放器 panel is open (本地音乐 as the current source).
+  if (next === "sources" && !externalMedia && playerChooser) void refreshChooser();
+  if (!instant) playPanelMotion("enter");
   (
     document.querySelector<HTMLElement>("#album-search") ||
     document.querySelector<HTMLElement>('#music-panel-root [role="tab"][aria-selected="true"]') ||
@@ -3660,45 +3791,66 @@ function openPanel(next: Panel, instant = false) {
   )?.focus({ preventScroll: true });
 }
 /**
- * The library panel (the owner, 2026-10-06): one main folder, chosen with the system picker or
- * typed, and its playlists (each subfolder, and the main folder's own songs first) with their
- * song counts. Folders an earlier version saved after the main one are only mentioned.
+ * 音乐库 (the owner, 2026-10-06: one main folder, each subfolder a playlist), an index since the
+ * panels' redesign (2026-10-24): 主文件夹 (the folder, typed or chosen with the system picker, and
+ * the scan), 歌单 (the counts and the playlists with their song counts) and 在线资料 (MusicBrainz).
+ * What a part does, where its name does not say it, is its tooltip and its controls' description.
  */
-function renderLibraryPanel() {
-  const main = library.roots[0]?.path ?? "";
-  libraryPanelShown = new Map(libraryPanelParts.map(([selector, markup]) => [selector, markup()]));
-  const part = (selector: string) => libraryPanelShown.get(selector) ?? "";
-  $("#panel-body").innerHTML =
-    `<p class="panel-intro">选择一个音乐主文件夹：它的每个子文件夹是一个歌单，子文件夹里更深处的歌也属于这个歌单；直接放在主文件夹里的歌是第一个歌单。每首歌一张卡片，封面优先使用所在文件夹的封面图片，其次使用音乐内嵌的封面。没有音乐的文件夹和隐藏文件夹不显示。音乐文件只读取，不会被修改。</p><label class="field-label" for="music-root">音乐主文件夹<span>一个文件夹</span></label><input id="music-root" type="text" spellcheck="false" value="${esc(main)}" placeholder="Windows: D:\\Music · macOS: /Users/你的用户名/Music"><div class="panel-actions"><button class="primary-button" data-action="scan">保存并扫描 ↗</button><button data-action="rescan">重新扫描</button></div><div id="scan-status" class="scan-status"></div><div id="library-metrics" class="library-metrics">${part("#library-metrics")}</div><section id="library-lists" class="panel-section">${part("#library-lists")}</section><section class="panel-section"><h3>在线资料</h3><p>向 MusicBrainz 核对专辑与歌手，补充专辑介绍与制作资料并缓存在本机；音乐文件留在本机。</p><button data-action="enrich-library" class="text-button">补充缺失的在线资料 ↗</button></section><section id="library-covers" class="panel-section">${part("#library-covers")}</section>`;
-  if (isDesktop) {
-    const picker = document.createElement("button");
-    picker.textContent = "选择主文件夹…";
-    picker.addEventListener("click", async () => {
-      try {
-        const initialDirectory = document.querySelector<HTMLInputElement>("#music-root")?.value.trim();
-        const [path] = await chooseMusicFolders(initialDirectory || undefined);
-        const input = document.querySelector<HTMLInputElement>("#music-root");
-        if (!input || !path) return;
-        input.value = path;
-      } catch (error) { notify((error as Error).message); }
-    });
-    $("#panel-body .panel-actions").prepend(picker);
+type LibrarySection = "folder" | "lists" | "online";
+const LIBRARY_SECTIONS: [LibrarySection, string][] = [["folder", "主文件夹"], ["lists", "歌单"], ["online", "在线资料"]];
+let librarySection: LibrarySection = "folder";
+/** The folder being typed, kept while the panel is open (another section and back does not lose it). */
+let libraryRootTyped: string | undefined;
+const FOLDER_TIP = "每个子文件夹是一个歌单，更深处的歌也属于它；直接放在主文件夹里的歌是第一个歌单。没有音乐的文件夹和隐藏文件夹不显示。音乐文件只读取，不会被修改。";
+const ONLINE_TIP = "向 MusicBrainz 核对专辑与歌手，补充专辑介绍与制作资料并缓存在本机；音乐文件留在本机。";
+/** The chosen section of 音乐库, under its heading (renderPanelSection). */
+function renderLibrarySection(body: HTMLElement, name: string) {
+  const heading = (tip = "") => `<div class="settings-heading"><h3${tip ? ` title="${tip}"` : ""}>${name}</h3></div>`;
+  if (librarySection === "folder") {
+    const main = libraryRootTyped ?? library.roots[0]?.path ?? "";
+    body.innerHTML = `${heading(FOLDER_TIP)}<div class="settings-field"><input id="music-root" type="text" spellcheck="false" value="${esc(main)}" placeholder="例如 D:\\Music" aria-label="音乐主文件夹" aria-description="${FOLDER_TIP}">${isDesktop ? '<button class="settings-link" data-action="pick-folder">选择…</button>' : ""}</div><div class="settings-actions"><button class="primary-button" data-action="scan">保存并扫描<span aria-hidden="true">↗</span></button><button class="settings-link" data-action="rescan">重新扫描</button></div><p id="scan-status" class="scan-status" role="status"></p>`;
+    updateScanStatus();
+  } else if (librarySection === "lists") {
+    libraryPanelShown = new Map(libraryPanelParts.map(([selector, markup]) => [selector, markup()]));
+    const part = (selector: string) => libraryPanelShown.get(selector) ?? "";
+    body.innerHTML = `${heading()}<div id="library-metrics" class="library-metrics">${part("#library-metrics")}</div><div id="library-lists">${part("#library-lists")}</div>`;
+  } else {
+    body.innerHTML = `${heading(ONLINE_TIP)}<div class="settings-row" title="${ONLINE_TIP}"><span>补充缺失的在线资料</span><button class="settings-link" data-action="enrich-library" aria-description="${ONLINE_TIP}">补充<span aria-hidden="true">↗</span></button></div><div id="online-config"></div>`;
+    void fillOnlineConfig();
   }
-  updateScanStatus();
-  const configSection = document.createElement("section");
-  configSection.className = "panel-section";
-  configSection.id = "online-config";
-  $("#panel-body").append(configSection);
-  void (async () => {
-    try {
-      const config = await readOnlineConfig();
-      if (!configSection.isConnected) return;
-      configSection.innerHTML = `<h3>资料库连接</h3><label class="field-label" for="metadata-contact">MusicBrainz 联系邮箱或项目网址</label><input id="metadata-contact" type="text" value="${esc(config.musicBrainzContact || "")}" placeholder="你的联系邮箱或公开项目网址"><p>按 MusicBrainz 要求用于标识本应用的资料请求，不用于注册或订阅。</p><label class="settings-row"><span>扫描后自动补充新专辑资料<small>已有缓存不重复查询；断网仍可浏览与播放</small></span><input type="checkbox" id="online-enabled" ${config.onlineEnabled ? "checked" : ""}></label><button class="text-button" data-action="save-online">保存资料库设置 ↗</button><p>${config.musicBrainzConfigured ? "资料库请求标识已配置。" : "尚未配置；本地曲库和播放已可使用。"}</p>`;
-    } catch (error) {
-      if (configSection.isConnected)
-        configSection.innerHTML = `<p>${esc((error as Error).message)}</p>`;
-    }
-  })();
+}
+/** What the service last said is saved for the online lookups (在线资料's switch saves with it). */
+let savedOnline: OnlineConfig = {};
+const onlineStatus = (config: OnlineConfig) =>
+  config.musicBrainzConfigured ? "资料库请求标识已配置。" : "尚未配置；本地曲库和播放已可使用。";
+/** 在线资料's switch and contact, once the service has said what is saved. */
+async function fillOnlineConfig() {
+  const section = document.querySelector<HTMLElement>("#online-config");
+  if (!section) return;
+  try {
+    const config = savedOnline = await readOnlineConfig();
+    if (!section.isConnected) return;
+    section.innerHTML = `${settingSwitch("online-enabled", "扫描后自动补充新专辑资料", !!config.onlineEnabled, "", "已有缓存不重复查询；断网仍可浏览与播放")}<div class="settings-field-block"><label for="metadata-contact">联系邮箱或项目网址</label><div class="settings-field"><input id="metadata-contact" type="text" value="${esc(config.musicBrainzContact || "")}" placeholder="name@example.com" aria-description="按 MusicBrainz 要求用于标识本应用的资料请求，不用于注册或订阅"><button class="settings-link" data-action="save-online">保存</button></div><p id="online-status" class="settings-note" role="status">${onlineStatus(config)}</p></div>`;
+  } catch (error) {
+    if (section.isConnected) section.innerHTML = `<p class="settings-note">${esc((error as Error).message)}</p>`;
+  }
+}
+/**
+ * The online lookups' settings saved: by 保存 (the contact typed, told in a notice), or at once by
+ * the switch (with the contact saved before: one being typed waits for 保存). A switch that could
+ * not be saved goes back.
+ */
+async function saveOnline(contact: string, enabled: boolean, toggle?: HTMLInputElement) {
+  try {
+    await saveOnlineConfig({ musicBrainzContact: contact, onlineEnabled: enabled });
+    savedOnline = await readOnlineConfig().catch(() => ({ ...savedOnline, musicBrainzContact: contact, onlineEnabled: enabled }));
+    const status = document.querySelector<HTMLElement>("#online-status");
+    if (status) setText(status, onlineStatus(savedOnline));
+    if (!toggle) notify("资料库设置已保存。可以开始补充专辑资料。");
+  } catch (error) {
+    if (toggle) toggle.checked = !enabled;
+    notify((error as Error).message);
+  }
 }
 function updateScanStatus() {
   const el = document.querySelector("#scan-status");
@@ -3718,37 +3870,37 @@ function updateScanStatus() {
           ? `上次扫描 ${new Date(library.scan.finishedAt).toLocaleString("zh-CN")}${encrypted}${unreadable}`
           : "尚未扫描音乐主文件夹。")) + setAside;
 }
-/** The library panel's counts (歌单 · 歌曲 · 专辑). */
+/** 歌单's counts (歌单 · 歌曲 · 专辑). */
 function libraryMetricsMarkup() {
   const lists = library.playlists ?? [];
   const songs = lists.reduce((n, list) => n + list.trackIds.length, 0);
   return `<div><b>${lists.length}</b><span>歌单</span></div><div><b>${songs}</b><span>歌曲</span></div><div><b>${library.albums.length}</b><span>专辑</span></div>`;
 }
-/** Its 歌单 section: the main folder's playlists with their song counts, and folders an earlier version saved. */
+/**
+ * 歌单's list: the main folder's playlists with their song counts; without songs, the demonstration's
+ * playlist (how the covers look before a folder is chosen); folders an earlier version saved.
+ */
 function libraryListsMarkup() {
   const main = library.roots[0]?.path ?? "", earlier = library.roots.length - 1;
   const lists = library.playlists ?? [];
   const playlists = lists.length
-    ? `<ol class="library-playlists">${lists.map((list) => `<li><span>${esc(list.name)}${list.main ? "<small>主文件夹</small>" : ""}</span><b>${list.trackIds.length} 首</b></li>`).join("")}</ol>`
-    : `<p>${main ? "扫描后在这里列出主文件夹中的歌单。" : "选择主文件夹并扫描后，这里会列出它的歌单。"}</p>`;
-  return `<h3>歌单</h3>${playlists}${earlier > 0 ? `<p>旧版本保存的另外 ${earlier} 个音乐文件夹仍保留在设置中，但不再扫描或显示。</p>` : ""}`;
+    ? `<ol class="library-playlists">${lists.map((list, i) => `<li><span><i aria-hidden="true">${String(i + 1).padStart(2, "0")}</i>${esc(list.name)}${list.main ? "<small>主文件夹</small>" : ""}</span><b>${list.trackIds.length} 首</b></li>`).join("")}</ol>`
+    : `<p class="settings-empty">${main ? "扫描后在这里列出歌单" : "选择主文件夹并扫描后在这里列出歌单"}</p>`;
+  const demoButton = library.albums.length ? "" : '<button data-action="demo" class="settings-link">查看演示歌单<span aria-hidden="true">↗</span></button>';
+  return `${playlists}${demoButton}${earlier > 0 ? `<p class="settings-note">旧版本保存的另外 ${earlier} 个音乐文件夹不再扫描或显示。</p>` : ""}`;
 }
-/** Its 封面显示 section, with the demonstration while there is no song. */
-function libraryCoversMarkup() {
-  return `<h3>封面显示</h3><p>方形、竖版、横版封面均保持原始比例，完整放入卡片正面。没有封面时显示占位，不使用其他专辑的图片。</p>${!library.albums.length ? '<button data-action="demo" class="text-button">查看演示歌单 ↗</button>' : ""}`;
-}
-/** The parts of the library panel that show the library, and what each last showed. */
+/** The parts of 歌单 that show the library, and what each last showed. */
 const libraryPanelParts: [string, () => string][] = [
-  ["#library-metrics", libraryMetricsMarkup], ["#library-lists", libraryListsMarkup], ["#library-covers", libraryCoversMarkup],
+  ["#library-metrics", libraryMetricsMarkup], ["#library-lists", libraryListsMarkup],
 ];
 let libraryPanelShown = new Map<string, string>();
 /**
- * The library panel for a library that changed while it is open (a scan's counts and playlists;
- * the page is not loaded again after a scan): only a part whose words changed is written again, in
- * place. The fields (the folder being typed, the lookups' section) are never written again, so what
- * is typed, the focus and the caret stay, also while an online lookup changes the library at every
- * poll. A focused button a part no longer has (the demonstration's, once there are songs) hands the
- * focus to 重新扫描.
+ * 音乐库 for a library that changed while it is open (a scan's counts and playlists; the page is not
+ * loaded again after a scan): only a part whose words changed is written again, in place. The
+ * fields (the folder being typed, the lookups' section) are never written again, so what is typed,
+ * the focus and the caret stay, also while an online lookup changes the library at every poll. A
+ * focused button a part no longer has (the demonstration's, once there are songs) hands the focus
+ * to 歌单's name in the index.
  */
 function refreshLibraryPanel() {
   for (const [selector, markup] of libraryPanelParts) {
@@ -3757,19 +3909,44 @@ function refreshLibraryPanel() {
     libraryPanelShown.set(selector, next);
     const focused = node.contains(document.activeElement);
     node.innerHTML = next;
-    if (focused) document.querySelector<HTMLElement>('#panel-body [data-action="rescan"]')?.focus({ preventScroll: true });
+    if (focused && !node.contains(document.activeElement))
+      document.querySelector<HTMLElement>('#music-panel-root [data-panel-tab="lists"]')?.focus({ preventScroll: true });
   }
+  // The demonstration's button comes and goes with the songs.
+  syncPanelStop();
   updateScanStatus();
 }
+/**
+ * 搜索 (the panels' redesign, 2026-10-24): its index is the playlists, a filter (全部 first, radios),
+ * its count beside the field in the head, the songs found below. Every song is its own case, so a
+ * result opens that song's details (it never plays). Shown while nothing is typed too.
+ */
 function renderSearchPanel() {
-  $("#panel-body").innerHTML =
-    `<input class="album-search" id="album-search" type="search" placeholder="歌曲、歌手、专辑、歌单…" aria-label="搜索歌曲"><div class="genre-filters"><button data-filter="" class="active">全部</button>${genres
-      .filter((g) => albums.some((a) => a.genreId === g.id))
-      .map((g) => `<button data-filter="${esc(g.id)}">${esc(g.name)}</button>`)
-      .join("")}</div><div id="album-results"></div>`;
+  const lists = genres.filter((g) => albums.some((a) => a.genreId === g.id));
+  if (searchGenre && !lists.some((g) => g.id === searchGenre)) searchGenre = "";
+  $(".settings-tabs").innerHTML = [{ id: "", name: "全部" }, ...lists].map(({ id, name }, i) => {
+    const on = id === searchGenre;
+    return `<button role="radio" data-filter="${esc(id)}" aria-checked="${on}" tabindex="${on ? 0 : -1}" style="--i: ${Math.min(i, 12)}"><span aria-hidden="true">${String(i + 1).padStart(2, "0")}</span><span class="filter-name">${esc(name)}</span></button>`;
+  }).join("");
   renderSearchResults();
 }
 let searchGenre = "";
+/** 搜索's filter set to a playlist (or 全部, ""), from its index. */
+function setSearchFilter(id: string) {
+  if (id === searchGenre) return;
+  searchGenre = id;
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-filter]")) {
+    const on = button.dataset.filter === id;
+    button.setAttribute("aria-checked", String(on));
+    button.tabIndex = on ? 0 : -1;
+  }
+  renderSearchResults();
+  document.querySelector(".settings-body")?.scrollTo({ top: 0 });
+  // A playlist's results rise in, also after typing.
+  delete $("#album-results").dataset.typed;
+  playPanelMotion("reveal");
+  effects.play("ui-tick");
+}
 /** At most this many results are drawn (a large library lists every song while nothing is typed). */
 const SEARCH_RESULTS = 300;
 function renderSearchResults() {
@@ -3785,12 +3962,15 @@ function renderSearchResults() {
     const album = localShelf.songs.get(a.id)?.track.album ?? "";
     if (query && !`${a.title} ${a.artist} ${album} ${genreName(a.genreId)}`.toLocaleLowerCase().includes(query)) continue;
     if (++found > SEARCH_RESULTS) continue;
-    results.push(`<button class="album-result song-result" data-album="${esc(a.id)}" aria-label="定位歌曲 ${esc(a.title)}，${esc(genreName(a.genreId))}"><span class="result-cover">${cover(a)}</span><span class="result-copy"><strong>${esc(a.title)}</strong><small>${esc([a.artist, album, genreName(a.genreId)].filter(Boolean).join(" · "))}</small></span><em>歌曲</em><i>↗</i></button>`);
+    // Its playlist only while all are shown (the filter names it otherwise).
+    const where = searchGenre ? "" : genreName(a.genreId);
+    results.push(`<button class="album-result song-result" data-album="${esc(a.id)}" aria-label="定位歌曲 ${esc(a.title)}，${esc(genreName(a.genreId))}"><span class="result-cover">${cover(a)}</span><span class="result-copy"><strong>${esc(a.title)}</strong><small>${esc([a.artist, album, where].filter(Boolean).join(" · "))}</small></span><i aria-hidden="true">↗</i></button>`);
   }
-  if (found > SEARCH_RESULTS) results.push(`<div class="no-results">还有 ${found - SEARCH_RESULTS} 首，请输入更多文字缩小范围。</div>`);
-  $("#album-results").innerHTML = results.length
-    ? results.join("")
-    : '<div class="no-results">没有找到歌曲。</div>';
+  if (found > SEARCH_RESULTS) results.push(`<p class="no-results">还有 ${found - SEARCH_RESULTS} 首，输入更多文字缩小范围</p>`);
+  const list = $("#album-results");
+  list.innerHTML = results.length ? results.join("") : '<p class="no-results">没有找到</p>';
+  [...list.children].forEach((row, i) => (row as HTMLElement).style.setProperty("--i", String(Math.min(i, 10))));
+  setText($("#search-count"), `${found} 首`);
 }
 /**
  * The settings panel's sections (design A, the owner, 2026-10-24, chosen from three: "A"): an index
@@ -3808,40 +3988,9 @@ let settingsSection: SettingsSection = "look";
 function settingsSections() {
   return SETTINGS_SECTIONS.filter(([id]) => !playerCurrent || (id !== "sound" && id !== "notes"));
 }
-/** The open panel's index (openPanel wrote its frame), then the chosen section. */
-function renderSettingsPanel() {
-  $(".settings-tabs").innerHTML = settingsSections()
-    .map(([id, name], i) => `<button role="tab" id="settings-tab-${id}" data-action="settings-tab" data-settings-tab="${id}" aria-selected="false" aria-controls="settings-tabpanel" tabindex="-1" style="--i: ${i}"><span aria-hidden="true">${String(i + 1).padStart(2, "0")}</span>${name}</button>`)
-    .join("");
-  settingsLayout?.disconnect();
-  settingsLayout = new ResizeObserver(syncSettingsOrientation);
-  settingsLayout.observe($(".settings-scrim"));
-  renderSettingsSection();
-}
-/** Watches the settings panel's width while it is open (syncSettingsOrientation). */
-let settingsLayout: ResizeObserver | undefined;
-/**
- * The index is a column, or rows of words in a narrow window (music.css, a container query that
- * cannot set an attribute): its aria-orientation follows what is drawn.
- */
-function syncSettingsOrientation() {
-  const tabs = document.querySelector<HTMLElement>(".settings-tabs");
-  if (tabs) tabs.setAttribute("aria-orientation", getComputedStyle(tabs).flexDirection === "row" ? "horizontal" : "vertical");
-}
-/** The chosen section under its heading; each row knows its place for the rise (playSettingsMotion). */
-function renderSettingsSection() {
-  const sections = settingsSections();
-  if (!sections.some(([id]) => id === settingsSection)) settingsSection = sections[0][0];
-  const at = sections.findIndex(([id]) => id === settingsSection);
-  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]")) {
-    const on = button.dataset.settingsTab === settingsSection;
-    button.setAttribute("aria-selected", String(on));
-    button.tabIndex = on ? 0 : -1;
-  }
-  $(".settings-count").textContent = `${String(at + 1).padStart(2, "0")} / ${String(sections.length).padStart(2, "0")}`;
-  const body = $("#settings-tabpanel");
-  body.setAttribute("aria-labelledby", `settings-tab-${settingsSection}`);
-  const heading = (extra = "") => `<div class="settings-heading"><h3>${sections[at][1]}</h3>${extra}</div>`;
+/** The chosen section of 设置, under its heading (renderPanelSection). */
+function renderSettingsSection(body: HTMLElement, name: string) {
+  const heading = (extra = "") => `<div class="settings-heading"><h3>${name}</h3>${extra}</div>`;
   if (settingsSection === "keys") {
     body.innerHTML = heading('<button class="settings-link" data-action="shortcuts-reset-all">全部恢复默认</button>') + shortcutsMarkup();
     renderShortcutRows();
@@ -3849,42 +3998,142 @@ function renderSettingsSection() {
   if (settingsSection === "quality") updateQuality();
   if (settingsSection === "notes") updateIntroductionStatus();
   body.querySelectorAll<HTMLInputElement>("input[type=range]").forEach(syncRange);
-  [...body.children].forEach((row, i) => (row as HTMLElement).style.setProperty("--i", String(Math.min(i, 10))));
 }
-function setSettingsSection(next: SettingsSection) {
-  if (next === settingsSection) return;
+/**
+ * The panels with an index of sections (all but 搜索, whose index is a filter: renderSearchPanel),
+ * each one's sections and the one shown; each is kept while the page lives.
+ */
+type IndexedPanel = "settings" | "sources" | "library";
+const isIndexed = (kind: Panel): kind is IndexedPanel => kind === "settings" || kind === "sources" || kind === "library";
+function panelSections(kind: IndexedPanel): [string, string][] {
+  return kind === "settings" ? settingsSections() : kind === "sources" ? sourcesSections() : LIBRARY_SECTIONS;
+}
+function shownSection(kind: IndexedPanel): string {
+  return kind === "settings" ? settingsSection : kind === "sources" ? sourcesSection : librarySection;
+}
+function keepSection(kind: IndexedPanel, id: string) {
+  if (kind === "settings") settingsSection = id as SettingsSection;
+  else if (kind === "sources") sourcesSection = id as SourcesSection;
+  else librarySection = id as LibrarySection;
+}
+/** The sections the index shows, as written (syncSourcesIndex: 网易云 comes and goes). */
+let panelIndexShown = "";
+/** The open panel's index (openPanel wrote its frame), the shown section's name chosen. */
+function renderPanelIndex() {
+  if (!isIndexed(panel)) return;
+  const sections = panelSections(panel);
+  panelIndexShown = sections.map(([id]) => id).join();
+  $(".settings-tabs").innerHTML = sections
+    .map(([id, name], i) => `<button role="tab" id="panel-tab-${id}" data-action="panel-tab" data-panel-tab="${id}" aria-selected="false" aria-controls="panel-tabpanel" tabindex="-1" style="--i: ${i}"><span aria-hidden="true">${String(i + 1).padStart(2, "0")}</span>${name}</button>`)
+    .join("");
+  markPanelTab();
+  writePanelCount();
+  if (panel === "sources" && externalMedia) syncSourcesAlert();
+  syncPanelOrientation();
+}
+/** "02 / 03" above the section: where the shown one is in the index as it is now (网易云 comes and goes). */
+function writePanelCount() {
+  if (!isIndexed(panel)) return;
+  const sections = panelSections(panel), at = sections.findIndex(([id]) => id === shownSection(panel as IndexedPanel));
+  if (at >= 0) $(".settings-count").textContent = `${String(at + 1).padStart(2, "0")} / ${String(sections.length).padStart(2, "0")}`;
+}
+/** The shown section's name is the chosen tab, and the one Tab reaches. */
+function markPanelTab() {
+  if (!isIndexed(panel)) return;
+  const chosen = shownSection(panel);
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-panel-tab]")) {
+    const on = button.dataset.panelTab === chosen;
+    button.setAttribute("aria-selected", String(on));
+    button.tabIndex = on ? 0 : -1;
+  }
+}
+/** Watches the open panel's width (syncPanelOrientation). */
+let panelLayout: ResizeObserver | undefined;
+/**
+ * The index is a column, or rows of words in a narrow window (music.css, a container query that
+ * cannot set an attribute): its aria-orientation follows what is drawn.
+ */
+function syncPanelOrientation() {
+  const tabs = document.querySelector<HTMLElement>(".settings-tabs");
+  if (tabs) tabs.setAttribute("aria-orientation", getComputedStyle(tabs).flexDirection === "row" ? "horizontal" : "vertical");
+}
+/** The chosen section under its heading; each row knows its place for the rise (playPanelMotion). */
+function renderPanelSection() {
+  if (!isIndexed(panel)) return;
+  const kind = panel, sections = panelSections(kind);
+  if (!sections.some(([id]) => id === shownSection(kind))) keepSection(kind, sections[0][0]);
+  const chosen = shownSection(kind), at = sections.findIndex(([id]) => id === chosen);
+  markPanelTab();
+  writePanelCount();
+  const body = $("#panel-tabpanel");
+  body.setAttribute("aria-labelledby", `panel-tab-${chosen}`);
+  if (kind === "settings") renderSettingsSection(body, sections[at][1]);
+  else if (kind === "sources") renderSourcesSection(body, sections[at][1]);
+  else renderLibrarySection(body, sections[at][1]);
+  [...body.children].forEach((row, i) => (row as HTMLElement).style.setProperty("--i", String(Math.min(i, 10))));
+  syncPanelStop();
+}
+/**
+ * A section with no control of its own (歌单 once there are songs, 关于) is itself a Tab stop, as the
+ * tabs pattern has it, so the keys can scroll a long one (PageDown, the arrows).
+ */
+function syncPanelStop() {
+  const body = document.querySelector<HTMLElement>("#panel-tabpanel");
+  if (!body) return;
+  if (!body.querySelector("button, input, select, textarea, a[href], summary")) {
+    body.tabIndex = 0;
+    return;
+  }
+  // A control came into a section that had the focus itself (歌单's demonstration, once the songs
+  // went): the focus stays in the dialog, on the section's name.
+  const had = document.activeElement === body;
+  body.removeAttribute("tabindex");
+  if (had) document.querySelector<HTMLElement>('#music-panel-root [role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
+}
+function setPanelSection(next: string) {
+  if (!isIndexed(panel) || next === shownSection(panel) || !panelSections(panel).some(([id]) => id === next)) return;
+  // The user's own choice: a section that went away under them is not brought back over it.
+  sourcesSectionAway = undefined;
   endShortcutCapture();
-  settingsSection = next;
-  renderSettingsSection();
+  keepSection(panel, next);
+  renderPanelSection();
   document.querySelector(".settings-body")?.scrollTo({ top: 0 });
-  playSettingsMotion("reveal");
+  playPanelMotion("reveal");
   effects.play("ui-tick");
 }
-/** The arrows, Home and End on the index move between its sections (and show them), as tabs do. */
-function settingsTabKey(e: KeyboardEvent) {
-  const tab = (e.target as HTMLElement).closest?.<HTMLButtonElement>("[data-settings-tab]");
-  if (!tab || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return false;
+/** The arrows, Home and End on the index move between its sections or filters (and show them), as tabs and radios do. */
+function panelTabKey(e: KeyboardEvent) {
+  const item = (e.target as HTMLElement).closest?.<HTMLButtonElement>(".settings-tabs > button");
+  if (!item || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return false;
   e.preventDefault();
-  const tabs = [...document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]")];
-  const at = tabs.indexOf(tab), step = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1;
-  const next = tabs[e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : (at + step + tabs.length) % tabs.length];
-  setSettingsSection(next.dataset.settingsTab as SettingsSection);
+  const items = [...document.querySelectorAll<HTMLButtonElement>(".settings-tabs > button")];
+  const at = items.indexOf(item), step = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1;
+  const next = items[e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (at + step + items.length) % items.length];
+  if (next.dataset.filter !== undefined) setSearchFilter(next.dataset.filter);
+  else setPanelSection(next.dataset.panelTab!);
   next.focus();
+  // A narrow window's playlists scroll sideways: the one moved to is shown whole (focus alone does
+  // not scroll a partly shown one).
+  next.scrollIntoView({ block: "nearest", inline: "nearest" });
   return true;
 }
-let settingsEnterTimer = 0,
-  settingsRevealTimer = 0;
+let panelEnterTimer = 0,
+  panelRevealTimer = 0,
+  /** When the open panel's entrance began (搜索's typing: renderSearchResults' rows). */
+  panelEnterAt = -Infinity;
 /**
- * 设置's motion (music.css): "enter" (.settings-panel[data-motion]) draws the four corner squares,
- * then the sheet, the index and the rows (under a second); "reveal" (#settings-tabpanel[data-reveal])
- * lets a chosen section's rows rise in, also while the entrance is still drawing the rest. Each is
- * taken away once played, so rows written again later (快捷键's) do not play it again; never when reduced.
+ * A panel's motion (music.css): "enter" (.settings-panel[data-motion]) draws the four corner
+ * squares, then the sheet, the index and the rows (under a second); "reveal" (.panel-rows[data-reveal])
+ * lets a chosen section's rows (搜索's results for a filter) rise in, also while the entrance is still
+ * drawing the rest. Each is taken away once played, so rows written again later (快捷键's, 搜索's while
+ * typing) do not play it again; never when reduced.
  */
-function playSettingsMotion(kind: "enter" | "reveal") {
-  const node = document.querySelector<HTMLElement>(kind === "enter" ? ".settings-panel" : "#settings-tabpanel");
+function playPanelMotion(kind: "enter" | "reveal") {
+  const node = document.querySelector<HTMLElement>(kind === "enter" ? ".settings-panel" : ".settings-panel .panel-rows");
   if (!node) return;
   const key = kind === "enter" ? "motion" : "reveal";
-  clearTimeout(kind === "enter" ? settingsEnterTimer : settingsRevealTimer);
+  clearTimeout(kind === "enter" ? panelEnterTimer : panelRevealTimer);
+  if (kind === "enter") panelEnterAt = performance.now();
   if (preferences.reduced) {
     delete node.dataset[key];
     return;
@@ -3894,14 +4143,14 @@ function playSettingsMotion(kind: "enter" | "reveal") {
     // A section chosen during the entrance keeps its rise until the entrance has ended: both play the
     // same rise, and taking this one away first would hand the rows back to the entrance's timing.
     if (kind === "reveal" && document.querySelector<HTMLElement>(".settings-panel")?.dataset.motion === "enter") {
-      settingsRevealTimer = window.setTimeout(done, 200);
+      panelRevealTimer = window.setTimeout(done, 200);
       return;
     }
     delete node.dataset[key];
   };
   const timer = window.setTimeout(done, kind === "enter" ? 1100 : 700);
-  if (kind === "enter") settingsEnterTimer = timer;
-  else settingsRevealTimer = timer;
+  if (kind === "enter") panelEnterTimer = timer;
+  else panelRevealTimer = timer;
 }
 /** A slider of 设置: its line inked up to the value, and a volume's number beside it (画质's say their % themselves). */
 function syncRange(input: HTMLInputElement) {
@@ -4281,32 +4530,49 @@ document.addEventListener("click", (e) => {
     });
     return;
   }
+  // 搜索's index: a playlist to search in.
   if (target.dataset.filter !== undefined) {
-    searchGenre = target.dataset.filter;
-    document
-      .querySelectorAll("[data-filter]")
-      .forEach((b) =>
-        b.classList.toggle(
-          "active",
-          (b as HTMLElement).dataset.filter === searchGenre,
-        ),
-      );
-    renderSearchResults();
+    setSearchFilter(target.dataset.filter);
     return;
   }
   const action = target.dataset.action;
   if (["library", "search", "settings", "sources"].includes(action || "")) {
     searchGenre = "";
+    // A notice's button opens the panel on the section it is about (网易云, for the debugging port).
+    const section = target.dataset.section;
+    if (section && isIndexed(action as Panel)) keepSection(action as IndexedPanel, section);
     openPanel(action as Panel);
     return;
   }
   switch (action) {
-    // 设置's index and its 快捷键 (shortcutsMarkup).
-    case "settings-tab": {
-      const section = SETTINGS_SECTIONS.find(([id]) => id === target.dataset.settingsTab);
-      if (section) setSettingsSection(section[0]);
+    // A panel's index (and 设置's 快捷键 below: shortcutsMarkup).
+    case "panel-tab":
+      setPanelSection(target.dataset.panelTab ?? "");
+      break;
+    // 说明: a consent folded under its switch (panel-rows.ts), and kept open while the page lives.
+    case "consent-note": {
+      const note = target.getAttribute("aria-controls") ?? "";
+      const open = target.getAttribute("aria-expanded") !== "true";
+      if (open) openNotes.add(note);
+      else openNotes.delete(note);
+      target.setAttribute("aria-expanded", String(open));
+      const node = document.getElementById(note);
+      if (node) node.hidden = !open;
       break;
     }
+    case "pick-folder":
+      void (async () => {
+        try {
+          const typed = document.querySelector<HTMLInputElement>("#music-root")?.value.trim();
+          const [path] = await chooseMusicFolders(typed || undefined);
+          const input = document.querySelector<HTMLInputElement>("#music-root");
+          if (!input || !path) return;
+          input.value = libraryRootTyped = path;
+        } catch (error) {
+          notify((error as Error).message);
+        }
+      })();
+      break;
     case "shortcut-capture": {
       const slot = target.dataset.shortcutSlot as ShortcutSlot;
       if (shortcutCapture?.slot === slot) endShortcutCapture("已取消");
@@ -4460,18 +4726,7 @@ document.addEventListener("click", (e) => {
       void queryIntroductions();
       break;
     case "save-online":
-      void (async () => {
-        try {
-          await saveOnlineConfig({
-            musicBrainzContact:
-              $<HTMLInputElement>("#metadata-contact").value.trim(),
-            onlineEnabled: $<HTMLInputElement>("#online-enabled").checked,
-          });
-          notify("资料库设置已保存。可以开始补充专辑资料。");
-        } catch (error) {
-          notify((error as Error).message);
-        }
-      })();
+      void saveOnline($<HTMLInputElement>("#metadata-contact").value.trim(), $<HTMLInputElement>("#online-enabled").checked);
       break;
     case "demo":
       if (playerCurrent) break;
@@ -4508,7 +4763,15 @@ document.addEventListener("input", (e) => {
     });
     savePrefs();
   }
-  if (el.id === "album-search") renderSearchResults();
+  if (el.id === "album-search") {
+    // Results written while typing do not rise in again (music.css .panel-rows[data-typed]), once the
+    // entrance has shown the panel (rows typed before still rise with it), nor with a filter's rise.
+    const results = $("#album-results");
+    if (performance.now() - panelEnterAt >= 280) results.dataset.typed = "";
+    delete results.dataset.reveal;
+    renderSearchResults();
+  }
+  if (el.id === "music-root") libraryRootTyped = el.value;
   // The details' timelines: the fill follows a drag at once (the seek is sent on change).
   if ((el.id === "external-seek" || el.id === "local-seek") && el.dataset.known === "true") syncSeekFill(el, true);
   if (el.id === "volume") {
@@ -4532,6 +4795,11 @@ document.addEventListener("change", (e) => {
   }
   if (el.id === "local-seek") {
     player?.seek(Number(el.value));
+    return;
+  }
+  // 在线资料's switch is saved at once (with the contact saved before).
+  if (el.id === "online-enabled") {
+    void saveOnline(savedOnline.musicBrainzContact ?? "", el.checked, el);
     return;
   }
   if (externalMedia && el.id === "netease-queue") {
@@ -4598,7 +4866,7 @@ document.addEventListener("change", (e) => {
       songTransition.finish();
       panelTransition?.finish();
       document.querySelector(".settings-panel")?.removeAttribute("data-motion");
-      document.querySelector("#settings-tabpanel")?.removeAttribute("data-reveal");
+      document.querySelector(".settings-panel .panel-rows")?.removeAttribute("data-reveal");
     }
     syncSelectionMotion();
     scene?.setReduced(el.checked);
@@ -4645,7 +4913,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (panel) {
-    if (settingsTabKey(e)) return;
+    if (panelTabKey(e)) return;
     if (e.key === "Tab") {
       const items = panelTabStops();
       if (!items.length) return;
@@ -4996,7 +5264,7 @@ async function start() {
   } catch (error) {
     console.error(error);
     $("#music-loading").innerHTML =
-      `<strong>三维资源未能加载</strong><small>${esc((error as Error).message)}</small><button data-action="library">检查音乐库</button>`;
+      `<strong>三维资源未能加载</strong><small>${esc((error as Error).message)}</small><button data-action="library" data-section="folder">检查音乐库</button>`;
   }
 }
 // The 播放器 panel a player was chosen in is open again on the page that shows that player, at

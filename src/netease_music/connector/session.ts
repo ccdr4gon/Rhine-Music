@@ -9,7 +9,7 @@ import {
 } from "./ports";
 import { PlaybackClock } from "./playback-clock";
 import { NETEASE_NAME, isNeteaseSource } from "./player";
-import { playlistSummary, queueControlStatus } from "./settings";
+import { playlistSummary, queueControlStatus, type PortState, type QueueControl } from "./settings";
 
 /** NetEase's switches, saved with the app's other preferences (rhine-music-preferences). */
 export interface NeteasePreferences {
@@ -176,8 +176,19 @@ export class NeteaseSession {
   private current() {
     const media = this.host.media;
     if (!media) return false;
-    if (media.selected) return isNeteaseSource(media.selected);
+    // The source seen last is held at once (a player just chosen, before any poll of the session's).
+    if (media.selected) {
+      this.heldSource = isNeteaseSource(media.selected) ? media.selected.id : undefined;
+      return !!this.heldSource;
+    }
     return media.unreadable && !!this.heldSource && this.heldSource === media.selectedId;
+  }
+  /**
+   * NetEase is the selected source, or was while a snapshot cannot be read (current): the 播放器
+   * panel keeps its 网易云 section through one unreadable read.
+   */
+  get isCurrent() {
+    return this.current();
   }
   /** NetEase's queue is shown only for a selected NetEase source after the user opted in. */
   shownQueue() {
@@ -201,13 +212,19 @@ export class NeteaseSession {
   }
   /** The key the user gave 播放选中的歌, as the port's status names it (设置 → 快捷键; "" for none). */
   playKey = "P";
-  queueControl() {
+  queueControl(): QueueControl {
     const control = { available: this.debugState.available };
     const status = this.debugRestarting ? "正在以调试端口重新启动网易云…"
       : !this.debugProbed ? "正在检测网易云调试端口…"
       : this.debugError || queueControlStatus(control, this.debugState, this.playKey);
+    // The same states in a word or two, for the port's row (its sentence is under 说明).
+    const state: PortState = this.debugRestarting ? "restarting"
+      : !this.debugProbed ? "probing"
+      : this.debugError ? (this.debugError === PORT_NO_REPLY ? "noreply" : "error")
+      : !control.available ? "closed"
+      : this.debugState.mode === "playFm" ? "fm" : "on";
     // Offer a restart only once a probe has really found the port closed.
-    return { ...control, status, restart: this.debugProbed && !control.available && !this.debugError && !this.debugRestarting };
+    return { ...control, status, state, restart: this.debugProbed && !control.available && !this.debugError && !this.debugRestarting };
   }
   forgetQueueJumps() {
     this.queueJump = undefined;
