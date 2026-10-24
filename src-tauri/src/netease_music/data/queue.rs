@@ -106,8 +106,10 @@ pub fn read_from(path: &Path, known: Option<&str>, with_source: bool) -> Result<
         return Ok(QueueReply::Unchanged { stamp });
     }
     let bytes = std::fs::read(path).map_err(|error| format!("无法读取网易云播放队列：{error}"))?;
-    // NetEase may be rewriting the file; the caller keeps its queue and asks again.
+    // NetEase may be rewriting the file; the caller keeps its queue and asks again. A lone half of a
+    // character anywhere in it (broken text in any field) costs that character, not the queue.
     let value: Value = serde_json::from_slice(&bytes)
+        .or_else(|_| serde_json::from_slice(&super::super::mend_surrogates(&bytes)))
         .map_err(|_| "网易云播放队列正在更新，稍后重试".to_string())?;
     let (tracks, truncated) = parse(&value);
     Ok(QueueReply::Queue {
@@ -321,6 +323,21 @@ mod tests {
         assert_eq!(read_from(&path, Some(&stamp), true).unwrap(), QueueReply::Unchanged { stamp: stamp.clone() });
         std::fs::write(&path, b"{\"list\": [").unwrap();
         assert!(read_from(&path, Some(&stamp), true).unwrap_err().contains("正在更新"));
+    }
+
+    #[test]
+    fn a_lone_half_of_a_character_costs_that_character_not_the_queue() {
+        // As JavaScript writes a string with a lone surrogate. Every song here is made up.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playingList");
+        let file = r#"{"list": [{"displayOrder": 0, "localTrack": {"path": "D:/x\ud800y.flac"}, "track": {"id": 1, "name": "One\ude00"}},
+            {"displayOrder": 1, "track": {"id": 2, "name": "Two \\ud800 \uD83D\uDE00"}}]}"#;
+        std::fs::write(&path, file).unwrap();
+        let QueueReply::Queue { tracks, .. } = read_from(&path, None, false).unwrap() else { panic!() };
+        let titles: Vec<_> = tracks.iter().map(|track| track.title.as_str()).collect();
+        assert_eq!(titles, ["One\u{FFFD}", "Two \\ud800 \u{1F600}"], "an escaped backslash stays text");
+        std::fs::write(&path, &file[..file.len() - 4]).unwrap();
+        assert!(read_from(&path, None, false).unwrap_err().contains("正在更新"), "a half-written file is still one");
     }
 
     /// An item as NetEase saves it when the song was queued from a playlist.

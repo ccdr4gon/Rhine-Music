@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import { HalfFloatType, Group, Mesh, MeshPhysicalMaterial, MeshLambertMaterial, PerspectiveCamera, PlaneGeometry, Scene, Texture } from 'three';
 import { multisampleCount, qualityPresets } from '../src/render-quality.ts';
 import { createAlbumPrintMaterial } from '../src/music-model.ts';
+import { createArchiveLighting } from '../src/archive-lighting.ts';
 import {
   MultisampleRenderPass, createQualityComposer, updateSceneSamples, resizeQuality, viewerUsesComposer, applyAlbumPrintCoverage,
 } from '../src/quality-renderer.ts';
@@ -243,4 +247,62 @@ test('prints loaded after initial quality setup adopt the already configured buf
     assert.equal(print.alphaToCoverage, supported);
     pass.dispose();
   }
+});
+
+test('a restored context renders the studio environment again, which three cannot upload by itself', () => {
+  // The environment is a PMREM render target: its pixels exist only on the GPU, so a restored
+  // context would bind it empty (every surface without its studio light, the shelf's prints blank).
+  const { renderer, lose, restore } = rendererFixture();
+  const scene = new Scene();
+  const built = [];
+  const environment = (owner) => {
+    assert.equal(owner, renderer, 'rendered with the renderer whose context came back');
+    const texture = new Texture();
+    // Its GL texture went with the lost context; deleting it in the new one is an error.
+    texture.addEventListener('dispose', () => assert.fail('a lost environment is dropped, not disposed'));
+    built.push(texture);
+    return texture;
+  };
+  createArchiveLighting(renderer, scene, 'baseline', environment);
+  assert.deepEqual([built.length, scene.environment], [1, built[0]]);
+  const intensity = scene.environmentIntensity, lights = scene.children.length;
+  lose(); restore();
+  assert.deepEqual([built.length, scene.environment], [2, built[1]], 'the scene lights with the new one');
+  lose(); restore();
+  assert.deepEqual([built.length, scene.environment], [3, built[2]], 'after every restore');
+  assert.deepEqual([scene.environmentIntensity, scene.children.length], [intensity, lights], 'nothing else is added or changed');
+  // three's own listener, added when the renderer is made, sets the new context up first.
+  for (const file of ['../src/scene.ts', '../src/model-viewer.ts']) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+    assert.ok(source.indexOf('new THREE.WebGLRenderer(') < source.indexOf('createArchiveLighting(this.renderer'), `${file}: lighting after the renderer`);
+  }
+});
+
+// The scene's own passes (scene.ts needs a browser to load): read as written, against three's.
+const sceneSource = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const threeSSAO = readFileSync(path.join(path.dirname(createRequire(import.meta.url).resolve('three')), '../examples/jsm/postprocessing/SSAOPass.js'), 'utf8');
+const sourceBody = (source, start, end) => {
+  const from = source.indexOf(start);
+  assert.ok(from >= 0, `${start} is in the source`);
+  return source.slice(from, source.indexOf(end, from + start.length));
+};
+
+test('ambient occlusion shades with the lens of the frame it draws, whatever was resized before', () => {
+  // three copies the camera's projection into the pass only when the pass is made or sized...
+  assert.equal(threeSSAO.match(/uniforms\[ 'cameraProjectionMatrix' \]\.value\.copy\( this\.camera\.projectionMatrix \)/g)?.length, 2);
+  assert.doesNotMatch(sourceBody(threeSSAO, '\trender( renderer', '\n\t}\n'), /cameraProjectionMatrix/);
+  // ...while the camera's lens changes every frame (shelf, details, song scene) and its aspect with
+  // the window, after the pass is sized. The scene's pass takes this frame's lens before drawing.
+  const render = sourceBody(sceneSource, 'class ShellAOPass extends SSAOPass {', '\n}\n');
+  const copy = render.search(/ssao\.cameraProjectionMatrix\.value\.copy\(this\.camera\.projectionMatrix\);\n\s*ssao\.cameraInverseProjectionMatrix\.value\.copy\(this\.camera\.projectionMatrixInverse\);/);
+  assert.ok(copy >= 0 && copy < render.indexOf('super.render('), 'the lens and its inverse, before the pass draws');
+  assert.match(render, /const ssao = this\.ssaoMaterial\.uniforms;/);
+  assert.doesNotMatch(sceneSource, /aoProjection|restoringBuffers/, 'no stale copy is kept for a restored window either');
+});
+
+test('a replaced ambient occlusion pass frees its material and noise texture, which three\'s dispose leaves', () => {
+  const dispose = sourceBody(threeSSAO, '\tdispose() {', '\n\t}\n');
+  assert.doesNotMatch(dispose, /ssaoMaterial|noiseTexture/, 'three still leaves them (if it frees them now, this is redundant)');
+  const replace = sourceBody(sceneSource, '    if (quality.aoSamples && quality.aoSamples !== this.aoKernelSize) {', '\n    }\n');
+  assert.match(replace, /old\.dispose\(\);\n(\s*\/\/.*\n)*\s*old\.ssaoMaterial\.dispose\(\);\n\s*old\.noiseTexture\.dispose\(\);/);
 });

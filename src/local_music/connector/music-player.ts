@@ -55,6 +55,10 @@ export class MusicPlayer {
   private gestureReceived = false;
   private disposed = false;
   private pendingSeek: number | null = null;
+  /** The song the player moved on to by itself (the one before it ended, or could not be read). */
+  private continued?: string;
+  /** Songs skipped in a row because they could not be read (failSong). */
+  private skips = 0;
 
   constructor(
     options: {
@@ -134,6 +138,11 @@ export class MusicPlayer {
   }
 
   async play(id: string, tracks?: readonly MusicTrack[]): Promise<void> {
+    return this.start(id, tracks, false);
+  }
+
+  /** `continued`: the player moves on to this song by itself (see failSong). */
+  private async start(id: string, tracks: readonly MusicTrack[] | undefined, continued: boolean): Promise<void> {
     if (this.disposed) return;
     const queue = tracks ? uniqueTracks(tracks) : this.value.queue;
     const index = queue.findIndex((track) => track.id === id);
@@ -146,6 +155,8 @@ export class MusicPlayer {
     // Updating the queue in a play request keeps cross-album switches in the same fade.
     this.value.queue = queue;
     const request = ++this.operation;
+    this.continued = continued ? id : undefined;
+    if (!continued) this.skips = 0;
     this.cancelSongFade();
     const resume =
       this.songTrackId === id && this.song && !this.song.ended
@@ -210,7 +221,7 @@ export class MusicPlayer {
     } catch (error) {
       if (request !== this.operation || this.disposed || this.song !== audio)
         return;
-      this.fail(this.playbackError(track, error));
+      this.failSong(track, error, audio);
     }
   }
 
@@ -229,6 +240,12 @@ export class MusicPlayer {
       await this.reconcileBgm();
       return;
     }
+    // A paused song at its very end (seeked there while paused, or paused as it ended) is over: the
+    // playlist goes on as when it ends playing (play() would start it again from 0:00).
+    if (this.transport === "paused" && this.song?.ended && this.songTrackId === this.value.currentTrack?.id) {
+      this.finishSong();
+      return;
+    }
     const track = this.value.currentTrack ?? this.value.queue[0];
     if (track) await this.play(track.id);
   }
@@ -242,7 +259,10 @@ export class MusicPlayer {
 
   async previous(): Promise<void> {
     if (this.disposed) return;
-    if (this.value.currentTime > 3 && this.song) {
+    // Back to the start of the song while it is loaded; once the playlist has ended (its last song
+    // is kept, finished), the song before it plays.
+    const live = this.transport === "playing" || this.transport === "paused" || this.transport === "loading";
+    if (live && this.value.currentTime > 3 && this.song) {
       this.seek(0);
       return;
     }
@@ -365,10 +385,18 @@ export class MusicPlayer {
     });
     audio.addEventListener("playing", () => {
       if (!active() || audio.paused) return;
-      if (this.transport !== "loading" && this.transport !== "playing") {
+      if (this.transport === "paused") {
+        // Resumed from outside the page (the system's media keys or media controls play the element
+        // itself, as they pause it: the "pause" listener follows that), so this follows it too. The
+        // page's own resume goes through play(), which sets "loading" first.
+        ++this.operation;
+        this.cancelSongFade();
+        this.setSongGain(1);
+      } else if (this.transport !== "loading" && this.transport !== "playing") {
         audio.pause();
         return;
       }
+      this.skips = 0;
       this.transport = "playing";
       this.value.playing = true;
       this.value.loading = false;
@@ -406,23 +434,10 @@ export class MusicPlayer {
         return;
       }
       if (!active() || this.transport !== "playing") return;
-      this.cancelSongFade();
-      this.value.playing = false;
-      this.value.loading = false;
-      this.value.currentTime = this.value.duration;
-      const next = this.value.queue[this.value.currentIndex + 1];
-      if (next) {
-        // No idle intermediate state, so BGM never appears between songs.
-        void this.play(next.id);
-      } else {
-        ++this.operation;
-        this.transport = "idle";
-        this.emit();
-        void this.reconcileBgm();
-      }
+      this.finishSong();
     });
     audio.addEventListener("error", () => {
-      if (active()) this.fail(this.playbackError(track, audio.error));
+      if (active()) this.failSong(track, audio.error, audio);
       else if (this.song === audio) this.cancelSongFade();
     });
     audio.src = `/api/audio/${encodeURIComponent(track.id)}`;
@@ -536,6 +551,70 @@ export class MusicPlayer {
       return `无法播放此 ${track.format} 文件：当前浏览器不支持它的编码，或文件已损坏、不可读取。`;
     }
     return `播放失败，请检查 ${track.format} 文件及本地音乐服务后重试。`;
+  }
+
+  /** The loaded song is over: the next one of the playlist plays, or the player rests after the last. */
+  private finishSong(): void {
+    this.cancelSongFade();
+    this.value.playing = false;
+    this.value.loading = false;
+    this.value.currentTime = this.value.duration;
+    const next = this.value.queue[this.value.currentIndex + 1];
+    if (next) {
+      // No idle intermediate state, so BGM never appears between songs.
+      void this.start(next.id, undefined, true);
+    } else {
+      ++this.operation;
+      this.transport = "idle";
+      this.emit();
+      void this.reconcileBgm();
+    }
+  }
+
+  /**
+   * A song that cannot be read (damaged, or moved or deleted since the last scan: the queue only
+   * leaves out what the scan knew of, playlistQueue) says why. When the player moved on to it by
+   * itself it is skipped and the playlist goes on; the third such song in a row stops it (its
+   * folder is gone, say). A song the user asked for stops there. The browser reports a file the
+   * service no longer has as a format error: one HEAD request to its address tells the two apart.
+   */
+  private failSong(track: MusicTrack, error: unknown, audio: HTMLAudioElement): void {
+    const code = audio.error?.code;
+    const unreadable = code === 2 || code === 3 || code === 4 || (error instanceof DOMException && error.name === "NotSupportedError");
+    const message = this.playbackError(track, error);
+    if (!unreadable) return this.fail(message);
+    const request = ++this.operation;
+    const skip = this.continued === track.id && this.expectsSong() && this.skips < 2;
+    // Nothing more comes from this element; "loading" meanwhile (no BGM between songs).
+    this.releaseSong();
+    this.transport = "loading";
+    this.value.playing = false;
+    this.value.loading = true;
+    void (async () => {
+      let missing = false;
+      if (code !== 2 && code !== 3) {
+        try {
+          const response = await fetch(`/api/audio/${encodeURIComponent(track.id)}`, { method: "HEAD" });
+          missing = response.status === 404 || response.status === 403;
+        } catch {
+          // The service did not answer: say what the browser said.
+        }
+      }
+      if (request !== this.operation || this.disposed) return;
+      const next = skip ? this.value.queue[this.value.currentIndex + 1] : undefined;
+      if (!next) {
+        this.fail(missing ? "找不到这首歌的文件：它可能已被移动或删除，请重新扫描音乐库。" : message);
+        return;
+      }
+      this.skips += 1;
+      this.value.error = missing
+        ? `找不到「${track.title}」的文件（可能已被移动或删除），已跳到下一首。`
+        : code === 2
+          ? `「${track.title}」读取失败，已跳到下一首。`
+          : `无法播放「${track.title}」：当前浏览器不支持它的编码，或文件已损坏，已跳到下一首。`;
+      this.emit();
+      await this.start(next.id, undefined, true);
+    })();
   }
 
   private fail(message: string): void {

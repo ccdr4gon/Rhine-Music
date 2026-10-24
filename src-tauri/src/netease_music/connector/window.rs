@@ -67,7 +67,7 @@ impl WindowFallback {
         Some(Source {
             id: id.clone(), name: "网易云音乐（窗口标题）".into(), kind: "netease".into(),
             title: window.title.clone(), artist: window.artist.clone(), album: String::new(),
-            cover_url: None, playback: "unknown".into(), position: None, duration: None,
+            cover_url: None, cover_rev: 0, playback: "unknown".into(), position: None, duration: None,
             capabilities: Capabilities { toggle: no_competitor, previous: no_competitor, next: no_competitor, ..Capabilities::default() },
             warning: Some(if no_competitor { "仅有曲名与歌手，播放状态、封面和进度不可用。控制需要允许系统媒体键，不能保证只发送给网易云。" }
                 else { "仅有曲名与歌手。检测到其它媒体会话或无法确认系统会话，已禁用系统媒体键以免控制其它播放器。" }.into()),

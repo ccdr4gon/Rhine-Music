@@ -34,10 +34,9 @@ export class MusicTrackFocus {
     container.addEventListener("keydown", cancel);
     window.addEventListener("resize", cancel);
 
-    const tabsHeight = container.querySelector<HTMLElement>(".music-tabs")?.offsetHeight ?? 0;
     const start = container.scrollTop;
     const rowTop = row.getBoundingClientRect().top - container.getBoundingClientRect().top + start;
-    const centerOffset = tabsHeight + Math.max(0, (container.clientHeight - tabsHeight - row.offsetHeight) / 2);
+    const centerOffset = Math.max(0, (container.clientHeight - row.offsetHeight) / 2);
     const target = Math.max(0, Math.min(container.scrollHeight - container.clientHeight, rowTop - centerOffset));
     // The design's search hit (2026-10-05): a 1 px ink outline round the row and a 搜索结果 tag
     // on its top edge, for 1100 ms; the tag fades in its last 30 % (CSS), or not with reduced motion.

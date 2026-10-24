@@ -12,7 +12,8 @@ export class CoverMipTexture extends THREE.DataTexture {
   readonly coverScale = { value: new THREE.Vector2(1, 1) };
   /** Finest level that holds valid art; higher while a sharper chain is still being prepared. */
   readonly coverMinLod = { value: 0 };
-  private readonly dirtyTiles = new Set<number>();
+  /** Per tile, the levels whose bytes changed since they were last sent: one bit per level. */
+  private readonly dirtyLevels = new Map<number, number>();
   /** Counts changes to any cover's art; a frame showing changed art must be drawn. */
   static revision = 0;
   constructor(readonly columns: number, readonly rows: number, readonly tileSize: number, anisotropy = 1) {
@@ -77,7 +78,8 @@ export class CoverMipTexture extends THREE.DataTexture {
       }
     }
     this.coverMinLod.value = offset;
-    this.markDirty(0);
+    // Only these levels changed (and only these are sampled until the full chain arrives).
+    this.markDirty(0, offset);
   }
 
   /**
@@ -111,14 +113,24 @@ export class CoverMipTexture extends THREE.DataTexture {
     for (let tile = 0; tile < this.columns * this.rows; tile++) this.markDirty(tile);
   }
 
-  private markDirty(tile: number) {
-    this.dirtyTiles.add(tile);
+  /** This tile's levels from `from` on changed. */
+  private markDirty(tile: number, from = 0) {
+    const levels = ((1 << this.mipmaps.length) - 1) & ~((1 << from) - 1);
+    this.dirtyLevels.set(tile, (this.dirtyLevels.get(tile) ?? 0) | levels);
     CoverMipTexture.revision++;
   }
 
-  /** Upload changed tiles before the texture is sampled. Called from the print's onBeforeRender. */
+  /**
+   * Upload changed tiles before the texture is sampled. Called from the print's onBeforeRender.
+   * Levels finer than coverMinLod are not sampled (interim art): they wait, and the full chain
+   * that replaces them sends them once.
+   */
   flush(renderer: THREE.WebGLRenderer) {
-    if (!this.dirtyTiles.size) return;
+    if (!this.dirtyLevels.size) return;
+    const sampled = ~((1 << this.coverMinLod.value) - 1);
+    let pending = false;
+    for (const levels of this.dirtyLevels.values()) pending ||= (levels & sampled) !== 0;
+    if (!pending) return;
     const uploaded = renderer.properties.get(this) as { __version?: number; __webglTexture?: WebGLTexture };
     // Not on the GPU yet (or a full upload is pending): three sends every level.
     if (uploaded.__version === this.version && uploaded.__webglTexture) {
@@ -130,8 +142,9 @@ export class CoverMipTexture extends THREE.DataTexture {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, this.flipY);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, this.premultiplyAlpha);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, this.unpackAlignment);
-      for (const slot of this.dirtyTiles) {
+      for (const [slot, levels] of this.dirtyLevels) {
         for (let level = 0; level < this.mipmaps.length; level++) {
+          if (!(levels & sampled & (1 << level))) continue;
           const size = this.tileSize / 2 ** level, image = this.mipmaps[level];
           const x = (slot % this.columns) * size, y = (this.rows - 1 - Math.floor(slot / this.columns)) * size;
           gl.pixelStorei(gl.UNPACK_ROW_LENGTH, image.width);
@@ -139,14 +152,15 @@ export class CoverMipTexture extends THREE.DataTexture {
           gl.pixelStorei(gl.UNPACK_SKIP_ROWS, y);
           gl.texSubImage2D(gl.TEXTURE_2D, level, x, y, size, size, gl.RGBA, gl.UNSIGNED_BYTE, image.data);
         }
+        if (levels & ~sampled) this.dirtyLevels.set(slot, levels & ~sampled);
+        else this.dirtyLevels.delete(slot);
       }
       // three assumes the defaults for every other upload.
       gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
       gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
       gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
       renderer.state.unbindTexture();
-    }
-    this.dirtyTiles.clear();
+    } else this.dirtyLevels.clear();
   }
 }
 

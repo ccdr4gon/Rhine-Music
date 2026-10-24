@@ -29,8 +29,18 @@ export interface OnlineConfig {
   onlineEnabled?: boolean;
 }
 
-/** The library: songs, the main folder's playlists and the state of a scan or lookup under way. */
-export const readLibrary = () => request<MusicLibrary>("/api/library");
+/**
+ * The library (songs, the main folder's playlists and the state of a scan or lookup under way)
+ * with the service's tag for it (its ETag), or undefined when it is still the one `tag` names
+ * (304: nothing is sent or compared again). A service without tags sends it each time.
+ */
+export async function readLibraryChange(tag?: string): Promise<{ library: MusicLibrary; tag?: string } | undefined> {
+  const response = await fetch("/api/library", tag ? { headers: { "If-None-Match": tag } } : {});
+  if (response.status === 304) return undefined;
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) throw new Error(data?.error || `本地服务请求失败 (${response.status})`);
+  return { library: data as MusicLibrary, tag: response.headers.get("ETag") ?? undefined };
+}
 /** Start a scan; with `roots`, the folders to save first (the main folder first). */
 export const scanLibrary = (roots?: string[]) =>
   request<MusicLibrary>("/api/library/scan", roots ? { roots } : {});

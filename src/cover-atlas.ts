@@ -39,6 +39,7 @@ export class CoverAtlas {
   private tiles: (Tile | undefined)[];
   private readonly tileOfKey = new Map<string, number>();
   private readonly slotKeys: (string | undefined)[];
+  private readonly slotRecords: (ArchiveRecord | undefined)[];
   private readonly slotTile: Int32Array;
   // Per pool slot: tile rectangle and art scale. The instanced attributes hold them in
   // draw order (see order()), which the shelf repacks as cases enter and leave the view.
@@ -49,6 +50,9 @@ export class CoverAtlas {
   private shownCount = -1;
   private slotsChanged = true;
   private readonly recordKeys = new WeakMap<ArchiveRecord, string>();
+  private readonly titledKeys = new WeakMap<ArchiveRecord, string>();
+  /** Pictures that could not be loaded (their prints are the missing-cover card) since the last reset. */
+  private readonly failedPictures = new Set<string>();
   private selectedRecord?: ArchiveRecord;
   private selectedKey?: string;
   private selectedRequest?: number;
@@ -76,6 +80,7 @@ export class CoverAtlas {
     this.tileWidth = 2 ** Math.floor(Math.log2(Math.max(1, tileLimit)));
     this.tiles = Array(this.columns * this.rows);
     this.slotKeys = Array(count);
+    this.slotRecords = Array(count);
     this.slotTile = new Int32Array(count).fill(-1);
     this.slotRect = new Float32Array(count * 4);
     this.slotScale = new Float32Array(count * 2);
@@ -144,17 +149,32 @@ export class CoverAtlas {
   }
 
   /**
-   * Visual identity only: what the painter is given (request). Metadata refreshes replace records
+   * Visual identity only: what the painter prints (request). Metadata refreshes replace records
    * without changing their print, and a case whose key changed but not its picture (NetEase's queue
    * moving to another playlist: the same songs under new keys, their pictures maybe on another of
-   * NetEase's image servers: the album's coverKey) keeps its tile.
+   * NetEase's image servers: the album's coverKey) keeps its tile. The songs of one album share its
+   * picture and so one tile; the title is printed only on the missing-cover card, so it counts for
+   * a case without a picture, or whose picture could not be loaded.
    */
   private keyOf(record: ArchiveRecord | undefined) {
     if (!record) return "";
     let key = this.recordKeys.get(record);
     if (key === undefined) {
-      key = JSON.stringify([record.album?.coverKey ?? record.album?.coverUrl, record.title, record.id.startsWith("external:")]);
+      const picture = this.pictureOf(record);
+      key = picture === undefined ? this.titledKey(record) : JSON.stringify([picture, record.id.startsWith("external:")]);
       this.recordKeys.set(record, key);
+    }
+    if (this.failedPictures.size && this.failedPictures.has(this.pictureOf(record)!)) return this.titledKey(record);
+    return key;
+  }
+  private pictureOf(record: ArchiveRecord) {
+    return record.album?.coverKey || record.album?.coverUrl || undefined;
+  }
+  private titledKey(record: ArchiveRecord) {
+    let key = this.titledKeys.get(record);
+    if (key === undefined) {
+      key = JSON.stringify([this.pictureOf(record), record.title, record.id.startsWith("external:")]);
+      this.titledKeys.set(record, key);
     }
     return key;
   }
@@ -178,6 +198,7 @@ export class CoverAtlas {
 
   setSlot(slot: number, record: ArchiveRecord | undefined) {
     const key = this.keyOf(record);
+    this.slotRecords[slot] = record;
     if (this.slotKeys[slot] === key) return;
     this.release(slot);
     this.slotKeys[slot] = key;
@@ -227,11 +248,24 @@ export class CoverAtlas {
       tile.tint = [this.selectedTint.x, this.selectedTint.y, this.selectedTint.z];
     this.tiles[index] = tile;
     this.tileOfKey.set(key, index);
+    // A picture's tile serves every song showing it; the painter prints this song's title on it
+    // only if the picture cannot be loaded.
+    const picture = record && key !== this.titledKey(record) ? this.pictureOf(record) : undefined;
     const generation = this.generation;
     const { id, tile: painted } = this.request(record, this.tileWidth);
     tile.request = id;
     void painted.then((art) => {
       if (!art || this.disposed || generation !== this.generation || this.tiles[index] !== tile) return;
+      // It could not be loaded (no art, so no colour): this is the missing-cover card with this
+      // song's title. The tile becomes this song's, and from now on every song showing the
+      // picture is keyed by its own title (keyOf).
+      const failed = picture !== undefined && !art.tint;
+      if (failed) {
+        this.failedPictures.add(picture);
+        this.tileOfKey.delete(key);
+        tile.key = this.keyOf(record);
+        this.tileOfKey.set(tile.key, index);
+      }
       this.atlas.setTile(index, art.levels);
       tile.scale = art.scale;
       // The sharp print of a lifted case can arrive first; its colour then stays, unless
@@ -239,9 +273,15 @@ export class CoverAtlas {
       tile.tint = art.tint && (tile.tint ?? art.tint);
       tile.ready = true;
       tile.request = undefined;
-      for (let slot = 0; slot < this.slotTile.length; slot++) if (this.slotTile[slot] === index) this.writeSlot(slot);
+      const slots: number[] = [];
+      for (let slot = 0; slot < this.slotTile.length; slot++) if (this.slotTile[slot] === index) slots.push(slot);
+      if (failed) {
+        // Each case takes its own song's card: this tile if it is this song, else a new one.
+        for (const slot of slots) this.release(slot);
+        for (const slot of slots) this.setSlot(slot, this.slotRecords[slot]);
+      } else for (const slot of slots) this.writeSlot(slot);
       // A lifted print that is still waiting for its sharp chain can show this tile meanwhile.
-      if (this.selectedKey === key && this.selectedRequest !== undefined && this.selectedTexture.coverScale.value.x === 0)
+      if (this.keyOf(this.selectedRecord) === tile.key && this.selectedRequest !== undefined && this.selectedTexture.coverScale.value.x === 0)
         this.showInterimSelection(index);
     });
     return index;
@@ -378,17 +418,23 @@ export class CoverAtlas {
     });
   }
 
-  /** Forget every print. `albums` sizes the atlas for the library about to be shown. */
-  reset(albums = Infinity) {
+  /**
+   * Forget every print. `albums` sizes the atlas for the library about to be shown: its records
+   * (one tile per picture they show), or a number of tiles.
+   */
+  reset(albums: number | readonly ArchiveRecord[] = Infinity) {
     this.generation++;
     for (const tile of this.tiles) if (tile?.request !== undefined) this.painter.cancel(tile.request);
     if (this.selectedRequest !== undefined) this.painter.cancel(this.selectedRequest);
     this.tiles.fill(undefined);
     this.tileOfKey.clear();
+    this.failedPictures.clear();
     this.slotKeys.fill(undefined);
+    this.slotRecords.fill(undefined);
     this.slotTile.fill(-1);
+    const needed = typeof albums === "number" ? albums : new Set(albums.map((record) => this.keyOf(record))).size;
     // Sized up front, so browsing never stops to upload a larger atlas.
-    this.resize(Math.min(this.maxRows, Math.max(1, Math.ceil(albums / this.columns))), false);
+    this.resize(Math.min(this.maxRows, Math.max(1, Math.ceil(needed / this.columns))), false);
     (this.artScale.array as Float32Array).fill(0);
     this.artScale.needsUpdate = true;
     this.slotScale.fill(0);

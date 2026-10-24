@@ -131,7 +131,7 @@
   height: 42px;
   transition: opacity 120ms ease;
 }
-.music-app .play-ring-big:not(:disabled):hover {
+.music-app .play-ring-big:not(:disabled, [aria-disabled="true"]):hover {
   opacity: 0.65;
 }
 .music-app .play-ring-big .transport-play::before {
@@ -487,6 +487,21 @@
   height: 7px;
   border-left: 2px solid var(--muted);
   border-right: 2px solid var(--muted);
+}
+/* Forced colours (Windows' contrast themes): the triangle's transparent borders would be forced to the
+   text's colour (a block) and the marks would sit on the unforced scene; they keep out of the forcing,
+   in the text's system colour on the page's (their plate, as the words beside them have). */
+@media (forced-colors: active) {
+  .music-app .music-keyhint .hint-play,
+  .music-app .music-keyhint .hint-pause {
+    forced-color-adjust: none;
+    color: CanvasText;
+    border-left-color: currentColor;
+    background: Canvas;
+  }
+  .music-app .music-keyhint .hint-pause {
+    border-right-color: currentColor;
+  }
 }
 
 /* ---- the selection bracket: four squares on the lifted case's box ------------------------ */

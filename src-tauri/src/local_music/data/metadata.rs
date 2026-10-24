@@ -9,8 +9,14 @@ use serde_json::{json, Value};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
 };
+
+// The readers' panics on damaged files are caught below (`read`, `lyrics`), which needs unwinding:
+// with `panic = "abort"` one damaged song would end the client at every start (Cargo.toml).
+#[cfg(not(panic = "unwind"))]
+compile_error!("metadata.rs catches the tag readers' panics on damaged files: build with panic = \"unwind\"");
 
 pub struct Metadata {
     pub track: Value,
@@ -28,7 +34,37 @@ impl Default for Metadata {
     }
 }
 
+/// A song's audio properties and tags. A reader that panics on a damaged file (lofty 0.25.4 does on
+/// some Opus headers: a channel count of 0, or fewer than 24 samples) does not end the scan: the
+/// tags are read again without the audio properties, and failing that the song is indexed with a
+/// metadata error, as any file that cannot be read.
 pub fn read(path: &Path, covers: bool) -> Result<Metadata, String> {
+    match catch_unwind(AssertUnwindSafe(|| read_file(path, covers))) {
+        Ok(result) => result,
+        Err(_) => catch_unwind(AssertUnwindSafe(|| read_tags(path, covers)))
+            .unwrap_or_else(|_| Err("无法读取这个文件的属性".into())),
+    }
+}
+
+/// The tags alone, after the full read panicked: no duration or codec.
+fn read_tags(path: &Path, covers: bool) -> Result<Metadata, String> {
+    let options = ParseOptions::new()
+        .read_properties(false)
+        .read_cover_art(covers);
+    let parsed = Probe::open(path)
+        .map_err(|e| e.to_string())?
+        .options(options)
+        .guess_file_type()
+        .map_err(|e| e.to_string())?
+        .read()
+        .map_err(|e| e.to_string())?;
+    let mut output = Metadata::default();
+    output.common["metadataError"] = json!("无法读取这个文件的音频属性");
+    tags(&parsed, path, covers, &mut output);
+    Ok(output)
+}
+
+fn read_file(path: &Path, covers: bool) -> Result<Metadata, String> {
     let extension = path
         .extension()
         .unwrap_or_default()
@@ -141,6 +177,12 @@ pub fn read(path: &Path, covers: bool) -> Result<Metadata, String> {
     if let Some(properties) = format_properties {
         output.track = properties;
     }
+    tags(&parsed, path, covers, &mut output);
+    Ok(output)
+}
+
+/// The tags (and, with `covers`, the front cover) of a parsed file into `output`.
+fn tags(parsed: &TaggedFile, path: &Path, covers: bool, output: &mut Metadata) {
     let primary = parsed.primary_tag().or_else(|| parsed.first_tag());
     if let Some(tag) = primary {
         output.track["title"] = json!(tag.title());
@@ -192,14 +234,18 @@ pub fn read(path: &Path, covers: bool) -> Result<Metadata, String> {
             }
         }
     }
-    Ok(output)
 }
 
 /// The lyrics in a song's own tags, only read: in an ID3v2 tag its synchronised lyrics timed in
 /// milliseconds (SYLT) as LRC lines, else its lyrics text (USLT); in other tags their lyrics text
 /// (a Vorbis comment LYRICS or UNSYNCEDLYRICS, MP4 ©lyr, APE Lyrics). Lyrics text is often LRC
-/// itself. None for DSD files, which are only indexed, and for songs without lyrics.
+/// itself. None for DSD files, which are only indexed, and for songs without lyrics, and when a
+/// reader panics on a damaged file (as `read`), which must not take a server thread with it.
 pub fn lyrics(path: &Path) -> Option<String> {
+    catch_unwind(AssertUnwindSafe(|| tag_lyrics(path))).unwrap_or(None)
+}
+
+fn tag_lyrics(path: &Path) -> Option<String> {
     let extension = path
         .extension()
         .unwrap_or_default()

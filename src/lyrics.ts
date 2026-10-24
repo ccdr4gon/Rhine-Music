@@ -223,8 +223,9 @@ export function nextChange(lines: readonly LyricLine[], seconds: number): number
 
 /**
  * A lyrics file's bytes as text: by its byte-order mark, else UTF-16 when every other byte of its
- * start is zero (text has no zero bytes otherwise), else UTF-8 when the bytes are UTF-8, else
- * GB 18030 (GBK: how most Chinese .lrc files not in UTF-8 are saved).
+ * start is zero (text has no zero bytes otherwise), else UTF-8 when the bytes are UTF-8 (or nearly
+ * all of them: a damaged byte or two show as U+FFFD), else GB 18030 (GBK: how most Chinese .lrc
+ * files not in UTF-8 are saved).
  */
 export function decodeLyricBytes(data: ArrayBuffer | Uint8Array): string {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -236,11 +237,23 @@ export function decodeLyricBytes(data: ArrayBuffer | Uint8Array): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    // Not UTF-8.
+    // Not clean UTF-8.
   }
+  // Still UTF-8 when nearly all of it is (a stray byte, a last character cut short): GBK read as
+  // UTF-8 breaks about once per Chinese character, damaged UTF-8 only where it is damaged. 6 valid
+  // characters beyond ASCII per broken sequence is more than GBK reached in 20 000 random samples
+  // of each length (5 at most, at 6 characters; 2 from 8 on).
+  const lenient = new TextDecoder("utf-8").decode(bytes);
+  let broken = 0, wide = 0;
+  for (let i = 0; i < lenient.length; i++) {
+    const code = lenient.charCodeAt(i);
+    if (code === 0xfffd) broken++;
+    else if (code > 0x7f && (code < 0xdc00 || code > 0xdfff)) wide++;
+  }
+  if (wide >= 6 * broken) return lenient;
   try {
     return new TextDecoder("gb18030").decode(bytes);
   } catch {
-    return new TextDecoder("utf-8").decode(bytes);
+    return lenient;
   }
 }

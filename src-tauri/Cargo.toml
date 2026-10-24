@@ -39,6 +39,9 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 
 [target.'cfg(target_os = "windows")'.dependencies]
 base64 = "=0.22.1"
+# The WebView2 interfaces Tauri's webview hands out (the version wry already uses): main.rs watches
+# them for WebView2's processes ending under the window.
+webview2-com = "=0.39.1"
 windows-future = "=0.3.2"
 windows = { version = "=0.62.2", features = [
   "Foundation", "ApplicationModel", "Media_Control", "Media_Playback", "Media_Core",
@@ -57,4 +60,6 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
-panic = "abort"
+# Panics unwind (the default, not "abort"): a tag reader's panic on a damaged music file is caught
+# (local_music/data/metadata.rs, which refuses to build without it), instead of ending the client
+# at every start.

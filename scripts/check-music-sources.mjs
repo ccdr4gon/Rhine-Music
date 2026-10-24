@@ -39,7 +39,7 @@ function connection(saved, sources) {
   const told = [];
   const calls = [];
   const port = playerMediaPort({
-    async snapshot() { return { sources: list }; },
+    async snapshot() { if (list instanceof Error) throw list; return { sources: list }; },
     async control(...args) { calls.push(args); },
   });
   const media = new ExternalMediaConnection(port, playerLinks(saved === undefined ? undefined : JSON.parse(JSON.stringify(saved)), (link) => told.push(link)));
@@ -174,6 +174,36 @@ test('the session picked before the switch is connected on the page that shows t
   assert.equal(shown.media.allowGlobalMediaKeys, false, 'a new connection, without the global media keys');
 });
 
+test('the session picked before the switch waits for a snapshot that was read: a failed first read does not lose it', async () => {
+  // As refreshExternal takes it: only after a read (externalMedia.unread false), once.
+  const take = (media, handed) => {
+    if (!handed || media.unread) return handed;
+    if (media.selected?.id !== handed) media.select(handed);
+    return undefined;
+  };
+  const page = connection({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, new Error('读取媒体来源超时'));
+  let handed = 'x2';
+  await page.media.refresh();
+  assert.equal(page.media.unread, true);
+  handed = take(page.media, handed);
+  assert.equal(handed, 'x2', 'kept: the failed read said nothing of the session');
+  page.set(new Error('媒体读取请求已过期'));
+  await page.media.refresh();
+  handed = take(page.media, handed);
+  page.set([third('x1'), third('x2'), qq('q1')]);
+  await page.media.refresh();
+  handed = take(page.media, handed);
+  assert.equal(handed, undefined);
+  assert.equal(page.media.selected?.id, 'x2', 'connected at the first good read, although the link cannot tell the two apart');
+  // A good read without the session drops the pick: it is not connected when it turns up later.
+  const gone = connection(null, [qq('q1')]);
+  await gone.media.refresh();
+  assert.equal(take(gone.media, 'a1'), undefined);
+  gone.set([anonymous('a1'), qq('q1')]);
+  await gone.media.refresh();
+  assert.equal(gone.media.selected, undefined);
+});
+
 test('the next start opens what was chosen last: 本地音乐 first of all, a player only while it is remembered', () => {
   // As the page saves the preferences on each path (music-app.ts), read the way main.rs reads them.
   const first = undefined;
@@ -207,10 +237,13 @@ test('the app: one page per source, local playback and BGM only for 本地音乐
   // The players' connection for a player as the current source; the chooser for 本地音乐, in the client only.
   assert.match(app, /const externalMedia = playerCurrent\n  \? new ExternalMediaConnection\(playerMediaPort\(nativeMediaPort\), playerLinks\(preferences\.playerLink, rememberPlayer\)\)\n  : undefined;/);
   assert.match(app, /const playerChooser = !playerCurrent && isDesktop\n  \? new ExternalMediaConnection\(playerMediaPort\(nativeMediaPort\), playerLinks\(preferences\.playerLink, rememberPlayer\)\)\n  : undefined;/);
-  // The switch: the local player stops first, the choice is saved and written out, then the page goes.
+  // The switch: the local player stops first, the choice is saved and written out, then the page goes,
+  // replaced in the page's history: no back or forward (a mouse button, Alt+←) leads to the other
+  // source's page (the review of 2026-10-23; check-scene-switching.mjs has the guards).
   const change = body(app, 'function switchSource(', '\n}\n');
   assert.match(change, /if \(next === currentSource \|\| sourceSwitching\) return;/);
-  const order = ['player?.stop();', 'player?.dispose();', 'preferences.source = next;', 'savePrefs();', 'markSourceSwitch(sessionStore, { to: next, panel: !!after.panel', 'flushDesktopPreferences()', 'location.assign(sourceAddress(location.href, next))'];
+  const order = ['player?.stop();', 'player?.dispose();', 'preferences.source = next;', 'savePrefs();', 'markSourceSwitch(sessionStore, { to: next, panel: !!after.panel', 'flushDesktopPreferences()', 'location.replace(sourceAddress(location.href, next))'];
+  assert.doesNotMatch(change, /location\.assign/);
   order.reduce((at, step) => { const next = change.indexOf(step, at); assert.ok(next > at, step); return next; }, -1);
   // The page a switch loaded: no opening animation, the header kept in view, the panel again, the session picked.
   assert.match(app, /const sourceSwitch = takeSourceSwitch\(sessionStore, currentSource\);/);
@@ -219,7 +252,8 @@ test('the app: one page per source, local playback and BGM only for 本地音乐
   assert.match(read('src/music.css'), /\.music-app\[data-switching="true"\] #music-loading \{\s*z-index: 5;\s*\}/);
   assert.match(app, /if \(sourceSwitch\?\.panel && playerCurrent\) openPanel\("sources", true\);\nvoid start\(\);/);
   assert.match(app, /let handedSession = sourceSwitch\?\.session;/);
-  assert.match(body(app, 'async function refreshExternal() {', '\n}\n'), /await externalMedia\.refresh\(\);[\s\S]*const picked = handedSession;\s*handedSession = undefined;\s*if \(picked && externalMedia\.selected\?\.id !== picked\) externalMedia\.select\(picked\);\s*await netease\.refresh\(\);/);
+  // Taken by the first snapshot that was read (one that failed says nothing of the session).
+  assert.match(body(app, 'async function refreshExternal() {', '\n}\n'), /await externalMedia\.refresh\(\);[\s\S]*if \(handedSession && !externalMedia\.unread\) \{\s*const picked = handedSession;\s*handedSession = undefined;\s*if \(externalMedia\.selected\?\.id !== picked\) externalMedia\.select\(picked\);\s*\}[\s\S]*await netease\.refresh\(\);/);
   // The players are read for the chooser only while the 播放器 panel is open; a player connected there switches.
   const chooser = body(app, 'async function refreshChooser() {', '\n}\n');
   assert.match(chooser, /if \(!playerChooser \|\| panel !== "sources" \|\| panelClosing \|\| sourceSwitching\) return;/);
@@ -259,4 +293,84 @@ test('the package carries the program, its interface and the licences: no launch
   assert.match(pack, /音乐来源在窗口右上角选择/);
   const tauri = JSON.parse(read('src-tauri/tauri.conf.json'));
   assert.deepEqual(tauri.bundle.resources, { '../dist/': 'web/' });
+});
+
+// Tauri panics on an error from its setup hook, and the release build (no console) then ends
+// without a word: a start that fails must say why itself. The window's WebView2 is watched
+// for its processes ending, since the page draws the window's only buttons.
+test('a start that fails says why, and the window outlives WebView2 failing under it', () => {
+  const main = read('src-tauri/src/main.rs');
+  const setup = body(main, '.setup(|app| {', '.build(tauri::generate_context!())');
+  assert.match(setup, /if let Err\(error\) = start\(app\) \{\s*startup_failed\(&error\);\s*\}\s*Ok\(\(\)\)\s*\}\)/);
+  assert.doesNotMatch(setup.replace(/\/\/[^\n]*/g, ''), /\?|return|Err\((?!error\))/, 'the setup hook itself never fails');
+  assert.match(main, /Err\(error\) => startup_failed\(&error\),/);
+  assert.match(body(main, 'fn startup_failed(', '\n}\n'), /MessageDialog::new\(\)[\s\S]*\.show\(\);\s*std::process::exit\(1\);/);
+  // WebView2 is looked for first, and only named: never downloaded or installed.
+  const start = body(main, 'fn start(app: &mut tauri::App)', '\n}\n');
+  assert.ok(start.indexOf('tauri::webview_version()') < start.indexOf('portable_paths('), 'WebView2 before anything else');
+  assert.match(main, /const WEBVIEW2_MISSING: &str = "[^"]*https:\/\/developer\.microsoft\.com\/microsoft-edge\/webview2\/[^"]*";/);
+  assert.deepEqual(JSON.parse(read('src-tauri/tauri.conf.json')).bundle.windows.webviewInstallMode, { type: 'skip' });
+  // Every window open_main makes is watched; the page's process ending reloads it, WebView2's own
+  // makes the window again ("main", the capability's), and the close that takes is no exit.
+  const open = body(main, 'fn open_main(', '\n}\n');
+  assert.match(open, /WebviewWindowBuilder::new\(app, "main",[\s\S]*\.decorations\(false\)[\s\S]*watch_webview\(&window\);\s*Ok\(\(\)\)$/);
+  assert.deepEqual(JSON.parse(read('src-tauri/capabilities/desktop.json')).windows, ['main']);
+  const watch = body(main, 'fn watch_webview(window: &tauri::WebviewWindow) {', '\n}\n');
+  assert.match(watch, /RENDER_PROCESS_EXITED[\s\S]*BROWSER_PROCESS_EXITED[\s\S]*add_ProcessFailed/);
+  assert.match(watch, /else if page \{\s*if let Some\(core\) = core \{\s*unsafe \{ core\.Reload\(\)\? \};\s*\}\s*\} else \{\s*reopen_main\(app\.clone\(\)\);/);
+  assert.match(main, /tauri::RunEvent::ExitRequested \{ code: None, api, \.\. \}\s*if REOPENING\.load\(Ordering::SeqCst\) > 0 =>/);
+  // The preferences a start reads are held to the size the page may save.
+  assert.match(main, /fn save_preferences\([\s\S]*?if !acceptable_preferences\(&preferences\) \{/);
+  assert.match(start, /let preferences = read_preferences\(&data_dir\.join\("preferences\.json"\)\);/);
+});
+
+// The page's documents carry app_server.rs's PAGE_POLICY (Tauri's own `csp` reaches only its
+// bootstrap page): anything the page needs beyond it stops working in the client.
+test('the page runs under the policy its documents carry: no inline script, NetEase covers its only remote images', async () => {
+  const server = read('src-tauri/src/app_server.rs');
+  const policy = new Map(server.match(/pub const PAGE_POLICY: &str = "([^"]+)";/)[1].split('; ').map((directive) => {
+    const [name, ...sources] = directive.split(' ');
+    return [name, sources];
+  }));
+  assert.deepEqual(policy.get('script-src'), ["'self'"]);
+  assert.deepEqual(policy.get('object-src'), ["'none'"]);
+  for (const source of ["'self'", 'ipc:', 'http://ipc.localhost', 'https://*.music.126.net', 'data:']) assert.ok(policy.get('connect-src').includes(source), source);
+  for (const source of ["'self'", 'data:', 'blob:', 'https://*.music.126.net']) assert.ok(policy.get('img-src').includes(source), source);
+  // Sent with the page's documents only: /api goes through serve_file, which adds nothing.
+  assert.match(server, /let policy = if mime\.starts_with\("text\/html"\) \{\s*vec!\[http::header\("Content-Security-Policy", PAGE_POLICY\)\]/);
+  assert.match(read('src-tauri/src/http.rs'), /pub fn serve_file\(request: Request, file: AllowedFile, cache: &str\) \{\s*serve_file_with\(request, file, cache, Vec::new\(\)\)\s*\}/);
+  assert.doesNotMatch(read('src-tauri/src/local_music/connector/api.rs'), /serve_file_with|Content-Security-Policy/);
+  // NetEase's covers are only ever its public image hosts, over https.
+  const cover = body(read('src-tauri/src/netease_music/data/queue.rs'), 'pub(crate) fn cover(', '\n}\n');
+  assert.match(cover, /strip_suffix\("\.music\.126\.net"\)/);
+  assert.match(cover, /url\.set_scheme\("https"\)/);
+  // No inline script, handler, eval or javascript: address: index.html, or markup the page writes.
+  const html = read('index.html');
+  for (const [, attributes, inline] of html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)) assert.ok(/\ssrc=/.test(attributes) && !inline.trim(), 'a script by its address only');
+  assert.doesNotMatch(html, /<[a-z][^<>]*\son[a-z]+\s*=|javascript:|<link[^>]+href="(?:https?:)?\/\//i);
+  const { readdirSync } = await import('node:fs');
+  const files = readdirSync(new URL('../src/', import.meta.url), { recursive: true }).map(String).filter((file) => file.endsWith('.ts'));
+  assert.ok(files.length > 50, 'the page\'s files were read');
+  for (const file of files) {
+    const text = read(`src/${file.replace(/\\/g, '/')}`);
+    assert.doesNotMatch(text, /<[a-z][^<>\n]*\son[a-z]+\s*=/i, `${file}: an inline handler`);
+    assert.doesNotMatch(text, /\beval\s*\(|new Function\s*\(|javascript:/, `${file}: script from a string`);
+  }
+});
+
+// The local music's routes all wait on one store lock (the library, covers, lyrics, a playing song's
+// audio). A new main folder is looked for on the disk, which for a network folder whose host does
+// not answer takes about 21 s, with that lock released, and not looked for again under it.
+test('a new main folder is looked for on the disk with the local music store unlocked', () => {
+  const library = read('src-tauri/src/local_music/data/library.rs');
+  const api = read('src-tauri/src/local_music/connector/api.rs');
+  const scan = body(library, 'pub fn begin_scan(', 'std::thread::spawn(');
+  assert.ok(scan.indexOf('Self::checked_main_folder(shared, roots)?') < scan.indexOf('shared.lock()'), 'begin_scan: before the lock');
+  assert.match(scan, /update_config_checked\(&json!\(\{"roots":roots\}\), checked\.as_deref\(\)\)\?/);
+  assert.match(body(library, 'pub fn checked_main_folder(', '\n    }\n'), /let new = \{\s*let store = shared\.lock\(\)\.unwrap\(\);[^}]*\{[^}]*\}\s*store\.new_main_folder\(roots\)\?\s*\};\s*if let Some\(main\) = &new \{\s*check_main_folder\(main\)\?;/);
+  assert.match(body(library, 'pub fn update_config_checked(', '\n    }\n'), /\.filter\(\|main\| checked\.map\(path_key\) != Some\(path_key\(main\)\)\)\s*\{\s*check_main_folder\(main\)\?;/);
+  assert.equal(library.match(/fs::metadata\(main\)/g).length, 1, 'only check_main_folder looks');
+  const config = body(api, '"/api/config" | "/api/library/config" if post => {', '"/api/genre-rules" if get');
+  assert.ok(config.indexOf('Store::checked_main_folder(store, roots)') >= 0 && config.indexOf('Store::checked_main_folder(store, roots)') < config.indexOf('store.lock()'), '/api/config: before the lock');
+  assert.match(config, /update_config_checked\(input, checked\.as_deref\(\)\)/);
 });

@@ -34,6 +34,12 @@ const PLAY_BUDGET: Duration = Duration::from_secs(5);
 const LYRICS_BUDGET: Duration = Duration::from_secs(3);
 
 const ERR_PORT: &str = "未检测到网易云调试端口（9233），请以调试端口启动网易云";
+/// The port is open but NetEase did not answer in time (busy, e.g. loading a playlist): not a
+/// closed port, so nothing offers to restart it.
+const ERR_NO_REPLY: &str = "网易云调试端口没有及时回应";
+/// A play request reached NetEase, which did not answer in time: it may still carry it out, and
+/// the page waits for it as for any request (ports.ts PLAY_UNANSWERED, the same words).
+const ERR_UNANSWERED: &str = "网易云还没有回应这次请求";
 const ERR_MISSING: &str = "这首歌已不在网易云的播放队列中";
 const ERR_FM: &str = "私人 FM 模式下不能切换到队列歌曲";
 const ERR_STORE: &str = "无法找到网易云的播放状态，可能是客户端版本已变化";
@@ -244,7 +250,10 @@ const LYRICS_BODY: &str = r#"
   if (lyric.displayType !== 'default') return { status: 'none' };
   const source = Array.isArray(lyric.lyricLines) ? lyric.lyricLines : [];
   const others = Array.isArray(lyric.tlyricLines) && lyric.tlyricLines.length === source.length ? lyric.tlyricLines : null;
-  const text = (line) => (line && typeof line.lyric === 'string' ? line.lyric.slice(0, 300) : '');
+  // A lone half of a character (NetEase's own broken text) becomes U+FFFD, and a line is cut at 300
+  // whole characters, never inside one: the half would arrive escaped, which serde_json refuses.
+  const clean = (value) => value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (unit) => (unit.length === 2 ? unit : '\uFFFD'));
+  const text = (line) => (line && typeof line.lyric === 'string' ? Array.from(clean(line.lyric.slice(0, 600))).slice(0, 300).join('') : '');
   const lines = [], translations = [];
   let room = 50000, translationRoom = 30000;
   for (let index = 0; index < source.length && lines.length < 2000; index += 1) {
@@ -260,7 +269,7 @@ const LYRICS_BODY: &str = r#"
     }
   }
   const timed = lyric.yrcInfo && typeof lyric.yrcInfo === 'object' ? lyric.yrcInfo : {};
-  const whole = (value, limit) => (typeof value === 'string' && value.length <= limit ? value : '');
+  const whole = (value, limit) => (typeof value === 'string' && value.length <= limit ? clean(value) : '');
   return {
     status: 'ready',
     offset: typeof lyric.offset === 'number' && Number.isFinite(lyric.offset) ? lyric.offset : 0,
@@ -320,9 +329,31 @@ pub struct DebugLyrics {
 }
 
 enum Failure {
-    /// Port closed, no reply in time, or no NetEase player page.
+    /// Port closed, or no NetEase player page.
     Unavailable,
+    /// The port is open but did not answer in time; `sent` once the call itself reached NetEase.
+    NoReply { sent: bool },
     Protocol(String),
+}
+
+/// A socket error that only says the peer was slow (a read or write timeout, or the deadline).
+fn timed_out(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout)
+}
+
+/// What a play request that met `failure` says: NetEase busy before the call was sent is no reply;
+/// after it, NetEase may still carry it out.
+fn play_failure(failure: Failure) -> String {
+    match failure {
+        Failure::Unavailable => ERR_PORT.into(),
+        Failure::NoReply { sent: false } => ERR_NO_REPLY.into(),
+        Failure::NoReply { sent: true } => ERR_UNANSWERED.into(),
+        Failure::Protocol(message) => message,
+    }
 }
 
 pub fn state() -> Result<DebugState, String> {
@@ -356,6 +387,9 @@ fn state_at(port: u16) -> Result<DebugState, String> {
     match run(port, &state_script(), Instant::now() + STATE_BUDGET) {
         Ok(value) => map_state(&value),
         Err(Failure::Unavailable) => Ok(DebugState::default()),
+        // A late reading is no closed port (2026-10-17: NetEase misses one now and then while it
+        // loads a playlist): an error, so the page keeps it apart and offers no restart.
+        Err(Failure::NoReply { .. }) => Err(ERR_NO_REPLY.into()),
         Err(Failure::Protocol(message)) => Err(message),
     }
 }
@@ -366,8 +400,7 @@ fn play_at(port: u16, track_id: &str) -> Result<(), String> {
     }
     match run(port, &play_script(track_id), Instant::now() + PLAY_BUDGET) {
         Ok(value) => play_outcome(&value),
-        Err(Failure::Unavailable) => Err(ERR_PORT.into()),
-        Err(Failure::Protocol(message)) => Err(message),
+        Err(failure) => Err(play_failure(failure)),
     }
 }
 
@@ -377,8 +410,7 @@ fn play_playlist_at(port: u16, playlist_id: &str, track_id: &str, name: &str) ->
     };
     match run(port, &playlist_script(playlist, track, name), Instant::now() + PLAY_BUDGET) {
         Ok(value) => playlist_outcome(&value),
-        Err(Failure::Unavailable) => Err(ERR_PORT.into()),
-        Err(Failure::Protocol(message)) => Err(message),
+        Err(failure) => Err(play_failure(failure)),
     }
 }
 
@@ -392,6 +424,7 @@ fn seek_at(port: u16, track_id: &str, position: f64) -> Result<f64, String> {
     match run(port, &seek_script(track_id, position), Instant::now() + PLAY_BUDGET) {
         Ok(value) => seek_outcome(&value),
         Err(Failure::Unavailable) => Err(ERR_PORT.into()),
+        Err(Failure::NoReply { .. }) => Err(ERR_NO_REPLY.into()),
         Err(Failure::Protocol(message)) => Err(message),
     }
 }
@@ -403,6 +436,7 @@ fn lyrics_at(port: u16, track_id: &str, load: bool) -> Result<DebugLyrics, Strin
     match run(port, &lyrics_script(track_id, load), Instant::now() + LYRICS_BUDGET) {
         Ok(value) => map_lyrics(&value),
         Err(Failure::Unavailable) => Err(ERR_PORT.into()),
+        Err(Failure::NoReply { .. }) => Err(ERR_NO_REPLY.into()),
         Err(Failure::Protocol(message)) => Err(message),
     }
 }
@@ -638,7 +672,7 @@ fn map_lyrics(value: &Value) -> Result<DebugLyrics, String> {
 fn remaining(deadline: Instant) -> Result<Duration, Failure> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
-        return Err(Failure::Unavailable);
+        return Err(Failure::NoReply { sent: false });
     }
     Ok(left)
 }
@@ -698,7 +732,9 @@ fn get(port: u16, path: &str, timeout: Duration) -> Result<Vec<u8>, Failure> {
         .get(format!("http://127.0.0.1:{port}{path}"))
         .timeout(timeout)
         .send()
-        .map_err(|_| Failure::Unavailable)?;
+        // A connection that is not taken in time stays a closed port, as before; an open port whose
+        // answer does not come in time is no reply.
+        .map_err(|error| if error.is_timeout() && !error.is_connect() { Failure::NoReply { sent: false } } else { Failure::Unavailable })?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(Failure::Unavailable);
     }
@@ -706,7 +742,7 @@ fn get(port: u16, path: &str, timeout: Duration) -> Result<Vec<u8>, Failure> {
     response
         .take(MAX_BYTES as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| if timed_out(&error) { Failure::NoReply { sent: false } } else { Failure::Unavailable })?;
     if body.len() > MAX_BYTES {
         return Err(Failure::Protocol(ERR_PROTOCOL.into()));
     }
@@ -729,8 +765,15 @@ fn run(port: u16, expression: &str, deadline: Instant) -> Result<Value, Failure>
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_BYTES))
         .max_frame_size(Some(MAX_BYTES));
-    let (mut socket, _) =
-        client_with_config(url, stream, Some(config)).map_err(|_| Failure::Unavailable)?;
+    // The page's socket was offered, so a socket that only stays silent is NetEase busy, not a closed port.
+    let socket_failure = |error: &tungstenite::Error, sent: bool| match error {
+        tungstenite::Error::Io(error) if timed_out(error) => Failure::NoReply { sent },
+        _ => Failure::Unavailable,
+    };
+    let (mut socket, _) = client_with_config(url, stream, Some(config)).map_err(|error| match error {
+        tungstenite::HandshakeError::Interrupted(_) => Failure::NoReply { sent: false },
+        tungstenite::HandshakeError::Failure(error) => socket_failure(&error, false),
+    })?;
     let request = json!({
         "id": 1,
         "method": "Runtime.evaluate",
@@ -738,12 +781,15 @@ fn run(port: u16, expression: &str, deadline: Instant) -> Result<Value, Failure>
     });
     socket
         .send(Message::text(request.to_string()))
-        .map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| socket_failure(&error, false))?;
     let reply = loop {
-        remaining(deadline)?;
+        remaining(deadline).map_err(|_| Failure::NoReply { sent: true })?;
         match socket.read() {
             Ok(Message::Text(text)) => {
+                // A lone UTF-16 surrogate (a string cut inside a character, or NetEase's own broken
+                // text) arrives escaped, and serde_json refuses the whole reply for it.
                 let message: Value = serde_json::from_str(text.as_str())
+                    .or_else(|_| serde_json::from_slice(&super::super::mend_surrogates(text.as_bytes())))
                     .map_err(|_| Failure::Protocol(ERR_PROTOCOL.into()))?;
                 // Events carry no id.
                 if message.get("id").and_then(Value::as_u64) == Some(1) {
@@ -754,7 +800,7 @@ fn run(port: u16, expression: &str, deadline: Instant) -> Result<Value, Failure>
             Err(tungstenite::Error::Capacity(_)) => {
                 return Err(Failure::Protocol(ERR_PROTOCOL.into()))
             }
-            Err(_) => return Err(Failure::Unavailable),
+            Err(error) => return Err(socket_failure(&error, true)),
         }
     };
     let _ = socket.close(None);
@@ -1015,6 +1061,16 @@ mod tests {
     /// answers each evaluate call on a page socket with `value`, after one event.
     /// Returns the port and the expressions it received.
     fn fake_devtools(list: Value, value: Value) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let reply = move |id: &Value| json!({ "id": id, "result": { "result": { "type": "object", "value": value } } }).to_string();
+        fake_devtools_with(list, Duration::ZERO, reply)
+    }
+
+    /// The same, answering each call `delay` after it came with the raw text `reply(id)`.
+    fn fake_devtools_with(
+        list: Value,
+        delay: Duration,
+        reply: impl Fn(&Value) -> String + Send + 'static,
+    ) -> (u16, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let expressions = Arc::new(Mutex::new(Vec::new()));
@@ -1052,10 +1108,10 @@ mod tests {
                     assert_eq!(request["method"], "Runtime.evaluate");
                     assert_eq!(request["params"]["returnByValue"], true);
                     seen.lock().unwrap().push(request["params"]["expression"].as_str().unwrap().into());
+                    std::thread::sleep(delay);
                     let event = json!({ "method": "Runtime.consoleAPICalled", "params": {} });
-                    let reply = json!({ "id": request["id"], "result": { "result": { "type": "object", "value": value } } });
                     let _ = socket.send(Message::text(event.to_string()));
-                    let _ = socket.send(Message::text(reply.to_string()));
+                    let _ = socket.send(Message::text(reply(&request["id"])));
                 }
             }
         });
@@ -1457,12 +1513,58 @@ mod tests {
             }
         });
         let started = Instant::now();
-        assert_eq!(state_at(port).unwrap(), DebugState::default());
+        // An open port that does not answer in time: no reply, not a closed port.
+        assert_eq!(state_at(port).unwrap_err(), ERR_NO_REPLY);
         let elapsed = started.elapsed();
         // The whole budget was spent waiting on the dripping handshake, and not much more.
         assert!(*dripped.lock().unwrap() >= 4, "the page socket was never reached");
         assert!(elapsed >= Duration::from_millis(1000), "{elapsed:?}");
         assert!(elapsed < STATE_BUDGET + Duration::from_millis(700), "{elapsed:?}");
+    }
+
+    #[test]
+    fn an_open_port_that_answers_late_is_no_reply_and_a_sent_play_is_not_refused() {
+        // NetEase busy (it misses a reading now and then while it loads a playlist): the reading is an
+        // error of its own, never the closed port's `available: false`, which offers to restart NetEase.
+        let late = |id: &Value| json!({ "id": id, "result": { "result": { "type": "string", "value": "sent" } } }).to_string();
+        let (port, asked) = fake_devtools_with(targets(), STATE_BUDGET + Duration::from_millis(500), late);
+        let started = Instant::now();
+        assert_eq!(state_at(port).unwrap_err(), ERR_NO_REPLY);
+        assert!(started.elapsed() < STATE_BUDGET + Duration::from_millis(700), "{:?}", started.elapsed());
+        assert_eq!(asked.lock().unwrap().len(), 1, "the call reached the page");
+        // A call that reached NetEase and got no answer in time may still be carried out: for a play
+        // request that is said apart from one that never went out.
+        let (port, _) = fake_devtools_with(targets(), Duration::from_millis(900), late);
+        let unanswered = run(port, &play_script("42"), Instant::now() + Duration::from_millis(400));
+        assert!(matches!(unanswered, Err(Failure::NoReply { sent: true })));
+        assert_eq!(play_failure(Failure::NoReply { sent: true }), ERR_UNANSWERED);
+        assert_eq!(play_failure(Failure::NoReply { sent: false }), ERR_NO_REPLY);
+        assert_eq!(play_failure(Failure::Unavailable), ERR_PORT);
+        // A /json/list that is taken but never answered is no reply either.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().take(2).collect();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(held);
+        });
+        assert_eq!(state_at(port).unwrap_err(), ERR_NO_REPLY);
+        assert_eq!(lyrics_at(port, "42", false).unwrap_err(), ERR_NO_REPLY);
+    }
+
+    #[test]
+    fn a_lone_half_of_a_character_in_a_reply_costs_that_character_only() {
+        // How Chromium writes a string cut inside a character. The lyrics here are made up.
+        let reply = |id: &Value| {
+            format!(r#"{{"id":{id},"result":{{"result":{{"type":"object","value":{{"status":"ready","lines":[[1,"line \ud83d"],[2,"\ud83d\ude00 whole"]]}}}}}}}}"#)
+        };
+        let (port, _) = fake_devtools_with(targets(), Duration::ZERO, reply);
+        let lyrics = lyrics_at(port, "1234567890", false).unwrap();
+        assert_eq!(lyrics.lines, [(Some(1.0), "line \u{FFFD}".to_string()), (Some(2.0), "\u{1F600} whole".to_string())]);
+        // Rhine's own script cuts a line at whole characters and writes NetEase's lone halves as U+FFFD.
+        let script = lyrics_script("1", false);
+        assert!(script.contains("Array.from(clean(line.lyric.slice(0, 600))).slice(0, 300).join('')"));
+        assert!(script.contains("value.length <= limit ? clean(value) : ''"));
     }
 
     #[test]

@@ -240,10 +240,13 @@ test('the player modules: NetEase is the only default link while nothing was con
   // ... and every session it lists goes through the module of its player (media::player_source): the
   // mark that gates NetEase's features, and QQ Music's and NetEase's names. The Windows-only reader has no unit test.
   const windowsMedia = readFileSync(new URL('../src-tauri/src/media/windows_media.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const readStart = windowsMedia.indexOf('\nfn read_source(entry: &mut Entry) -> Source {\n');
+  const readStart = windowsMedia.indexOf('\nfn read_source(entry: &mut Entry, known: &HashMap<String, u64>) -> Source {\n');
   assert.ok(readStart >= 0, 'the native side reads each session in read_source');
   const readSource = windowsMedia.slice(readStart, windowsMedia.indexOf('\n}\n', readStart + 1) + 3);
-  assert.match(readSource, /\n        player: None,\n/, 'a session is marked by its player\'s module only');
+  // (Its fields start from blank_source, also what a failed read keeps the last song in: 2026-10-24.)
+  assert.match(readSource, /let mut source = blank_source\(&entry\.id, &entry\.name, &entry\.app\);/);
+  const blank = windowsMedia.slice(windowsMedia.indexOf('\nfn blank_source('), windowsMedia.indexOf('\n}\n', windowsMedia.indexOf('\nfn blank_source(')) + 3);
+  assert.match(blank, /\n        player: None,\n/, 'a session is marked by its player\'s module only');
   assert.match(readSource, /\n    player_source\(&entry\.app, source\)\n\}\n$/, 'each session ends in its player\'s module');
   // The app's connection takes its links from the registry (the saved link, NetEase while there is none), and reads through it.
   const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
@@ -587,7 +590,7 @@ test('断开连接 also forgets a remembered source that has not appeared: no ot
   // The panel's button offers it: enabled while a source is connected or one is remembered.
   const { readFileSync } = await import('node:fs');
   const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
-  assert.match(app, /disconnected\.disabled = !externalMedia\.selectedId && !externalMedia\.remembers;/);
+  assert.match(app, /setDisconnect\(disconnected, !externalMedia\.selectedId && !externalMedia\.remembers\);/);
 });
 
 test('selecting a source again, the remembered one included, asks for the global media keys again', async () => {
@@ -625,6 +628,18 @@ test('a long name is clipped between characters, so the preferences stay readabl
   assert.equal(readSourceLink({ app: 'A!B', name: 'y'.repeat(300) }, PLAYER_MODULES).name, 'y'.repeat(200));
   assert.equal(readSourceLink({ app: 'A!B', name: '\u{1F600} Player' }, PLAYER_MODULES).name, '\u{1F600} Player');
   assert.doesNotMatch(JSON.stringify(readSourceLink({ app: 'A!B', name: whole }, PLAYER_MODULES)), half);
+});
+
+test('a long name without spaces (an app id) wraps wherever it is written, as in the list of players', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../src/external-media.css', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  // The panel's status line (等待 X…, X · 正在播放, 上次连接的是 X…) and the empty page's note (等待 X…).
+  assert.match(app, /<p id="external-connection-status" role="status"><\/p>/);
+  assert.match(app, /<p id="external-empty-note" role="status" hidden><\/p>/);
+  const wrapping = /([^{}]+)\{\s*overflow-wrap: anywhere;\s*\}/.exec(css)[1].split(',').map((selector) => selector.trim());
+  for (const selector of ['.external-source strong', '.external-source small', '#external-connection-status', '#external-empty-note'])
+    assert.ok(wrapping.includes(selector), selector);
 });
 
 test('a saved link is read as main.rs reads it, and the app saves the source and the link where main.rs looks', async () => {
@@ -669,8 +684,8 @@ test('a saved link is read as main.rs reads it, and the app saves the source and
   assert.equal(app.match(/playerLinks\(preferences\.playerLink, rememberPlayer\)/g)?.length, 2, 'the connection and the chooser remember alike');
   // The native side gives each session's app id, never inventing one for the window-title fallback.
   const windowsMedia = readFileSync(new URL('../src-tauri/src/media/windows_media.rs', import.meta.url), 'utf8');
-  assert.match(windowsMedia, /app: \(!entry\.app\.is_empty\(\)\)\.then\(\|\| entry\.app\.clone\(\)\),/);
-  assert.match(readFileSync(new URL('../src-tauri/src/netease_music/connector/window.rs', import.meta.url), 'utf8'), /\n\s+app: None,\n/);
+  assert.match(windowsMedia, /app: \(!app\.is_empty\(\)\)\.then\(\|\| app\.into\(\)\),/);
+  assert.match(readFileSync(new URL('../src-tauri/src/netease_music/connector/window.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n'), /\n\s+app: None,\n/);
 });
 
 test('a reading that fails does not connect the default; the surviving default link recovers', async () => {
@@ -818,6 +833,185 @@ test('a pending command keeps its chosen target and a late failure cannot overwr
   assert.equal(connection.selected.id, 'b');
 });
 
+test('seeks asked for while a control is on its way: the newest goes once it is back, for the same song only', async () => {
+  let snapshot = { sources: [source('a', { position: 60, duration: 240 })] };
+  const calls = [], answers = [];
+  const connection = new ExternalMediaConnection({
+    async snapshot() { return snapshot; },
+    control(...args) { calls.push(args); return new Promise((done, fail) => answers.push({ done, fail })); },
+  });
+  await connection.refresh();
+  connection.select('a');
+  const first = connection.control('seek', 61);
+  // The timeline stays usable meanwhile (offers, as the buttons and rings: 2026-10-23, a disabled
+  // slider dropped the keyboard's focus); a seek now is taken, not dropped.
+  assert.equal(connection.busy, true);
+  assert.equal(connection.can('seek'), false);
+  assert.equal(connection.offers('seek'), true);
+  for (const position of [62, 63, 64]) assert.equal(await connection.control('seek', position), true);
+  assert.deepEqual(calls, [['a', 'seek', 61, false]], 'one control at a time');
+  answers.shift().done();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.map(call => call[2]), [61, 64], 'only the newest of those waiting');
+  answers.shift().done();
+  assert.equal(await first, true);
+  assert.equal(connection.busy, false);
+  // A toggle on its way, then a seek: it goes after the toggle.
+  const toggle = connection.control('toggle');
+  assert.equal(await connection.control('seek', 80), true);
+  answers.shift().done();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.at(-1), ['a', 'seek', 80, false]);
+  answers.shift().done();
+  await toggle;
+  // Another song meanwhile (a snapshot read while the control was on its way): the seek is dropped.
+  const next = connection.control('next');
+  await connection.control('seek', 30);
+  snapshot = { sources: [source('a', { title: '下一首', position: 0, duration: 240 })] };
+  await connection.refresh();
+  answers.shift().done();
+  await next;
+  assert.deepEqual(calls.at(-1), ['a', 'next', undefined, false]);
+  // A failure of the control on its way is still told when the seek after it went well.
+  const failing = connection.control('toggle');
+  await connection.control('seek', 31);
+  answers.shift().fail(new Error('来源未接受此操作'));
+  await new Promise(resolve => setImmediate(resolve));
+  answers.shift().done();
+  await failing;
+  assert.equal(connection.error, '来源未接受此操作');
+  assert.deepEqual(calls.at(-1), ['a', 'seek', 31, false]);
+  // Still nothing for a player that does not offer seeking.
+  const fixed = fixture([source('c', { capabilities: { toggle: true, previous: false, next: false, stop: false, seek: false } })]);
+  await fixed.connection.refresh();
+  fixed.connection.select('c');
+  const pending = fixed.connection.control('toggle');
+  assert.equal(await fixed.connection.control('seek', 10), false);
+  await pending;
+  assert.deepEqual(fixed.calls, [['c', 'toggle', undefined, false]]);
+});
+
+test('a cover crosses once: the snapshot leaves out the ones the connection holds, which it keeps', async () => {
+  const asked = [];
+  let snapshot;
+  const cover = n => `data:image/png;base64,${'A'.repeat(n)}`;
+  const connection = new ExternalMediaConnection(playerMediaPort({
+    async snapshot(known) { asked.push(known); if (snapshot instanceof Error) throw snapshot; return snapshot; },
+    async control() {},
+  }));
+  snapshot = { sources: [source('a', { coverUrl: cover(4), coverRev: 1 }), source('b'), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverUrl: cover(8), coverRev: 2 })] };
+  await connection.refresh();
+  assert.deepEqual(asked.at(-1), {});
+  // The native side leaves out what is held at the same revision; the connection keeps it (QQ Music's renamed source too).
+  snapshot = { sources: [source('a', { coverRev: 1 }), source('b'), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverRev: 2 })] };
+  await connection.refresh();
+  assert.deepEqual(asked.at(-1), { a: 1, q: 2 });
+  assert.equal(connection.sources[0].coverUrl, cover(4));
+  assert.equal(connection.sources[2].coverUrl, cover(8));
+  assert.equal(connection.sources[2].name, 'QQ音乐');
+  assert.equal(connection.sources[1].coverUrl, undefined);
+  // A new revision without a picture: the cover is gone; with one: it is the new one.
+  snapshot = { sources: [source('a', { coverRev: 2 }), source('b', { coverUrl: cover(6), coverRev: 1 }), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverRev: 2 })] };
+  await connection.refresh();
+  assert.equal(connection.sources[0].coverUrl, undefined);
+  assert.equal(connection.sources[1].coverUrl, cover(6));
+  assert.deepEqual(asked.at(-1), { a: 1, q: 2 });
+  // After a snapshot that could not be read, every cover is asked for again.
+  snapshot = new Error('读取媒体来源超时');
+  await connection.refresh();
+  snapshot = { sources: [source('b', { coverUrl: cover(6), coverRev: 1 })] };
+  await connection.refresh();
+  assert.deepEqual(asked.at(-1), {});
+  // The card's key does not carry the picture's bytes where it has a revision, and still changes with it.
+  const keyed = source('a', { coverUrl: cover(5000), coverRev: 3 });
+  assert.ok(mediaVisualKey(keyed).length < 300);
+  assert.notEqual(mediaVisualKey(keyed), mediaVisualKey({ ...keyed, coverRev: 4 }));
+  assert.notEqual(mediaVisualKey(keyed), mediaVisualKey({ ...keyed, coverUrl: undefined }));
+  assert.equal(mediaVisualKey(keyed), mediaVisualKey({ ...keyed, position: 30 }));
+});
+
+test('whether the last snapshot was read: a failed one says nothing of the sessions, one with a warning does', async () => {
+  const { connection, set } = fixture([source('a')]);
+  assert.equal(connection.unread, false);
+  set(new Error('媒体读取请求已过期'));
+  await connection.refresh();
+  assert.equal(connection.unread, true);
+  assert.equal(connection.select('a'), false);
+  set({ sources: [source('a')], warning: 'Windows 媒体服务：枚举失败' });
+  await connection.refresh();
+  assert.equal(connection.unread, false);
+  assert.equal(connection.select('a'), true);
+});
+
+test('the app keeps the players\' timeline, covers, focus and panel words in step with the connection', async () => {
+  const { readFileSync } = await import('node:fs');
+  const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const app = read('src/music-app.ts');
+  const body = (start, end) => {
+    const from = app.indexOf(start);
+    assert.ok(from >= 0, start);
+    return app.slice(from, app.indexOf(end, from + start.length));
+  };
+  // The timeline: usable while a control is on its way (offers), running between snapshots, and a
+  // seek goes through seekExternal (the target held until the player shows it).
+  const timeline = body('function externalTimeline() {', '\n}\n');
+  assert.match(timeline, /position: sessionClock\.position\(source, performance\.now\(\)\) \?\? source\?\.position/);
+  assert.match(timeline, /seekable: !!externalMedia\?\.offers\("seek"\)/);
+  assert.doesNotMatch(app, /externalMedia\?\.can\("seek"\)/);
+  assert.match(app, /if \(externalTimeline\(\)\.debug\) requestSeek\(Number\(el\.value\)\);\n\s*else seekExternal\(Number\(el\.value\)\);/);
+  assert.match(body('function seekExternal(', '\n}\n'), /sessionClock\.seek\(source, position, performance\.now\(\)\);\s*updateExternalTimeline\(\);\s*void controlExternal\("seek", position\);/);
+  // A failed control is told once, in a notice, unless its player went meanwhile (the header says what
+  // follows then: QQ Music, 2026-10-24); its error is not left in the details' warning line.
+  assert.match(body('async function controlExternal(', '\n}\n'), /if \(externalMedia\.error\) \{\s*const error = externalMedia\.error;\s*(\/\/[^\n]*\s*)*sessionClock\.release\(\);\s*(\/\/[^\n]*\s*)*await externalMedia\.refresh\(\);\s*if \(!externalMedia\.disconnected\) notify\(error\);\s*\} else if \(action === "seek" && !sent\) sessionClock\.release\(\);/);
+  assert.match(app, /const warning = \[externalMedia\.warning, source\?\.warning\]\.filter\(Boolean\)\.join\("\\n"\);/);
+  // The 播放器 panel's list is drawn again when what it says changes: which row is the default (断开连接),
+  // or which empty-list words apply (nothing read yet: no "没有发现播放器" before the first read).
+  assert.match(app, /const markup = mediaSourcesMarkup\(externalMedia\);\s*if \(markup !== sourcesVisual\) \{\s*sourcesVisual = markup;\s*writeSources\(\$\("#external-sources"\), markup\);\s*\}/);
+  assert.match(app, /const markup = mediaSourcesMarkup\(playerChooser\);\s*if \(list && markup !== chooserVisual\) \{\s*chooserVisual = markup;\s*writeSources\(list, markup\);\s*\}/);
+  // A control the session does not offer says why, in its title and name; the lone track's ring uses the header ring's words.
+  assert.match(app, /if \(action === "toggle"\) \{\s*applyRing\(button, pauseResumeRing\(\)\);\s*return;\s*\}/);
+  // A control that stops being usable under the focus keeps it, its presses ignored, until the focus
+  // leaves (QQ Music quitting and coming back, 2026-10-24); the 播放器 list never hands a gone row's
+  // focus to another player's row; an emptied shelf hands it to the waiting page.
+  assert.match(body('function setUsable(button: HTMLButtonElement, usable: boolean) {', '\n}\n'), /if \(document\.activeElement !== button\) \{[\s\S]*button\.setAttribute\("aria-disabled", "true"\);[\s\S]*const settle = \(\) => \{\s*if \(document\.activeElement === button\) return;/);
+  assert.match(app, /if \(target instanceof HTMLButtonElement && \(target\.disabled \|\| target\.getAttribute\("aria-disabled"\) === "true"\)\) return;/);
+  assert.match(app, /\(list\.querySelector<HTMLElement>\(`\[data-media-source="\$\{CSS\.escape\(had\)\}"\]`\) \?\? sourcesPanelFocus\(\)\)\?\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(app, /if \(!albums\.length && hadAlbums && inScene && !panel && !boot\?\.active\)\s*document\.querySelector<HTMLElement>\("#music-empty button"\)\?\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(app, /: `：\$\{source\.name\}没有提供\$\{title\}`;/);
+  // A snapshot read while a seek is on its way (or waits behind another control) is not its answer.
+  assert.match(body('async function refreshExternal() {', '\n}\n'), /await externalMedia\.refresh\(\);[\s\S]*sessionClock\.update\(externalMedia\.selected, performance\.now\(\), externalMedia\.seeking\);/);
+  // The 播放器 panel: its list written again keeps the focus on the same player; 断开连接 going off
+  // under the focus hands it on; the empty page behind the dialog is out of reach while it is open.
+  assert.equal((app.match(/writeSources\(/g) || []).length, 3, 'both lists, and the helper');
+  assert.doesNotMatch(app, /\.innerHTML = mediaSourcesMarkup\(/);
+  assert.match(body('function writeSources(', '\n}\n'), /list\.querySelector<HTMLElement>\(`\[data-media-source="\$\{CSS\.escape\(had\)\}"\]`\)/);
+  assert.equal((app.match(/setDisconnect\(/g) || []).length, 3);
+  assert.match(body('function setDisconnect(', '\n}\n'), /if \(off && document\.activeElement === button\) sourcesPanelFocus\(\)\?\.focus/);
+  assert.equal((app.match(/\$\("#music-empty"\),\n/g) || []).length, 2, 'inert with the panel, and back');
+  // The handed-over session waits for a snapshot that was read, and the user's own choice wins.
+  assert.match(body('async function refreshExternal() {', '\n}\n'), /if \(handedSession && !externalMedia\.unread\) \{/);
+  assert.match(app, /if \(target\.dataset\.mediaSource && externalMedia\) \{\n\s*\/\/[^\n]*\n\s*handedSession = undefined;/);
+  assert.match(app, /handedSession = undefined;\n\s*externalMedia\?\.disconnect\(\);/);
+  // A lone live card whose picture alone changed is painted again in place (no rebuild of the shelf).
+  assert.match(app, /const coverOnly = playerCurrent && !netease\.shownQueue\(\) && oldBare === bareKey\(albums, genres\);/);
+  assert.match(app, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
+  // The panel's opening words no longer promise a 切歌 switch (gone 2026-10-09: "do not make this a
+  // setting option"): the queue and its playlist columns are switched below, and NetEase plays a
+  // chosen song once started with its debugging port.
+  assert.doesNotMatch(app, /切歌在下方另行开关/);
+  // The debugging port's section is there only with NetEase's queue shown: the words point to it only then.
+  assert.match(app, /网易云的播放队列与按歌单分列在下方另行开关<span id=\\"sources-intro-port\\"><\/span>。/);
+  assert.match(app, /if \(pointer\) pointer\.textContent = queueSetting\.querySelector\("\.external-debug-port"\) \? "；要让网易云播放选中的歌，需以调试端口启动它（见下方）" : "";/);
+  assert.doesNotMatch(app, /需以调试端口启动它（见下方）。/);
+  // The native side: a failed enumeration keeps the sessions (their ids and covers); a cover goes
+  // out only when the page does not hold it at its revision; the command takes what the page holds.
+  const windowsMedia = read('src-tauri/src/media/windows_media.rs');
+  assert.match(windowsMedia, /Err\(error\) => \{\n(\s*\/\/[^\n]*\n)*\s*self\.manager = None;\n\s*return Err\(win_error\(error\)\);/);
+  assert.doesNotMatch(windowsMedia, /self\.entries\.clear\(\)/);
+  assert.match(windowsMedia, /if known\.get\(&entry\.id\) != Some\(&entry\.cover_rev\) \{\n\s*source\.cover_url = entry\.cover\.clone\(\);/);
+  assert.match(read('src-tauri/src/main.rs'), /async fn media_snapshot\(\n\s*known_covers: Option<std::collections::HashMap<String, u64>>,\n\) -> Result<rhine_music::media::Snapshot, String> \{/);
+});
+
 test('source markup escapes metadata and native requests carry an explicit global-key decision', async () => {
   const { connection } = fixture([source('"<script>', { title: '<img src=x onerror=alert(1)>' })]);
   await connection.refresh();
@@ -831,7 +1025,7 @@ test('source markup escapes metadata and native requests carry an explicit globa
     await nativeMediaPort.snapshot();
     await nativeMediaPort.control('chosen-source', 'next', undefined, false);
     assert.deepEqual(calls, [
-      ['media_snapshot'],
+      ['media_snapshot', { knownCovers: {} }],
       ['media_control', { sourceId: 'chosen-source', action: 'next', position: undefined, allowGlobalMediaKeys: false }],
     ]);
   } finally { globalThis.window = previousWindow; }
@@ -996,6 +1190,174 @@ test('the playback clock runs evenly between whole-second readings and follows s
   assert.equal(clock.duration, undefined);
 });
 
+test('a media session\'s timeline runs on between snapshots while it plays, and shows Rhine\'s own seek until the player does', async () => {
+  const { SessionClock } = await import('../src/external_player/session-clock.ts');
+  const qq = (position, extra = {}) => source('q', { name: 'QQ音乐', player: 'qqmusic', position, duration: 240, ...extra });
+  const clock = new SessionClock();
+  assert.equal(clock.position(qq(10), 0), undefined, 'nothing is shown before the first reading');
+  // Readings as the native side takes them (at the moment of each snapshot), about every 1.1 s:
+  // the seconds count on in between and never skip or step back (2026-10-23: 3 of 22 skipped).
+  let shown = [], at = 0, truth = 10;
+  for (let poll = 0; poll < 20; poll++) {
+    clock.update(qq(truth), at);
+    for (let tick = 0; tick < 1100; tick += 250) shown.push(clock.position(qq(truth), at + tick));
+    at += 1100;
+    truth += 1.1;
+  }
+  shown.forEach((value, i) => i && assert.ok(value >= shown[i - 1] - 1e-9, `never steps back: ${value} after ${shown[i - 1]}`));
+  const seconds = shown.map(Math.floor);
+  seconds.forEach((value, i) => i && assert.ok(value - seconds[i - 1] <= 1, `no second skipped: ${seconds[i - 1]} → ${value}`));
+  // Never more than 1.25 s past the last reading (a snapshot that is late does not run away), nor past the end.
+  clock.update(qq(50), 30000);
+  assert.equal(clock.position(qq(50), 40000), 51.25);
+  clock.update(qq(239.5), 41000);
+  assert.equal(clock.position(qq(239.5), 43000), 240);
+  // Paused, stopped or unknown: the reading, nothing runs.
+  for (const playback of ['paused', 'stopped', 'unknown']) {
+    clock.update(qq(70, { playback }), 50000);
+    assert.equal(clock.position(qq(70, { playback }), 52000), 70, playback);
+  }
+  // Another song, or another session: its own reading; no reading: nothing.
+  clock.update(qq(0, { title: '下一首' }), 60000);
+  assert.equal(clock.position(qq(0, { title: '下一首' }), 60500), 0.5);
+  assert.equal(clock.position(qq(0), 60500), undefined, 'the clock is for the song it read');
+  clock.update(qq(undefined), 61000);
+  assert.equal(clock.position(qq(undefined), 61000), undefined);
+  // A player whose readings stand still while it says it plays (no timeline): not run on.
+  const still = new SessionClock();
+  for (const now of [0, 1100, 2200]) still.update(qq(5), now);
+  assert.equal(still.position(qq(5), 3000), 5);
+  // Rhine's seek shows at once and stands while it is on its way (`seeking`: a snapshot answered
+  // meanwhile still has where the song was); the next step goes on from it. Once the player has
+  // answered, the target runs on from then, and a reading of where the song was (one second off: the
+  // arrow keys' step) does not pull it back; a reading of the target takes over; one that never comes
+  // ends the hold, and a refused seek ends it at once.
+  const seeking = new SessionClock();
+  seeking.update(qq(60), 0);
+  seeking.seek(qq(60), 61, 100);
+  assert.equal(seeking.position(qq(60), 100), 61);
+  seeking.update(qq(60.3), 300, true);
+  assert.equal(seeking.position(qq(60.3), 300), 61, 'on its way: the target stands, the old position does not pull it back');
+  seeking.seek(qq(60.3), 62, 350);
+  assert.equal(seeking.position(qq(60.3), 350), 62, 'the next step goes on from the target');
+  seeking.update(qq(61.1), 600, true);
+  assert.equal(seeking.position(qq(61.1), 600), 62, 'nor does the step before');
+  seeking.update(qq(60.7), 700);
+  assert.equal(seeking.position(qq(60.7), 700), 62, 'answered, but the player shows where the song was: not taken');
+  assert.ok(Math.abs(seeking.position(qq(60.7), 1000) - 62.3) < 1e-9, 'it runs on from the answer');
+  seeking.update(qq(61.35), 1000);
+  assert.ok(Math.abs(seeking.position(qq(61.35), 1000) - 62.3) < 1e-9, 'nor the step before it, shown late');
+  seeking.update(qq(62.5), 1100);
+  assert.equal(seeking.position(qq(62.5), 1100), 62.5, 'the player has it: on from there');
+  seeking.seek(qq(62.5), 100, 1200);
+  seeking.update(qq(63), 1300, true);
+  seeking.update(qq(64.6), 2900, true);
+  assert.equal(seeking.position(qq(64.6), 2900), 100, 'a slow seek holds as long as it is on its way');
+  seeking.update(qq(64.7), 3000);
+  assert.equal(seeking.position(qq(64.7), 3000), 100, 'and for the hold from its answer');
+  seeking.update(qq(66.3), 4600);
+  assert.equal(seeking.position(qq(66.3), 4600), 66.3, 'after the hold the player is believed again');
+  seeking.seek(qq(66.3), 120, 4700);
+  seeking.release();
+  seeking.update(qq(66.5), 4800);
+  assert.equal(seeking.position(qq(66.5), 4800), 66.5);
+  // Paused, one second at a time (the slider's own step): where the song was, one second from the
+  // target, is never the seek done; the next press steps on from the target.
+  const paused = new SessionClock();
+  const halted = (position) => qq(position, { playback: 'paused' });
+  paused.update(halted(60), 0);
+  paused.seek(halted(60), 61, 100);
+  paused.update(halted(60), 300);
+  assert.equal(paused.position(halted(60), 300), 61);
+  paused.seek(halted(60), 62, 400);
+  paused.update(halted(61), 700);
+  assert.equal(paused.position(halted(61), 700), 62, 'the step before, shown late');
+  paused.update(halted(62), 1000);
+  assert.equal(paused.position(halted(62), 1000), 62);
+  paused.seek(halted(62), 63, 1100);
+  paused.update(halted(62), 1200);
+  assert.equal(paused.position(halted(62), 1200), 63);
+  paused.update(halted(62), 2800);
+  assert.equal(paused.position(halted(62), 2800), 62, 'a seek the player never shows: believed after the hold');
+  // Playing, one step: the target runs on; a reading of it a hair behind keeps the clock.
+  const playing = new SessionClock();
+  playing.update(qq(60.6), 0);
+  playing.seek(qq(60.6), 61, 100);
+  playing.update(qq(60.8), 200);
+  assert.equal(playing.position(qq(60.8), 200), 61, 'where the song was (60.6 run on), as it is answered: not taken');
+  playing.update(qq(61.25), 500);
+  assert.ok(Math.abs(playing.position(qq(61.25), 500) - 61.3) < 1e-9, 'its own reading, a hair behind: the clock stays');
+});
+
+test('arrow steps on a media session\'s timeline each go one second on from the last, while controls are on their way', async () => {
+  const { SessionClock } = await import('../src/external_player/session-clock.ts');
+  // A fictional session, paused at 60. The native media worker answers snapshots and controls one at
+  // a time in the order asked (windows_media.rs); a seek takes effect when it is answered, and `late`
+  // snapshots after it still show where the song was (a player that shows it a moment late).
+  function player(late = 0) {
+    let position = 60, playing = false, shownLate = 0, before = 60;
+    const jobs = [], seeks = [];
+    const port = {
+      snapshot: () => new Promise(done => jobs.push(() => {
+        const shown = shownLate > 0 ? before : position;
+        shownLate--;
+        done({ sources: [source('q', { name: 'QQ音乐', player: 'qqmusic', playback: playing ? 'playing' : 'paused', position: shown, duration: 240 })] });
+      })),
+      control: (id, action, target) => new Promise(done => jobs.push(() => {
+        if (action === 'toggle') playing = !playing;
+        if (action === 'seek') { before = position; position = target; seeks.push(target); shownLate = late; }
+        done();
+      })),
+    };
+    const connection = new ExternalMediaConnection(port);
+    const clock = new SessionClock();
+    // The page (music-app.ts): each snapshot read goes to the clock, with whether a seek is on its way;
+    // a control is followed by a snapshot once it is back (a seek waiting for another: at once).
+    const refresh = async () => { await connection.refresh(); clock.update(connection.selected, 0, connection.seeking); };
+    const control = (action, value) => void connection.control(action, value).then(refresh);
+    const shown = () => Math.floor(clock.position(connection.selected, 0));
+    // ArrowRight on the range: one second on from what it shows.
+    const press = () => { const value = shown() + 1; clock.seek(connection.selected, value, 0); control('seek', value); return value; };
+    // The worker answers the oldest request; the page runs what follows from it.
+    const answer = async () => { jobs.shift()(); for (let i = 0; i < 50; i++) await Promise.resolve(); };
+    const settle = async (each = () => {}) => { while (jobs.length) { await answer(); each(); } };
+    const start = async () => {
+      const ready = refresh();
+      await answer();
+      await ready;
+      connection.select('q');
+      clock.update(connection.selected, 0, false);
+    };
+    return { connection, seeks, press, control, shown, settle, start, get position() { return position; } };
+  }
+  for (const late of [0, 1]) {
+    // Three quick presses while the first seek is on its way; two more once it is all answered.
+    const p = player(late);
+    await p.start();
+    const pressed = [p.press(), p.press(), p.press()];
+    const shown = [p.shown()];
+    await p.settle(() => shown.push(p.shown()));
+    pressed.push(p.press());
+    await p.settle();
+    pressed.push(p.press());
+    await p.settle();
+    shown.push(p.shown());
+    assert.deepEqual(pressed, [61, 62, 63, 64, 65], `late ${late}: each press steps on from the last target`);
+    assert.equal(p.position, 65, `late ${late}: the player ends where the last press went`);
+    assert.equal(p.seeks.at(-1), 65);
+    shown.forEach((value, i) => i && assert.ok(value >= shown[i - 1], `late ${late}: the slider never goes back (${shown})`));
+  }
+  // Space (play / pause on its way), then three arrow presses: the newest target goes once it is back.
+  const p = player(1);
+  await p.start();
+  p.control('toggle');
+  assert.deepEqual([p.press(), p.press(), p.press()], [61, 62, 63]);
+  await p.settle();
+  assert.equal(p.shown(), 63);
+  assert.deepEqual(p.seeks, [63], 'only the newest target, once the toggle is back');
+  assert.equal(p.position, 63);
+});
+
 // The JavaScript Rhine evaluates inside NetEase's page lives in the Rust module as raw strings;
 // run it here against stand-ins for NetEase's store and progress slider.
 async function neteaseScripts() {
@@ -1010,6 +1372,7 @@ async function neteaseScripts() {
     seek: new Function('id', 'seconds', 'findStore', body('SEEK_BODY')),
     playlist: new Function('playlist', 'track', 'name', 'findStore', body('PLAYLIST_BODY')),
     state: new Function('findStore', 'document', body('STATE_BODY')),
+    lyrics: new Function('id', 'load', 'findStore', body('LYRICS_BODY')),
   };
 }
 const neteaseStore = playing => {
@@ -1157,7 +1520,11 @@ test('a NetEase picture is one picture on any of its image servers, and the shel
   const apply = app.slice(app.indexOf('async function applyLibrary() {'), app.indexOf('\n}\n', app.indexOf('async function applyLibrary() {')));
   assert.match(apply, /items\.map\(\(a\) => \[a\.title, a\.artist, a\.genreId, a\.coverKey \?\? a\.coverUrl\]\)/);
   assert.match(apply, /const same = records\.findIndex\(\(record\) => record\.id === before\.id\);\s*if \(same >= 0\) return same;\s*const song = caseSong\(before\.id\), column = before\.album\?\.genreId;\s*return records\.findIndex\(\(record\) => record\.album\?\.genreId === column && caseSong\(record\.id\) === song\);/);
-  assert.match(apply, /const anchor = playerCurrent && hadAlbums && !!netease\.shownQueue\(\) \? moved\(previousIndex\) : -1;/, 'NetEase\'s queue shelf only: a source with one card is built again for each song, as before');
+  // NetEase's queue shelf and 本地音乐's (a scan); a source with one card is built again for each song,
+  // as before, and kept only while the same song merely shows another picture (coverOnly: the same id,
+  // title, artist and column).
+  assert.match(apply, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
+  assert.match(apply, /const bareKey = \(items: MusicAlbum\[\], groups: MusicGenre\[\]\) =>\s*JSON\.stringify\(\[items\.map\(\(a\) => \[a\.id, a\.title, a\.artist, a\.genreId\]\), groups\.map\(\(g\) => \[g\.id, g\.name\]\)\]\);/);
   assert.match(apply, /if \(scene && ready && oldVisual !== visualKey\(albums, genres\) && anchor >= 0\) \{/);
   assert.match(apply, /const target = selected;\s*selected = anchor;\s*scene\.relayout\(anchor\);\s*if \(target !== anchor\) select\(target\);\s*\} else if \(scene && ready && oldVisual !== visualKey\(albums, genres\)\) \{/);
   assert.doesNotMatch(apply, /oldShape === shapeKey/, 'the same shape is no longer the only way to keep the shelf');
@@ -1167,7 +1534,7 @@ test('a NetEase picture is one picture on any of its image servers, and the shel
   assert.match(keep, /const index = moved\(pending\.index\);\s*if \(index >= 0\) presentation\.pendingSelection = \{ \.\.\.pending, index, navigation: undefined \};\s*else presentation\.pendingSelection = undefined;/);
   assert.match(keep, /const index = moved\(gestureFor\);\s*gestureFor = index >= 0 \? index : undefined;/);
   // The song scene lists the selected column: again when its songs changed under the selection.
-  assert.match(apply, /if \(mode === "detail" && \(previousDetail !== detailKey\(\) \|\| \(menu === "song" && shapeChanged\)\)\)\s*menu === "song" \? renderSongs\(\) : renderDetail\(\);/);
+  assert.match(apply, /if \(mode === "detail" && \(\(previousDetail !== detailKey\(\) && !coverOnly\) \|\| \(menu === "song" && shapeChanged\)\)\)\s*menu === "song" \? renderSongs\(\) : renderDetail\(\);/);
   // The scene keeps the lifted case, its motion and the camera; a column that came or went before
   // the selected one moves the view with it by whole columns, as rebaseCoordinates does.
   const scene = (await import('node:fs')).readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -1425,7 +1792,7 @@ test('▶ asks NetEase for a song of its queue by 播放队列中这首歌, for 
   await session.playQueueSong(fromGamma);
   assert.deepEqual(played, ['99']);
   assert.deepEqual(playlistsPlayed, [['4', '22', 'Gamma']]);
-  assert.deepEqual(session.queueJump && { ...session.queueJump, at: 0 }, { key: 'netease-track:22', at: 0, from: 'netease-list:4:22', timeout: 15000, fromTrack: '23' }, 'NetEase loads the playlist first');
+  assert.deepEqual(session.queueJump && { ...session.queueJump, at: 0 }, { key: 'netease-track:22', song: '22', at: 0, from: 'netease-list:4:22', timeout: 15000, fromTrack: '23' }, 'NetEase loads the playlist first');
   // 正在切换… on the case it was asked from while it is there; once the playlist is NetEase's queue
   // (the case is gone), on the song's case of the queue. Asked again meanwhile: nothing is sent.
   assert.equal(session.pendingKey(), 'netease-list:4:22');
@@ -1497,28 +1864,52 @@ test('a play request NetEase has not answered where it was asked keeps the poll 
   const fromGamma = { key: 'netease-track:22', song: laneTrack(22), playlist: { id: '4', name: 'Gamma' }, from: 'netease-list:4:22' };
   await session.playQueueSong(fromGamma);
   assert.equal(session.awaiting(), true, 'asked');
-  // NetEase plays 22, but its saved queue is still Beta's (which has no 22): still waiting.
+  // NetEase plays 22, but its saved queue is still Beta's (which has no 22): still waiting. The song is
+  // answered, and the request stands where it was asked (正在切换…, nothing to ask again, no ▶) until
+  // the queue is read; previous / next are not refused for a song outside a queue NetEase has replaced.
   debug = { ...debug, trackId: '22' };
   await poll();
   assert.equal(session.awaiting(), true, 'the song plays, its queue is not saved yet');
+  assert.equal(session.queueJump?.answered, true);
+  assert.equal(session.isPending('netease-list:4:22'), true);
+  assert.equal(session.outsideQueue(), false, 'NetEase\'s queue is Gamma already');
   // NetEase saves Gamma as its queue: the request is answered, the poll goes back to its second.
   queue = { status: 'queue', stamp: 'q2', truncated: false, tracks: [laneTrack(22), laneTrack(41)], source: { id: '4', name: 'Gamma' } };
   await poll();
   assert.equal(session.queueJump, undefined, 'NetEase reported the song asked for');
   assert.equal(session.awaiting(), false, 'and its queue comes from the playlist');
   // A song that is in both queues: NetEase playing it answers the song at once, but the playlist's
-  // column shows it only once the new queue is read, so the poll stays quick until then.
+  // column shows it only once the new queue is read, so the request (and the quick poll) stands until then.
   queue = { status: 'queue', stamp: 'q3', truncated: false, tracks: [laneTrack(21), laneTrack(22), laneTrack(23)], source: { id: '2', name: 'Beta' } };
   debug = { ...debug, trackId: '21' };
   await poll();
   await session.playQueueSong({ key: 'netease-track:22', song: laneTrack(22), playlist: { id: '4', name: 'Gamma' }, from: 'netease-list:4:22' });
   debug = { ...debug, trackId: '22' };
   await poll();
-  assert.equal(session.queueJump, undefined, 'the song was reported (it is in Beta too)');
+  assert.equal(session.queueJump?.answered, true, 'the song was reported (it is in Beta too), its playlist not yet');
+  assert.equal(session.isPending('netease-list:4:22'), true);
   assert.equal(session.awaiting(), true, 'Gamma is not the queue yet');
   queue = { status: 'queue', stamp: 'q4', truncated: false, tracks: [laneTrack(22), laneTrack(41)], source: { id: '4', name: 'Gamma' } };
   await poll();
+  assert.equal(session.queueJump, undefined);
   assert.equal(session.awaiting(), false);
+  // The playing song asked for with its playlist (NetEase replaces its queue, the song plays on): the
+  // case it was asked from shows the request until the playlist is the queue, and it is not sent twice.
+  queue = { status: 'queue', stamp: 'q5', truncated: false, tracks: [laneTrack(22), laneTrack(23)], source: { id: '2', name: 'Beta' } };
+  await poll();
+  assert.equal(session.queuePlaying, 'netease-track:22');
+  let sent = 0;
+  ports.debug.playPlaylist = async () => { sent++; };
+  const again = { key: 'netease-track:22', song: laneTrack(22), playlist: { id: '4', name: 'Gamma' }, from: 'netease-list:4:22' };
+  await session.playQueueSong(again);
+  assert.equal(session.isPending('netease-list:4:22'), true);
+  await session.playQueueSong(again);
+  assert.equal(sent, 1, 'pressed again meanwhile: nothing more is sent');
+  queue = { status: 'queue', stamp: 'q6', truncated: false, tracks: [laneTrack(22), laneTrack(41)], source: { id: '4', name: 'Gamma' } };
+  await poll();
+  assert.equal(session.queueJump, undefined);
+  assert.equal(session.awaiting(), false);
+  ports.debug.playPlaylist = async () => { if (fail) throw new Error('fictional port error'); };
   // A request that lapses (NetEase never switched) ends the quick reads with it.
   debug = { ...debug, trackId: '41' };
   await poll();
@@ -1741,8 +2132,264 @@ test('NetEase playing a song outside its queue: previous / next are not offered,
   // The page: both previous / next buttons follow it, the reason only in their titles and names.
   const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const controls = app.slice(app.indexOf('function updateExternalControls() {'), app.indexOf('\n}\n', app.indexOf('function updateExternalControls() {')));
-  assert.match(controls, /const stuck = netease\.outsideQueue\(\);\s*document\.querySelectorAll<HTMLButtonElement>\("\[data-media-action\]"\)\.forEach\(button => \{\s*const action = button\.dataset\.mediaAction as MediaAction, skip = action === "previous" \|\| action === "next";\s*button\.disabled = !externalMedia\.offers\(action\) \|\| \(skip && stuck\);/);
+  assert.match(controls, /const stuck = netease\.outsideQueue\(\);\s*document\.querySelectorAll<HTMLButtonElement>\("\[data-media-action\]"\)\.forEach\(button => \{\s*const action = button\.dataset\.mediaAction as MediaAction, skip = action === "previous" \|\| action === "next";\s*setUsable\(button, externalMedia\.offers\(action\) && !\(skip && stuck\)\);/);
   assert.match(controls, /if \(button\.getAttribute\("aria-label"\) !== name \+ reason\) button\.setAttribute\("aria-label", name \+ reason\);\s*if \(button\.title !== title \+ reason\) button\.title = title \+ reason;/);
+});
+
+test('a reading NetEase\'s port does not answer in time is no closed port: no restart, its own reason, and the timeline keeps the last reading a while', async () => {
+  // NetEase busy (it misses a reading now and then while it loads a playlist): the native side says so
+  // (debug_port.rs ERR_NO_REPLY) instead of the closed port's `available: false`, which offered to
+  // restart a NetEase that was only busy and said its port was not open. Every song here is made up.
+  const { NeteaseSession, PORT_GRACE_MS } = await import('../src/netease_music/connector/session.ts');
+  const { PORT_NO_REPLY, PLAY_UNANSWERED } = await import('../src/netease_music/connector/ports.ts');
+  let debug = { available: true, trackId: '23', playback: 'playing', mode: 'playOrder', duration: 100, position: 30 }, answer = 'ok';
+  const played = [], notices = [];
+  const ports = {
+    queue: { async read() { return { status: 'queue', stamp: 'q1', truncated: false, tracks: [laneTrack(23), laneTrack(21)] }; } },
+    playlists: { async read() { return { status: 'playlists', stamp: 'p1', truncated: false, playlists: [] }; } },
+    debug: {
+      async state() { if (answer === 'late') throw new Error(PORT_NO_REPLY); if (answer === 'error') throw new Error('fictional page error'); return debug; },
+      async play(id) { played.push(id); throw new Error(PLAY_UNANSWERED); }, async seek() { return 0; }, async restart() { throw new Error('never restarted'); },
+    },
+  };
+  const { connection, set } = fixture([netease('n1', { title: 'Song 23' })], NETEASE);
+  await connection.refresh();
+  let albums = [];
+  const session = new NeteaseSession({
+    media: connection, preferences: { neteaseQueue: true, playlistColumns: false },
+    recordId: index => albums[index]?.id, genreId: () => 'external', indexOf: id => albums.findIndex(album => album.id === id),
+    selected: () => 0, navigationSelection: () => 0, canFollow: () => false, follow() {}, songChanged() {}, jumpChanged() {},
+    confirmSoon() {}, async refresh() {}, notify(message) { notices.push(message); },
+  }, ports);
+  const original = console.warn;
+  console.warn = () => {};
+  try {
+    await session.refresh();
+    albums = session.shelf(connection.selected).library().albums;
+    session.followQueue();
+    assert.equal(session.timeline(connection.selected).duration, 100);
+    // One late reading: its reason is that the port does not answer, and nothing offers a restart.
+    answer = 'late';
+    await session.refresh();
+    assert.equal(session.portBlock(), 'error');
+    assert.deepEqual({ ...session.queueControl() }, { available: false, status: PORT_NO_REPLY, restart: false });
+    // The timeline keeps the last reading (a second past it at most, as between any two), and can be dragged.
+    const kept = session.timeline(connection.selected);
+    assert.ok(kept && kept.duration === 100 && kept.seekable && kept.debug && kept.position >= 30 && kept.position <= 31, JSON.stringify(kept));
+    // ... while the media session names the same song, for PORT_GRACE_MS.
+    set({ sources: [netease('n1', { title: 'Song 21' })] });
+    await connection.refresh();
+    assert.equal(session.timeline(connection.selected), undefined, 'another song by the media session');
+    set({ sources: [netease('n1', { title: 'Song 23' })] });
+    await connection.refresh();
+    assert.ok(session.timeline(connection.selected));
+    session.portSeen.at -= PORT_GRACE_MS;
+    await session.refresh();
+    assert.equal(session.timeline(connection.selected), undefined, 'not past PORT_GRACE_MS');
+    // An error the port gave is no late reading: nothing is kept.
+    answer = 'ok';
+    await session.refresh();
+    answer = 'error';
+    await session.refresh();
+    assert.equal(session.timeline(connection.selected), undefined);
+    assert.equal(session.queueControl().restart, false);
+    // A closed port: the restart is offered, as before.
+    answer = 'ok';
+    debug = { available: false };
+    await session.refresh();
+    assert.equal(session.portBlock(), 'port');
+    assert.equal(session.queueControl().restart, true);
+    // A play request that reached NetEase without an answer in time is waited for, and said nothing of.
+    debug = { available: true, trackId: '23', playback: 'playing', mode: 'playOrder', duration: 100, position: 30 };
+    await session.refresh();
+    session.followQueue();
+    await session.playQueueSong({ key: 'netease-track:21', song: laneTrack(21) });
+    assert.deepEqual(played, ['21']);
+    assert.equal(session.queueJump?.key, 'netease-track:21');
+    assert.deepEqual(notices, []);
+    // A late reading as the queue changes is no answer either: the request stands until its time.
+    answer = 'late';
+    albums = albums.filter(album => album.id !== 'netease-track:23');
+    await session.refresh();
+    session.followQueue();
+    assert.equal(session.queueJump?.key, 'netease-track:21');
+    session.queueJump.at -= 7000;
+    session.followQueue();
+    assert.equal(session.queueJump, undefined);
+    assert.deepEqual(notices, ['网易云没有切换到选中的歌曲。']);
+  } finally {
+    console.warn = original;
+  }
+  // The words the native side gives are the ones the page knows.
+  const rust = (await import('node:fs')).readFileSync(new URL('../src-tauri/src/netease_music/connector/debug_port.rs', import.meta.url), 'utf8');
+  assert.match(rust, new RegExp(`const ERR_NO_REPLY: &str = "${PORT_NO_REPLY}";`));
+  assert.match(rust, new RegExp(`const ERR_UNANSWERED: &str = "${PLAY_UNANSWERED}";`));
+});
+
+test('a timeline target belongs to the song the drag began in: NetEase changing song meanwhile does not get it', async () => {
+  // A drag (or a held arrow key) on one song, let go after NetEase moved on to the next: the target went
+  // to the next song, which jumped to the middle. Every song here is made up.
+  const { NeteaseSession } = await import('../src/netease_music/connector/session.ts');
+  let debug = { available: true, trackId: '23', playback: 'playing', mode: 'playOrder', duration: 191, position: 30 };
+  const seeks = [], notices = [];
+  const ports = {
+    queue: { async read() { return { status: 'queue', stamp: 'q1', truncated: false, tracks: [laneTrack(23), laneTrack(21)] }; } },
+    playlists: { async read() { return { status: 'playlists', stamp: 'p1', truncated: false, playlists: [] }; } },
+    debug: {
+      async state() { return debug; }, async play() {}, async restart() {},
+      // As the native side answers: only for the song NetEase plays.
+      async seek(id, position) { seeks.push([id, position]); if (id !== debug.trackId) throw new Error('网易云已经换歌，没有调整进度'); return position; },
+    },
+  };
+  const { connection } = fixture([netease('n1', { title: 'Song 23' })], NETEASE);
+  await connection.refresh();
+  const session = new NeteaseSession({
+    media: connection, preferences: { neteaseQueue: true, playlistColumns: false },
+    recordId: () => undefined, genreId: () => undefined, indexOf: () => -1, selected: () => 0, navigationSelection: () => 0,
+    canFollow: () => false, follow() {}, songChanged() {}, jumpChanged() {}, confirmSoon() {}, async refresh() {}, notify(message) { notices.push(message); },
+  }, ports);
+  await session.refresh();
+  session.beginSeek();
+  debug = { ...debug, trackId: '21', duration: 198, position: 0 };
+  await session.refresh();
+  session.beginSeek();
+  session.seekTarget(154);
+  assert.ok(session.timeline(connection.selected).position < 2, 'the next song\'s timeline is not moved');
+  await session.sendSeeks();
+  session.endSeek();
+  assert.deepEqual(seeks, [['23', 154]], 'asked for the song it was dragged in, which NetEase no longer plays');
+  assert.deepEqual(notices, ['网易云已经换歌，没有调整进度']);
+  // On the song that plays: sent for it, and shown at once.
+  session.beginSeek();
+  session.seekTarget(50);
+  assert.ok(Math.abs(session.timeline(connection.selected).position - 50) < 0.01);
+  await session.sendSeeks();
+  session.endSeek();
+  assert.deepEqual(seeks.at(-1), ['21', 50]);
+  // A change without a drag (assistive technology) goes to the song that plays.
+  session.seekTarget(60);
+  await session.sendSeeks();
+  assert.deepEqual(seeks.at(-1), ['21', 60]);
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  assert.match(app, /function beginExternalSeek\(\) \{[^}]*netease\.beginSeek\(\);\s*\}/);
+  assert.match(app, /void netease\.sendSeeks\(\);\s*netease\.endSeek\(\);/);
+});
+
+test('one media snapshot that cannot be read keeps NetEase\'s shelf, playlists and port, and offers nothing meanwhile', async () => {
+  // external-media.ts: an unreadable snapshot is no proof the session disappeared. The NetEase session
+  // took it for "not NetEase": the shelf emptied (选择播放器 flashed), open details closed, the playlists
+  // were read again. Every song and playlist here is made up.
+  const { NeteaseSession } = await import('../src/netease_music/connector/session.ts');
+  let playlistReads = 0;
+  const ports = {
+    queue: { async read() { return { status: 'queue', stamp: 'q1', truncated: false, tracks: [laneTrack(23), laneTrack(21), laneTrack(99)], source: { id: '2', name: 'Beta' } }; } },
+    playlists: { async read() { playlistReads++; return { status: 'playlists', stamp: 'p1', truncated: false, playlists: lanePlaylists() }; } },
+    debug: { async state() { return { available: true, trackId: '23', playback: 'playing', mode: 'playOrder', duration: 100, position: 5 }; }, async play() {}, async seek() { return 0; }, async restart() {} },
+  };
+  const { connection, set, calls } = fixture([netease('n1')], NETEASE);
+  await connection.refresh();
+  let albums = [];
+  const session = new NeteaseSession({
+    media: connection, preferences: { neteaseQueue: true, playlistColumns: true },
+    recordId: index => albums[index]?.id, genreId: index => albums[index]?.genreId, indexOf: id => albums.findIndex(album => album.id === id),
+    selected: () => 0, navigationSelection: () => 0, canFollow: () => false, follow() {}, songChanged() {}, jumpChanged() {},
+    confirmSoon() {}, async refresh() {}, notify() {},
+  }, ports);
+  await session.refresh();
+  const shelf = session.shelf(connection.selected);
+  session.queueLanesShown = shelf.lanes;
+  albums = shelf.library().albums;
+  const at = id => albums.findIndex(album => album.id === id);
+  assert.ok(session.songRequest(at('netease-track:21')));
+  set(new Error('媒体来源正在刷新，请稍后重试'));
+  await connection.refresh();
+  assert.equal(connection.unreadable, true);
+  await session.refresh();
+  assert.ok(session.shownQueue(), 'the queue stays');
+  assert.equal(session.externalPlaylists?.length, 4, 'and the playlists');
+  assert.equal(session.debugState.available, true, 'and the port');
+  assert.equal(session.songRequest(at('netease-track:21')), undefined, 'nothing is offered while retrying');
+  set({ sources: [netease('n1')] });
+  await connection.refresh();
+  assert.equal(connection.unreadable, false);
+  await session.refresh();
+  assert.equal(playlistReads, 1, 'the playlists are not read again');
+  assert.ok(session.songRequest(at('netease-track:21')));
+  // A session that is gone from a snapshot that was read: NetEase is no longer the current source.
+  set({ sources: [] });
+  await connection.refresh();
+  assert.equal(connection.unreadable, false);
+  await session.refresh();
+  assert.equal(session.shownQueue(), undefined);
+  assert.deepEqual(calls, []);
+  // The page keeps the shelf, the selection and an open details page through the unreadable snapshot.
+  const app = (await import('node:fs')).readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
+  // (2026-10-24, QQ Music: a single card of the session still selected stays too.)
+  assert.match(app, /const source = externalMedia\.selected;\s*(\/\/[^\n]*\n\s*)*if \(!source && externalMedia\.unreadable && \(netease\.shownQueue\(\) \|\| externalVisualId === externalMedia\.selectedId\)\) return;/);
+  assert.match(app, /await applyLibrary\(\);\s*externalVisual = nextVisual;\s*externalVisualId = source\?\.id;/);
+});
+
+test('a new song\'s first reading that still shows the last song\'s position is not taken', async () => {
+  // On the owner's NetEase, for about 0.1 to 0.25 s after Rhine asked for another song, the port named the
+  // new song with the old one's position (its progress slider had not moved yet): the new song showed
+  // 1:40 for about a second, its timeline opened there and its lyrics lit a late line.
+  const { PlaybackClock } = await import('../src/netease_music/connector/playback-clock.ts');
+  const reading = (position, trackId = '7', extra = {}) => ({ available: true, trackId, playback: 'playing', duration: 200, position, ...extra });
+  const clock = new PlaybackClock();
+  clock.update(reading(100), 0);
+  clock.update(reading(100, '8'), 200);
+  assert.equal(clock.position(200), undefined, 'nothing is shown for the new song yet');
+  assert.equal(clock.settling(200), true, 'and it is read again soon');
+  clock.update(reading(100, '8'), 350);
+  assert.equal(clock.position(350), undefined);
+  clock.update(reading(0, '8'), 500);
+  assert.equal(clock.position(500), 0, 'its own position');
+  assert.equal(clock.settling(500), false);
+  // Paused the same way.
+  const paused = new PlaybackClock();
+  paused.update(reading(100, '7', { playback: 'paused' }), 0);
+  paused.update(reading(100, '8'), 200);
+  assert.equal(paused.position(200), undefined);
+  // A new song that really is where the last one was: taken once a reading moves on, or after the hold.
+  const same = new PlaybackClock();
+  same.update(reading(40), 0);
+  same.update(reading(40, '9'), 100);
+  assert.equal(same.position(100), undefined);
+  same.update(reading(40, '9'), 1700);
+  assert.equal(same.position(1700), 40);
+  // Another song at another position, or at its start, is taken at once, as before.
+  const other = new PlaybackClock();
+  other.update(reading(100), 0);
+  other.update(reading(12, '8'), 200);
+  assert.equal(other.position(200), 12);
+  other.update(reading(0, '9'), 400);
+  assert.equal(other.position(400), 0);
+  // The first reading of all is taken whatever it says.
+  const first = new PlaybackClock();
+  first.update(reading(100), 0);
+  assert.equal(first.position(0), 100);
+});
+
+test('the lyrics script cuts a line at whole characters and sends no lone half of one', async () => {
+  // A line cut inside a character, or NetEase's own broken text, carried a lone surrogate, which the
+  // native side could not read: the song's lyrics never showed. Every line here is made up.
+  const { lyrics } = await neteaseScripts();
+  const lone = String.fromCharCode(0xD83D), low = String.fromCharCode(0xDE00);
+  const lyric = {
+    resourceTrackId: '7', displayType: 'default', offset: 0,
+    lyricLines: [{ time: 1, lyric: 'x'.repeat(299) + '\u{1F600}more' }, { time: 2, lyric: 'line ' + lone }, { time: 3, lyric: '\u{1F600}'.repeat(400) }],
+    tlyricLines: [{ lyric: low + 'a' }, { lyric: '' }, { lyric: '' }],
+    yrcInfo: { yrc: 'w' + lone, yrcTrans: '' },
+  };
+  const store = { getState: () => ({ playing: { resourceTrackId: '7' }, 'async:lyric': lyric }), dispatch() { throw new Error('nothing is dispatched'); } };
+  const reply = lyrics('7', false, () => store);
+  assert.equal(reply.status, 'ready');
+  assert.equal(reply.lines[0][1], 'x'.repeat(299) + '\u{1F600}', 'cut after 300 whole characters');
+  assert.equal(reply.lines[1][1], 'line \u{FFFD}');
+  assert.equal([...reply.lines[2][1]].length, 300);
+  assert.equal(reply.translations[0], '\u{FFFD}a');
+  assert.equal(reply.words, 'w\u{FFFD}');
+  assert.doesNotMatch(JSON.stringify(reply), /\\u[dD][89a-fA-F]/, 'no lone half reaches the reply');
 });
 
 test('the playlists status: what is waiting for NetEase, what the limits cut, and no stale error', async () => {
@@ -1776,7 +2423,11 @@ test('following survives a rebuilt shelf: the song asked for with its playlist, 
   // A playlist asked to play from one of its songs (2026-10-10) became NetEase's queue: the case it was
   // asked from is gone and the selection moves to the song's case of the queue, the request standing.
   // Only then: a rebuild that keeps the case (the request still on its way) leaves the selection.
-  assert.match(block, /^const gone = playerCurrent && records\.length > 0 && records\[selected\]\?\.id !== previousId;\s*const jump = gone \? netease\.queueJump : undefined;\s*const asked = jump\?\.from && jump\.from === previousId \? records\.findIndex\(\(record\) => record\.id === jump\.key\) : -1;\s*if \(asked >= 0\) selected = asked;\s*else if \(gone\) \{/);
+  // NetEase moving its queue to or from the column of a song the user browses, by itself: the song is
+  // still in its column with the other kind of key, and the user stays on it (never pulled to the song
+  // NetEase plays; an open details page with it). Only a selection that was following goes along.
+  assert.match(block, /^const gone = playerCurrent && records\.length > 0 && records\[selected\]\?\.id !== previousId;\s*const jump = gone \? netease\.queueJump : undefined;\s*const asked = jump\?\.from && jump\.from === previousId \? records\.findIndex\(\(record\) => record\.id === jump\.key\) : -1;\s*(\/\/[^\n]*\n\s*)*const browsed = gone && netease\.queueFollowPaused && netease\.shownQueue\(\) \? moved\(previousIndex\) : -1;\s*if \(asked >= 0\) selected = asked;\s*else if \(browsed >= 0\) selected = browsed;\s*else if \(gone\) \{/);
+  assert.ok(app.indexOf('const moved = (index: number) => {') < app.indexOf('const browsed = gone'), 'where a case of the shelf as it was stands now');
   assert.ok(block.indexOf('if (asked >= 0) selected = asked;') < block.indexOf('netease.forgetQueueJumps();'), 'the request is not forgotten');
   // The playing song is asked of the queue just read, not of the last poll's key.
   assert.match(block, /const key = netease\.playingKey\(\);/);
@@ -1852,7 +2503,7 @@ test('the module folders keep their dependency rules', async () => {
     assert.doesNotMatch(text, /crate::(media|netease_music|qq_music)\b/, file);
     assert.doesNotMatch(text, /\b(netease|qqmusic|qq_music|cloudmusic)\b/i, file);
   }
-  assert.match(code(readFileSync(path.join(rust, 'app_server.rs'), 'utf8')), /if route\.starts_with\("\/api\/"\) \{\n\s*return api::respond\(request, &route, url\.query\(\), get, post, &input, store\);/,
+  assert.match(code(readFileSync(path.join(rust, 'app_server.rs'), 'utf8').replace(/\r\n/g, '\n')), /if route\.starts_with\("\/api\/"\) \{\n\s*return api::respond\(request, &route, url\.query\(\), get, post, &input, store\);/,
     'every /api/ route goes to the local music');
   assert.ok(!existsSync(path.join(rust, 'local_music', 'connector', 'server.rs')), 'the page is no longer served from the local music');
   // The shared media code uses QQ Music only to mark and name its sessions (media::player_of and

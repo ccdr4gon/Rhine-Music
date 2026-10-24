@@ -1,5 +1,5 @@
 /**
- * 帧率上限 (设置 → 通用 → 动效与显示): which display frames the frame loop may run on.
+ * 帧率上限 (设置 → 动效与显示): which display frames the frame loop may run on.
  *
  * The next run's earliest time advances by the interval from the one before it, so a cap between
  * two multiples of the display's frame (90 on 240 Hz) alternates between them and averages the

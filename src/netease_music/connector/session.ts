@@ -4,7 +4,9 @@ import {
   type DebugState, type NeteasePlaylist, type QueueLane, type QueueSource, type QueueTrack,
 } from "../data/queue";
 import { NeteaseLyrics } from "./lyrics";
-import { nativeDebugPort, nativePlaylistPort, nativeQueuePort, type DebugPort, type PlaylistPort, type QueuePort } from "./ports";
+import {
+  PLAY_UNANSWERED, PORT_NO_REPLY, nativeDebugPort, nativePlaylistPort, nativeQueuePort, type DebugPort, type PlaylistPort, type QueuePort,
+} from "./ports";
 import { PlaybackClock } from "./playback-clock";
 import { NETEASE_NAME, isNeteaseSource } from "./player";
 import { playlistSummary, queueControlStatus } from "./settings";
@@ -69,6 +71,12 @@ const QUEUE_JUMP_TIMEOUT_MS = 6000;
 const PLAYLIST_JUMP_TIMEOUT_MS = 15_000;
 // NetEase's ids as its pages take them: decimal, exact as JavaScript numbers.
 const scriptId = (id: string) => /^\d{1,16}$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0;
+/**
+ * How long the timeline keeps NetEase's last reading through readings its port does not answer in
+ * time (PORT_NO_REPLY; NetEase busy, e.g. loading a playlist), while the same song plays by its media
+ * session: as long as the details keep that song's lyrics (music-app.ts LYRICS_PORT_GRACE_MS).
+ */
+export const PORT_GRACE_MS = 5000;
 
 /**
  * What ▶ (and every way of playing a chosen song) asks NetEase for: a song of its queue (`key` is
@@ -133,10 +141,18 @@ export class NeteaseSession {
   private debugProbed = false;
   private debugError = "";
   debugRestarting = false;
+  // The last reading the port answered, with the song the media session named then: the timeline
+  // keeps it through readings that come too late (portGrace).
+  private portSeen: { at: number; title?: string; trackId?: string; playback?: string } | undefined;
+  // The NetEase source the user is connected to, as last seen: kept while a snapshot of the media
+  // sessions cannot be read (current).
+  private heldSource: string | undefined;
   // The song Rhine asked NetEase to play and NetEase has not reported yet (with the case a
   // playlist was asked from, how long NetEase may take, and the song NetEase played when asked),
   // and earlier requests the user moved on from before NetEase reported them (song -> time asked).
-  queueJump: { key: string; at: number; from?: string; timeout: number; fromTrack?: string } | undefined;
+  // `song` is the song's own id; `answered` once NetEase plays it for a playlist's 播放全部 whose
+  // queue it has not saved yet (followQueue).
+  queueJump: { key: string; song: string; at: number; from?: string; timeout: number; fromTrack?: string; answered?: boolean } | undefined;
   private readonly queueJumpsSuperseded = new Map<string, number>();
   // A playlist asked to play from one of its songs (its 播放全部), until NetEase's queue is read as
   // coming from it: NetEase saves its new queue a moment after the song starts (2026-10-17, measured
@@ -144,16 +160,29 @@ export class NeteaseSession {
   private playlistAsked: { id: string; at: number } | undefined;
   // When the user's previous / next reached NetEase: its next change of song is followed.
   followNextAt = -Infinity;
-  // The newest place the user moved NetEase's timeline to and that has not been sent yet.
-  private pendingSeek: number | undefined;
+  // The newest place the user moved NetEase's timeline to and that has not been sent yet, with the
+  // song it was moved in; and the song a drag or a held key began in (beginSeek).
+  private pendingSeek: { position: number; trackId?: string } | undefined;
+  private seekTrack: string | undefined;
   private seekSending = false;
 
   constructor(private readonly host: NeteaseSessionHost, private readonly ports: NeteasePorts = NATIVE_PORTS) {}
 
+  /**
+   * Whether NetEase is the current source: its media session is selected, or it was and the last
+   * snapshot of the media sessions could not be read (that is no proof it disappeared, and what was
+   * read for it stays: one unreadable snapshot emptied the shelf and closed the details).
+   */
+  private current() {
+    const media = this.host.media;
+    if (!media) return false;
+    if (media.selected) return isNeteaseSource(media.selected);
+    return media.unreadable && !!this.heldSource && this.heldSource === media.selectedId;
+  }
   /** NetEase's queue is shown only for a selected NetEase source after the user opted in. */
   shownQueue() {
     const media = this.host.media;
-    return media && this.host.preferences.neteaseQueue && isNeteaseSource(media.selected) && this.externalQueue?.tracks.length
+    return media && this.host.preferences.neteaseQueue && this.current() && this.externalQueue?.tracks.length
       ? this.externalQueue : undefined;
   }
   /** The playlist column a case stands in, when the columns are playlists. */
@@ -193,9 +222,13 @@ export class NeteaseSession {
    * the same reads. Ends with the request's own time (QUEUE_JUMP_TIMEOUT_MS, PLAYLIST_JUMP_TIMEOUT_MS).
    */
   awaiting(now = performance.now()) {
+    return !!this.queueJump || this.playlistWaiting(now);
+  }
+  /** A playlist asked to play (its 播放全部) that is not yet read as NetEase's queue, nor lapsed. */
+  private playlistWaiting(now = performance.now()) {
     if (this.playlistAsked && now - this.playlistAsked.at > PLAYLIST_JUMP_TIMEOUT_MS) this.playlistAsked = undefined;
     if (this.playlistAsked && this.externalQueue?.source?.id === this.playlistAsked.id) this.playlistAsked = undefined;
-    return !!this.queueJump || !!this.playlistAsked;
+    return !!this.playlistAsked;
   }
 
   /** NetEase's playback as its own player reports it when the port answers, else as Windows does. */
@@ -207,16 +240,45 @@ export class NeteaseSession {
    * session has neither); the timeline can then be dragged. Undefined otherwise.
    */
   timeline(source?: ExternalMediaSource) {
-    const position = this.playbackClock.position(performance.now());
-    if (isNeteaseSource(source) && this.debugState.available && position !== undefined && this.playbackClock.duration)
+    const now = performance.now(), position = this.playbackClock.position(now);
+    const grace = this.portGrace(now);
+    if (isNeteaseSource(source) && (this.debugState.available || grace) && position !== undefined && this.playbackClock.duration)
       // A stopped or finished song has nothing loaded to seek in.
-      return { position, duration: this.playbackClock.duration, seekable: this.debugState.playback !== "stopped", debug: true };
+      return { position, duration: this.playbackClock.duration, seekable: (grace ? this.portSeen?.playback : this.debugState.playback) !== "stopped", debug: true };
     return undefined;
+  }
+  /**
+   * A reading the port did not answer in time (NetEase busy) after one it did, while the media
+   * session still names the song it named then: the timeline keeps that reading, up to PORT_GRACE_MS
+   * (one late reading blanked the timeline and the rings for a poll). The reasons the port may not
+   * be used now are the last reading's all the same (portBlock).
+   */
+  private portGrace(now = performance.now()) {
+    const seen = this.portSeen;
+    return !this.debugState.available && this.debugError === PORT_NO_REPLY && !!seen && now - seen.at < PORT_GRACE_MS
+      && this.host.media?.selected?.title === seen.title;
+  }
+  /** The song the timeline shows: the one NetEase reports, or through a late reading the one it last did. */
+  private timelineTrack() {
+    return this.debugState.available ? this.debugState.trackId : this.portGrace() ? this.portSeen?.trackId : undefined;
+  }
+  /**
+   * A drag of the timeline, or a held key on it, begins: its target belongs to the song it began in,
+   * also when NetEase moves on to the next song before it is let go (the target is then not sent to
+   * that one: the port answers that NetEase changed song). Ends with endSeek, once it is sent.
+   */
+  beginSeek() {
+    this.seekTrack ??= this.timelineTrack();
+  }
+  endSeek() {
+    this.seekTrack = undefined;
   }
   /** The user moved the timeline: the target shows at once; sendSeeks asks NetEase. */
   seekTarget(position: number) {
-    this.pendingSeek = position;
-    this.playbackClock.seek(position, performance.now());
+    const trackId = this.seekTrack ?? this.timelineTrack();
+    this.pendingSeek = { position, trackId };
+    // Not over another song's timeline.
+    if (trackId === this.timelineTrack()) this.playbackClock.seek(position, performance.now());
   }
   /** One request at a time, always the newest target: a held arrow key is one seek, not thirty. */
   async sendSeeks() {
@@ -224,17 +286,16 @@ export class NeteaseSession {
     this.seekSending = true;
     try {
       while (this.pendingSeek !== undefined) {
-        const position = this.pendingSeek;
+        const seek = this.pendingSeek;
         this.pendingSeek = undefined;
-        await this.seekNetease(position);
+        await this.seekNetease(seek);
       }
     } finally {
       this.seekSending = false;
     }
   }
-  private async seekNetease(position: number) {
-    const trackId = this.debugState.trackId;
-    if (!trackId || !this.debugState.available) return this.playbackClock.release();
+  private async seekNetease({ position, trackId }: { position: number; trackId?: string }) {
+    if (!trackId || (!this.debugState.available && !this.portGrace())) return this.playbackClock.release();
     try {
       const sent = await this.ports.debug.seek(trackId, position);
       // A trial clip limits the range: show where NetEase really went.
@@ -248,13 +309,14 @@ export class NeteaseSession {
 
   /** A poll's reads after the media session's: the queue, the playlists, the debugging port. */
   async refresh() {
+    const selected = this.host.media?.selected;
+    if (selected) this.heldSource = isNeteaseSource(selected) ? selected.id : undefined;
     await this.refreshQueue();
     await this.refreshPlaylists();
     await this.refreshDebug();
   }
   private async refreshQueue() {
-    const source = this.host.media?.selected;
-    if (!this.host.preferences.neteaseQueue || !isNeteaseSource(source)) {
+    if (!this.host.preferences.neteaseQueue || !this.current()) {
       this.externalQueue = undefined;
       this.queueStamp = undefined;
       return;
@@ -280,7 +342,7 @@ export class NeteaseSession {
   }
   /** The user's playlists from NetEase's local database, only with both switches on. */
   private async refreshPlaylists() {
-    if (!this.host.preferences.neteaseQueue || !this.host.preferences.playlistColumns || !isNeteaseSource(this.host.media?.selected)) {
+    if (!this.host.preferences.neteaseQueue || !this.host.preferences.playlistColumns || !this.current()) {
       this.externalPlaylists = undefined;
       this.playlistStamp = undefined;
       this.playlistsCut = false;
@@ -315,10 +377,11 @@ export class NeteaseSession {
     }
   }
   private async refreshDebug() {
-    if (!this.host.preferences.neteaseQueue || !isNeteaseSource(this.host.media?.selected)) {
+    if (!this.host.preferences.neteaseQueue || !this.current()) {
       this.debugState = { available: false };
       this.debugProbed = false;
       this.debugError = "";
+      this.portSeen = undefined;
       this.playbackClock.update(this.debugState, performance.now());
       this.lyrics.stop();
       return;
@@ -334,7 +397,13 @@ export class NeteaseSession {
       this.debugError = message;
     }
     this.debugProbed = true;
-    this.playbackClock.update(this.debugState, performance.now());
+    const now = performance.now();
+    if (this.debugState.available)
+      this.portSeen = { at: now, title: this.host.media?.selected?.title, trackId: this.debugState.trackId, playback: this.debugState.playback };
+    else if (!this.portGrace(now)) this.portSeen = undefined;
+    // A late reading leaves the clock as it was: it stops a second past the last reading, as between
+    // any two, and invents nothing.
+    if (this.debugState.available || !this.portSeen) this.playbackClock.update(this.debugState, now);
   }
 
   /**
@@ -373,11 +442,12 @@ export class NeteaseSession {
    * the queue and do nothing then, from its own buttons, its media session or the media keys
    * (2026-10-12: Rhine's previous / next went to its media session and nothing happened). Private
    * FM has no queue, and previous / next of its own. False whenever it cannot be told: the port
-   * does not answer, the queue is not shown or was cut at its limit.
+   * does not answer, the queue is not shown or was cut at its limit, or a playlist's 播放全部 is not
+   * read as its queue yet (NetEase's queue is that playlist by then, saved a moment after the song).
    */
   outsideQueue() {
     const queue = this.shownQueue(), id = this.debugState.trackId;
-    return !!queue && !queue.truncated && this.debugState.available && this.debugState.mode !== "playFm"
+    return !!queue && !queue.truncated && this.debugState.available && this.debugState.mode !== "playFm" && !this.playlistWaiting()
       && !!id && !queue.tracks.some((track) => track.id === id);
   }
   /**
@@ -401,7 +471,8 @@ export class NeteaseSession {
    */
   songRequest(index = this.host.navigationSelection()): QueuePlay | undefined {
     const key = this.host.recordId(index);
-    if (!key || !this.shownQueue()) return undefined;
+    // Nothing is offered while the media sessions cannot be read (no controls while retrying).
+    if (!key || !this.shownQueue() || this.host.media?.unreadable) return undefined;
     const lane = this.laneAt(index);
     if (lane && !lane.live) {
       const song = lane.tracks.find((track) => laneTrackKey(lane, track) === key);
@@ -445,13 +516,15 @@ export class NeteaseSession {
   async playQueueSong({ key, song, playlist, from }: QueuePlay) {
     if (this.queueJump?.key === key) return;
     // The playing song itself (NetEase offers no play / pause, or its playlist is asked for): not
-    // a switch the poll can see.
-    if (key !== this.queuePlaying) {
+    // a switch the poll can see. Its playlist's 播放全部 is answered as it is asked, and waits
+    // (正在切换… where it was asked) until the playlist is read as NetEase's queue, as for any song.
+    if (key !== this.queuePlaying || playlist) {
       if (this.queueJump) this.queueJumpsSuperseded.set(this.queueJump.key, this.queueJump.at);
       this.queueJumpsSuperseded.delete(key);
       this.queueJump = {
-        key, at: performance.now(), from, timeout: playlist ? PLAYLIST_JUMP_TIMEOUT_MS : QUEUE_JUMP_TIMEOUT_MS,
+        key, song: song.id, at: performance.now(), from, timeout: playlist ? PLAYLIST_JUMP_TIMEOUT_MS : QUEUE_JUMP_TIMEOUT_MS,
         fromTrack: this.debugState.available ? this.debugState.trackId : undefined,
+        ...(key === this.queuePlaying ? { answered: true } : {}),
       };
     }
     this.playlistAsked = playlist ? { id: playlist.id, at: performance.now() } : undefined;
@@ -461,10 +534,14 @@ export class NeteaseSession {
       if (playlist) await this.ports.debug.playPlaylist(playlist.id, song.id, playlist.name);
       else await this.ports.debug.play(song.id);
     } catch (error) {
+      const message = String(error instanceof Error ? error.message : error);
+      // It reached NetEase, which did not answer in time (busy): it may still do it, and the poll sees
+      // whether it does, as for any request; its time says so if it never does.
+      if (message === PLAY_UNANSWERED) return void this.host.refresh();
       if (this.queueJump?.key === key) this.queueJump = undefined;
       this.playlistAsked = undefined;
       this.host.jumpChanged();
-      this.host.notify(String(error instanceof Error ? error.message : error));
+      this.host.notify(message);
       return;
     }
     void this.host.refresh();
@@ -475,18 +552,29 @@ export class NeteaseSession {
     const now = performance.now();
     for (const [asked, at] of this.queueJumpsSuperseded) if (now - at > QUEUE_JUMP_TIMEOUT_MS) this.queueJumpsSuperseded.delete(asked);
     if (this.queueJump && now - this.queueJump.at > this.queueJump.timeout) {
+      // (NetEase played the song of a 播放全部 whose queue it never saved: nothing to say.)
+      if (!this.queueJump.answered) this.host.notify("网易云没有切换到选中的歌曲。");
       this.queueJump = undefined;
-      this.host.notify("网易云没有切换到选中的歌曲。");
     }
+    // A playlist's 播放全部: NetEase plays the song a moment before it saves the playlist as its queue
+    // (0.3 to 1 s on the owner's NetEase). The song is not in the queue as read yet, or is in it only
+    // as the old queue had it; the request is answered, and stands until the queue is read.
+    const waitingPlaylist = this.playlistWaiting(now);
+    if (this.queueJump && waitingPlaylist && this.debugState.available && this.debugState.trackId === this.queueJump.song)
+      this.queueJump.answered = true;
     if (key !== this.queuePlaying) {
       this.queuePlaying = key;
       // NetEase still plays the song it played when Rhine asked: the case changed because the queue
       // did (a playlist's 播放全部 replaced it, and the song is not in the new one), not because NetEase
       // answered. The request keeps waiting, and the timeout above says so if NetEase never plays the
       // song (2026-10-12: NetEase replaced its queue but went on with the old song, and the request
-      // vanished silently).
-      const unanswered = !!this.queueJump?.fromTrack && this.debugState.available && this.debugState.trackId === this.queueJump.fromTrack;
-      if (this.queueJump?.key === key) {
+      // vanished silently). Nor can a reading the port did not give (late, or an error) tell it did.
+      const unanswered = !!this.queueJump?.fromTrack
+        && (this.debugState.available ? this.debugState.trackId === this.queueJump.fromTrack : !!this.debugError);
+      if (this.queueJump?.answered) {
+        // The song asked for plays, its playlist is not read as the queue yet.
+        this.queueJumpsSuperseded.clear();
+      } else if (this.queueJump?.key === key) {
         // NetEase reports the song Rhine asked for.
         this.queueJump = undefined;
         this.queueJumpsSuperseded.clear();
@@ -504,6 +592,12 @@ export class NeteaseSession {
       // Otherwise an earlier request landed after the user had moved on: the newer request,
       // or the box the user rests on, still stands.
       this.host.songChanged();
+    }
+    // The playlist of an answered 播放全部 is read as NetEase's queue now: the request is over.
+    if (this.queueJump?.answered && !waitingPlaylist) {
+      this.queueJump = undefined;
+      this.queueJumpsSuperseded.clear();
+      this.host.jumpChanged();
     }
     if (!key || !this.host.canFollow()) return;
     const index = this.host.indexOf(key);

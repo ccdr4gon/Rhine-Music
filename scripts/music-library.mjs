@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { parseFile } from 'music-metadata'
 import { AlbumIntroductionProvider } from './album-introductions.mjs'
 
@@ -130,10 +131,37 @@ export async function writeJsonAtomic(file, value) {
   }
 }
 
+// JSON text without a byte order mark, which an editor may put before it.
+const withoutBom = (text) => text.replace(/^\uFEFF/, '')
+
 async function readJson(file, fallback) {
-  try { return JSON.parse(await fs.readFile(file, 'utf8')) }
+  try { return JSON.parse(withoutBom(await fs.readFile(file, 'utf8'))) }
   catch (error) { if (error.code === 'ENOENT') return structuredClone(fallback); throw new Error(`无法读取 ${file}: ${error.message}`) }
 }
+
+/**
+ * One of the store's data files as read at a start, if it is there and `valid` takes it (as
+ * library.rs `load`). A file this version cannot read (not JSON, say after a power cut, or of a shape
+ * it does not know, say written by a newer version) is set aside beside it as
+ * `<name>.unreadable-<UTC time>`, never deleted or written over, and the start goes on without it
+ * (undefined); its new name is added to `setAside`. Only an error reading the data folder itself stops the start.
+ */
+async function loadData(file, valid, setAside) {
+  let text
+  try { text = await fs.readFile(file, 'utf8') }
+  catch (error) { if (error.code === 'ENOENT') return undefined; throw new Error(`无法读取 ${file}: ${error.message}`) }
+  try {
+    const value = JSON.parse(withoutBom(text))
+    if (valid(value)) return value
+  } catch {}
+  const stamp = new Date().toISOString().replace(/[-:]/g, '')
+  let aside = `${path.basename(file)}.unreadable-${stamp}`
+  for (let n = 2; await exists(path.join(path.dirname(file), aside)); n++) aside = `${path.basename(file)}.unreadable-${stamp}-${n}`
+  await fs.rename(file, path.join(path.dirname(file), aside))
+  setAside.push(aside)
+  return undefined
+}
+const succeeds = (task) => { try { task(); return true } catch { return false } }
 
 export function validateRules(value) {
   if (!value || value.version !== 1 || !Array.isArray(value.genres) || value.genres.length > 1000 || !value.albumOverrides || typeof value.albumOverrides !== 'object' || Array.isArray(value.albumOverrides)) throw new Error('流派规则需要 version:1、genres 数组和 albumOverrides 对象')
@@ -196,15 +224,26 @@ export function imageMime(file) {
  * cover and introduction). The playlists are made from these records' paths (folderPlaylists).
  * Names starting with a dot are skipped (macOS's `._` copies included); this service cannot see
  * Windows' hidden attribute, which the Windows client also skips. Source files stay read-only.
+ * Only the main folder itself failing fails the walk: a folder inside it that cannot be listed now
+ * is counted in `skipped.unreadable` and kept in `skipped.folders` (its albums stay, scan), as are
+ * QQ Music's encrypted downloads in `skipped.encrypted` (as library.rs walk).
  */
-async function walkAlbums(root) {
+async function walkAlbums(root, skipped) {
   const folders = []
-  let encrypted = 0
   const visit = async (folder) => {
-    const entries = await fs.readdir(folder, { withFileTypes: true })
+    let entries
+    try { entries = await fs.readdir(folder, { withFileTypes: true }) }
+    catch (error) {
+      if (folder === root) throw error
+      // Gone since its parent was listed: deleted (a name that is not valid Unicode only seems gone, readAlbum).
+      if (error.code === 'ENOENT' && !folder.includes('\uFFFD')) return
+      skipped.unreadable += 1
+      skipped.folders.push(folder)
+      return
+    }
     entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     const files = entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
-    encrypted += files.filter((entry) => ENCRYPTED_DOWNLOAD.test(path.extname(entry.name))).length
+    skipped.encrypted += files.filter((entry) => ENCRYPTED_DOWNLOAD.test(path.extname(entry.name))).length
     const tracks = files.filter((entry) => AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())).map((entry) => path.join(folder, entry.name))
     if (tracks.length) {
       const images = files.filter((entry) => /\.(png|jpe?g|webp)$/i.test(entry.name))
@@ -226,7 +265,11 @@ async function walkAlbums(root) {
     for (const entry of entries) if (entry.isDirectory() && !entry.name.startsWith('.')) await visit(path.join(folder, entry.name))
   }
   await visit(root)
-  return { folders, encrypted }
+  return folders
+}
+const insidePath = (parent, child) => {
+  const relative = path.relative(parent, child)
+  return !relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 const albumEntryId = (entry) => `album-${hash(entry.singleFile ?? entry.folder)}`
@@ -255,14 +298,21 @@ export class MusicLibraryStore {
 
   async init() {
     await fs.mkdir(this.dataDir, { recursive: true })
-    this.config = await readJson(path.join(this.dataDir, 'config.json'), { ...this.config, roots: safeRootList(this.defaultRoots) })
+    // A data folder that cannot be written stops the start (as library.rs Store::open): a start on one
+    // that already holds valid data writes nothing else here. A file of its own, removed again.
+    const probe = path.join(this.dataDir, `.write-test-${randomUUID()}.tmp`)
+    try { await fs.writeFile(probe, '\n', { flag: 'wx' }) } finally { await fs.rm(probe, { force: true }).catch(() => {}) }
+    // A data file this version cannot read is set aside and the start goes on without it (loadData).
+    this.setAside = []
+    const saved = await loadData(path.join(this.dataDir, 'config.json'), (config) => !!config && typeof config === 'object' && !Array.isArray(config) && succeeds(() => safeRootList(config.roots)), this.setAside)
+    this.config = structuredClone(saved) ?? { ...this.config, roots: safeRootList(this.defaultRoots) }
     this.musicBrainzContact = this.config.musicBrainzContact || this.environmentContact
     this.config.roots = safeRootList(this.config.roots)
-    this.index = await readJson(path.join(this.dataDir, 'library-index.json'), this.index)
-    if (this.index.version !== 1 || !Array.isArray(this.index.albums)) throw new Error('曲库索引版本或格式不受支持，已保留原文件')
-    this.rules = validateRules(await readJson(path.join(this.dataDir, 'genre-rules.json'), DEFAULT_RULES))
+    this.index = await loadData(path.join(this.dataDir, 'library-index.json'), (index) => index?.version === 1 && Array.isArray(index.albums) && index.albums.every((album) => album && typeof album === 'object' && Array.isArray(album.tracks) && album.tracks.every((track) => track && typeof track === 'object')), this.setAside) ?? this.index
+    this.rules = validateRules(await loadData(path.join(this.dataDir, 'genre-rules.json'), (rules) => succeeds(() => validateRules(rules)), this.setAside) ?? DEFAULT_RULES)
     if (!(await exists(path.join(this.dataDir, 'genre-rules.json')))) await writeJsonAtomic(path.join(this.dataDir, 'genre-rules.json'), this.rules)
-    await writeJsonAtomic(path.join(this.dataDir, 'config.json'), this.config)
+    // Written when it is new or was cleaned, not at every start.
+    if (!isDeepStrictEqual(saved, this.config)) await writeJsonAtomic(path.join(this.dataDir, 'config.json'), this.config)
     return this
   }
 
@@ -293,9 +343,27 @@ export class MusicLibraryStore {
     return rules
   }
 
+  /**
+   * A new main folder has to be a folder that is there (as library.rs update_config): a mistyped one
+   * neither replaces the chosen one nor is scanned as an empty library. The chosen one may be away (a
+   * drive not connected): saved again, it keeps its index, offline.
+   */
+  async checkMainFolder(roots) {
+    const main = roots[0]
+    const key = (folder) => process.platform === 'win32' ? folder.replaceAll('/', '\\').toLowerCase() : folder
+    if (main === undefined || (this.mainFolder !== undefined && key(main) === key(this.mainFolder))) return
+    let stat
+    try { stat = await fs.stat(main) }
+    catch (error) { throw new Error(error.code === 'ENOENT' ? `找不到文件夹：${main}。音乐主文件夹保持不变。` : `无法打开文件夹 ${main}：${error.message}。音乐主文件夹保持不变。`) }
+    if (!stat.isDirectory()) throw new Error(`不是文件夹：${main}。音乐主文件夹保持不变。`)
+  }
+
   async updateConfig(value) {
     const next = { ...this.config }
-    if (value.roots !== undefined) next.roots = safeRootList(value.roots)
+    if (value.roots !== undefined) {
+      next.roots = safeRootList(value.roots)
+      await this.checkMainFolder(next.roots)
+    }
     if (value.onlineEnabled !== undefined) {
       if (typeof value.onlineEnabled !== 'boolean') throw new Error('onlineEnabled 必须为布尔值')
       next.onlineEnabled = value.onlineEnabled
@@ -349,6 +417,7 @@ export class MusicLibraryStore {
       roots: this.config.roots.map((root) => this.index.roots.find((entry) => entry.path === root) ?? { path: root, status: 'unscanned' }),
       scan: { ...this.scanStatus }, onlineEnabled: !!this.config.onlineEnabled, enrich: { ...this.enrichStatus },
       introductions: { ...this.introductionsStatus },
+      ...(this.setAside?.length ? { setAside: [...this.setAside] } : {}),
     }
   }
 
@@ -367,14 +436,21 @@ export class MusicLibraryStore {
           try {
             const stat = await fs.stat(root)
             if (!stat.isDirectory()) throw new Error('根目录不是文件夹')
-            // Finish enumeration before replacing anything: partial permission
-            // failures must never masquerade as deletions.
-            const { folders, encrypted } = await walkAlbums(root)
+            // Finish enumeration before replacing anything. What could not be read this time is
+            // counted and never taken for a deletion: a known song keeps its record (readAlbum), the
+            // albums of a folder that could not be listed stay, offline.
+            const skipped = { encrypted: 0, unreadable: 0, folders: [] }
+            const folders = await walkAlbums(root, skipped)
             const rootAlbums = []
             const previousById = new Map(previous.map((album) => [album.id, album]))
-            for (const folder of folders) rootAlbums.push(await this.readAlbum(root, folder, previousById.get(albumEntryId(folder))))
+            for (const folder of folders) {
+              const album = await this.readAlbum(root, folder, previousById.get(albumEntryId(folder)), skipped)
+              if (album) rootAlbums.push(album)
+            }
+            const found = new Set(rootAlbums.map((album) => album.id))
+            rootAlbums.push(...previous.filter((album) => !found.has(album.id) && skipped.folders.some((folder) => insidePath(folder, album.folder))).map((album) => ({ ...album, offline: true })))
             nextAlbums.push(...rootAlbums)
-            nextRoots.push({ path: root, status: 'online', ...(encrypted ? { encrypted } : {}) })
+            nextRoots.push({ path: root, status: 'online', ...(skipped.encrypted ? { encrypted: skipped.encrypted } : {}), ...(skipped.unreadable ? { unreadable: skipped.unreadable } : {}) })
           } catch (error) {
             nextRoots.push({ path: root, status: 'offline', error: error.message })
             nextAlbums.push(...previous.map((album) => ({ ...album, offline: true })))
@@ -396,8 +472,12 @@ export class MusicLibraryStore {
             album.descriptionSource = current.descriptionSource
           }
         }
-        this.index = { version: 1, albums: nextAlbums, roots: nextRoots, scannedAt: timestamp() }
-        await this.saveIndex()
+        // Without a main folder (none chosen yet, or config.json set aside at a start) the index stays
+        // as it is, unshown (inLibrary), for that folder chosen again (as library.rs scan_sync).
+        if (this.mainFolder !== undefined) {
+          this.index = { version: 1, albums: nextAlbums, roots: nextRoots, scannedAt: timestamp() }
+          await this.saveIndex()
+        }
         this.scanStatus.finishedAt = timestamp()
       } catch (error) {
         this.scanStatus.error = error.message
@@ -412,25 +492,50 @@ export class MusicLibraryStore {
     return this.scanPromise
   }
 
-  async readAlbum(root, entry, previous) {
+  /** An album record from what the walk found; null when none of its songs could be taken. */
+  async readAlbum(root, entry, previous, skipped = { unreadable: 0 }) {
     const id = albumEntryId(entry)
     let fileCover
     if (entry.cover) {
-      const stat = await fs.stat(entry.cover)
-      fileCover = { path: entry.cover, mime: imageMime(entry.cover), version: hash(`${entry.cover}:${stat.size}:${stat.mtimeMs}`), embedded: false }
+      try {
+        const stat = await fs.stat(entry.cover)
+        fileCover = { path: entry.cover, mime: imageMime(entry.cover), version: hash(`${entry.cover}:${stat.size}:${stat.mtimeMs}`), embedded: false }
+      } catch (error) {
+        // An image that cannot be read now keeps the cover the last scan found in it.
+        if (error.code !== 'ENOENT') skipped.unreadable += 1
+        if (previous?._cover && !previous._cover.embedded && previous._cover.path === entry.cover) fileCover = previous._cover
+      }
     }
     // A single owns its embedded artwork; a matching image is only a fallback.
     let cover = entry.singleFile ? undefined : fileCover
     const tracks = []
+    // The last scan's songs of this album, by path: one look-up per song.
+    const oldTracks = new Map()
+    for (const track of previous?.tracks ?? []) if (!oldTracks.has(track._path)) oldTracks.set(track._path, track)
     for (const file of entry.tracks) {
-      const stat = await fs.stat(file)
+      const old = oldTracks.get(file)
+      // A song that cannot be read now (in use by another program, not permitted) keeps the record
+      // the last scan made (read again next time) and a new one waits for the next scan; either way
+      // it is counted. One that is gone was deleted, unless its name only seems gone: a name that is
+      // not valid Unicode reaches this service with U+FFFD in it, and is counted (as library.rs walk).
+      const keep = (error) => {
+        if (error.code === 'ENOENT' && !file.includes('\uFFFD')) return
+        skipped.unreadable += 1
+        if (old) {
+          tracks.push(old)
+          if (!cover && old._embeddedCover) cover = old._embeddedCover
+        }
+      }
+      let stat
+      try { stat = await fs.stat(file) } catch (error) { keep(error); continue }
       const fingerprint = `${stat.size}:${stat.mtimeMs}`
-      const old = previous?.tracks.find((track) => track._path === file)
       if (old?._fingerprint === fingerprint && old._metadataVersion === METADATA_VERSION && (cover || old._embeddedCover !== undefined)) {
         tracks.push(old)
         if (!cover && old._embeddedCover) cover = old._embeddedCover
         continue
       }
+      // A permission/sharing failure is not a missing tag.
+      try { await (await fs.open(file, 'r')).close() } catch (error) { keep(error); continue }
       let metadata
       let metadataError
       try { metadata = await this.parseFile(file, { duration: true, skipCovers: !!cover }) }
@@ -481,6 +586,7 @@ export class MusicLibraryStore {
       })
     }
     cover ??= fileCover
+    if (!tracks.length) return null
     tracks.sort((a, b) => (a.discNumber ?? 1) - (b.discNumber ?? 1) || (a.trackNumber ?? 9999) - (b.trackNumber ?? 9999) || a.relativePath.localeCompare(b.relativePath, 'zh-CN', { numeric: true }))
     const first = tracks[0]
     const localGenres = unique(tracks.flatMap((track) => track._common.genres))

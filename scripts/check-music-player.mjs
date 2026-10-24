@@ -16,6 +16,11 @@ function environment(t) {
   const previousTimeout = globalThis.setTimeout
   const previousClear = globalThis.clearTimeout
   const previousNow = Object.getOwnPropertyDescriptor(performance, 'now')
+  const previousFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+  // Songs whose files cannot be decoded, and those the service no longer has (its /api/audio 404s).
+  const unreadable = new Set()
+  const missing = new Set()
+  const song = (id) => instances.findLast((audio) => audio.src === `/api/audio/${encodeURIComponent(id)}`)
 
   class ControlledAudio extends EventTarget {
     constructor(src = '') {
@@ -24,6 +29,7 @@ function environment(t) {
       this.volume = 1
       this.paused = true
       this.ended = false
+      this.error = null
       this.duration = 120
       this.currentTime = 0
       this.readyState = 1
@@ -35,6 +41,13 @@ function environment(t) {
 
     play() {
       this.playCalls += 1
+      // As Chromium reports a file it cannot read (a 404 too): MEDIA_ERR_SRC_NOT_SUPPORTED, then the play is rejected.
+      const id = decodeURIComponent(this.src.replace('/api/audio/', ''))
+      if (unreadable.has(id) || missing.has(id)) {
+        this.error = { code: 4 }
+        queueMicrotask(() => this.dispatchEvent(new Event('error')))
+        return Promise.reject(new DOMException('The element has no supported sources.', 'NotSupportedError'))
+      }
       if (this.holdPlay) {
         this.holdPlay = false
         return new Promise((resolve) => this.deferred.push(() => { this.begin(); resolve() }))
@@ -59,6 +72,14 @@ function environment(t) {
       this.dispatchEvent(new Event('pause'))
     }
 
+    /** Plays to its end: paused and ended, then its 'ended' event. */
+    finish() {
+      this.currentTime = this.duration
+      this.paused = true
+      this.ended = true
+      this.dispatchEvent(new Event('ended'))
+    }
+
     removeAttribute(name) { if (name === 'src') this.src = '' }
     load() {}
   }
@@ -72,7 +93,14 @@ function environment(t) {
     return id
   }
   globalThis.clearTimeout = (id) => timers.delete(id)
+  // Only the player's HEAD request for a song that could not be read.
+  Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: async (url, init) => {
+    assert.equal(init?.method, 'HEAD')
+    return { status: missing.has(decodeURIComponent(String(url).replace('/api/audio/', ''))) ? 404 : 200 }
+  } })
   t.after(() => {
+    if (previousFetch) Object.defineProperty(globalThis, 'fetch', previousFetch)
+    else delete globalThis.fetch
     if (previousAudio) Object.defineProperty(globalThis, 'Audio', previousAudio)
     else delete globalThis.Audio
     if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument)
@@ -85,6 +113,9 @@ function environment(t) {
 
   return {
     instances,
+    unreadable,
+    missing,
+    song,
     gesture: () => document.dispatchEvent(new Event('pointerdown')),
     pendingTimers: () => timers.size,
     async advance(milliseconds) {
@@ -226,5 +257,151 @@ test('a late BGM play resolution stays silent when a song has taken over', async
   assert.equal(bgm.volume, 0)
   assert.equal(player.state.bgmPlaying, false)
   assert.equal(player.state.playing, true)
+  player.dispose()
+})
+
+test('a song the playlist moves on to that cannot be read is skipped, saying why; one asked for stops there', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ volume: 0, songFadeEnabled: false })
+  const said = []
+  player.subscribe((state) => { if (state.error && said.at(-1) !== state.error) said.push(state.error) })
+  // Fictional songs: a damaged file, then one moved away since the scan, then a good one.
+  env.unreadable.add('Broken')
+  env.missing.add('Moved')
+  const playlist = [track('Alpha'), track('Broken'), track('Moved'), track('Delta')]
+  await player.play('Alpha', playlist)
+  await env.advance(10)
+  assert.equal(player.state.transport, 'playing')
+  env.song('Alpha').finish()
+  await env.advance(10)
+  assert.equal(player.state.currentTrack.id, 'Delta', 'the playlist goes on past both')
+  assert.equal(player.state.transport, 'playing')
+  assert.equal(env.song('Delta').paused, false)
+  assert.deepEqual(said, [
+    '无法播放「Broken」：当前浏览器不支持它的编码，或文件已损坏，已跳到下一首。',
+    '找不到「Moved」的文件（可能已被移动或删除），已跳到下一首。',
+  ])
+  // The last song of the playlist could not be read: the player stops there, saying why.
+  await player.play('Alpha', [track('Alpha'), track('Broken')])
+  await env.advance(10)
+  env.song('Alpha').finish()
+  await env.advance(10)
+  assert.equal(player.state.transport, 'error')
+  assert.equal(player.state.currentTrack.id, 'Broken')
+  assert.equal(player.state.error, '无法播放此 WAV 文件：当前浏览器不支持它的编码，或文件已损坏、不可读取。')
+  // A song asked for (▶, P, a ring, the header's ‹ ›) stops there: the file that is gone is named so.
+  await player.play('Moved', playlist)
+  await env.advance(10)
+  assert.equal(player.state.transport, 'error')
+  assert.equal(player.state.currentTrack.id, 'Moved', 'never another song than the one asked for')
+  assert.equal(player.state.error, '找不到这首歌的文件：它可能已被移动或删除，请重新扫描音乐库。')
+  // A folder gone: the third song in a row that cannot be read stops the playlist.
+  for (const id of ['Gone 1', 'Gone 2', 'Gone 3']) env.missing.add(id)
+  await player.play('Alpha', [track('Alpha'), track('Gone 1'), track('Gone 2'), track('Gone 3'), track('Delta')])
+  await env.advance(10)
+  env.song('Alpha').finish()
+  await env.advance(10)
+  assert.equal(player.state.transport, 'error')
+  assert.equal(player.state.currentTrack.id, 'Gone 3')
+  assert.equal(env.song('Delta'), undefined, 'not tried')
+  player.dispose()
+})
+
+// A scan applied in place (music-app.ts syncPlayerQueue): the playlist as the scan left it, the loaded
+// song going on; a loaded song the library no longer has (another main folder) stops, without an error.
+test('a new queue for the loaded song keeps it playing and goes on through the new one; without it, the player stops', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ volume: 0, songFadeEnabled: false })
+  const said = []
+  player.subscribe((state) => { if (state.error) said.push(state.error) })
+  await player.play('Alpha', [track('Alpha'), track('Gamma')])
+  await env.advance(10)
+  const alpha = env.song('Alpha')
+  // A song added before the next one, with the loaded song's tags read again.
+  player.setQueue([{ ...track('Alpha'), title: 'Alpha (new tags)' }, track('Beta'), track('Gamma')])
+  assert.equal(player.state.transport, 'playing')
+  assert.equal(player.state.currentTrack.title, 'Alpha (new tags)')
+  assert.equal(alpha.paused, false, 'the same element plays on')
+  assert.equal(env.song('Alpha'), alpha)
+  alpha.finish()
+  await env.advance(10)
+  assert.equal(player.state.currentTrack.id, 'Beta', 'the added song plays in its turn')
+  assert.equal(player.state.transport, 'playing')
+  // The loaded song is gone from the library: it stops, idle; nothing of the old queue is tried.
+  env.missing.add('Gamma')
+  const beta = env.song('Beta')
+  player.setQueue([])
+  await env.advance(10)
+  assert.equal(player.state.transport, 'idle')
+  assert.equal(player.state.currentTrack, null)
+  assert.equal(beta.paused, true)
+  assert.equal(env.song('Gamma'), undefined, 'not tried')
+  assert.deepEqual(said, [])
+  player.dispose()
+})
+
+test('a song paused and resumed from outside the page (media keys) follows both', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ volume: 0, songFadeEnabled: false })
+  await player.play('first', [track('first')])
+  await env.advance(10)
+  const song = env.song('first')
+  song.pause()
+  assert.equal(player.state.transport, 'paused')
+  // The system's play: the element's own, as Chromium's default media session action calls it.
+  await song.play()
+  await env.advance(10)
+  assert.equal(player.state.transport, 'playing')
+  assert.equal(song.paused, false, 'not paused again')
+  await player.toggle()
+  assert.equal(player.state.transport, 'paused')
+  assert.equal(song.paused, true, 'the page still pauses it')
+  player.dispose()
+})
+
+test('‹ after the playlist ended plays the song before; while one is loaded past 3 s it starts it again', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ volume: 0, songFadeEnabled: false })
+  const playlist = [track('one'), track('two')]
+  await player.play('two', playlist)
+  await env.advance(10)
+  env.song('two').currentTime = 30
+  env.song('two').dispatchEvent(new Event('timeupdate'))
+  await player.previous()
+  assert.equal(player.state.currentTrack.id, 'two', 'loaded: back to its start')
+  assert.equal(env.song('two').currentTime, 0)
+  env.song('two').finish()
+  await env.advance(10)
+  assert.equal(player.state.transport, 'idle')
+  await player.previous()
+  await env.advance(10)
+  assert.equal(player.state.currentTrack.id, 'one', 'the first press plays the song before the last')
+  assert.equal(player.state.transport, 'playing')
+  player.dispose()
+})
+
+test('resuming a paused song that is at its very end goes on with the playlist, not from 0:00', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ volume: 0, songFadeEnabled: false })
+  await player.play('one', [track('one'), track('two')])
+  await env.advance(10)
+  await player.toggle()
+  // Seeked to its end while paused: the element is ended, and no 'ended' event comes.
+  const one = env.song('one')
+  player.seek(120)
+  one.ended = true
+  await player.toggle()
+  await env.advance(10)
+  assert.equal(player.state.currentTrack.id, 'two')
+  assert.equal(player.state.transport, 'playing')
+  assert.equal(one.playCalls, 1, 'the ended song is not started again')
+  // The last song: the player rests, as after a playlist that played to its end.
+  await player.toggle()
+  player.seek(120)
+  env.song('two').ended = true
+  await player.toggle()
+  await env.advance(10)
+  assert.equal(player.state.transport, 'idle')
+  assert.equal(env.song('two').playCalls, 1)
   player.dispose()
 })

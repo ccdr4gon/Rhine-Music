@@ -95,6 +95,11 @@ export interface LibraryRoot {
   error?: string;
   /** QQ Music's encrypted downloads (.mflac, .mgg, .qmc*) seen by the last scan: never read. */
   encrypted?: number;
+  /**
+   * Songs and folders the last scan could not read (in use, not permitted, a name that is not valid
+   * Unicode): a known song kept its record, a folder its albums (offline); new ones wait.
+   */
+  unreadable?: number;
 }
 
 /**
@@ -121,6 +126,8 @@ export interface MusicLibrary {
   playlists?: MusicPlaylist[];
   /** The main folder first; folders saved after it by earlier versions are kept but unused. */
   roots: LibraryRoot[];
+  /** The names the data files this start could not read were set aside under (damaged or newer). */
+  setAside?: string[];
   scan: {
     running: boolean;
     startedAt?: string;

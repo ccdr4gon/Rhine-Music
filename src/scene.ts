@@ -74,6 +74,11 @@ const ease = (t: number) => {
 const FLUSH_DETAIL_LAYER = 1;
 class ShellAOPass extends SSAOPass {
   render(...args: Parameters<SSAOPass["render"]>) {
+    // three copies the lens only when the pass is built or sized; the camera's changes every
+    // frame (shelf, details, song scene) and with the window's aspect. Shade with this frame's.
+    const ssao = this.ssaoMaterial.uniforms;
+    ssao.cameraProjectionMatrix.value.copy(this.camera.projectionMatrix);
+    ssao.cameraInverseProjectionMatrix.value.copy(this.camera.projectionMatrixInverse);
     this.camera.layers.disable(FLUSH_DETAIL_LAYER);
     try {
       super.render(...args);
@@ -258,8 +263,6 @@ export class ArchiveScene {
   private displayHeight = 0;
   private releaseTimer = 0;
   private buffersReleased = false;
-  private restoringBuffers = false;
-  private readonly aoProjection = { projection: new THREE.Matrix4(), inverse: new THREE.Matrix4() };
   private layoutKind = "";
   onSelect?: (index: number, cell?: ArchiveCell, lifted?: boolean) => void;
   onHover?: (index: number | null) => void;
@@ -395,12 +398,7 @@ export class ArchiveScene {
   private restoreFrameBuffers() {
     this.buffersReleased = false;
     // Restores every size from the current window and requests a draw.
-    this.restoringBuffers = true;
-    try {
-      this.resize();
-    } finally {
-      this.restoringBuffers = false;
-    }
+    this.resize();
   }
   async load(assetUrl = publicAsset(musicLibrary ? MUSIC_CASE_ASSET : "assets/archive-cassette.glb")) {
     // Both label layouts draw the brand mark.
@@ -750,7 +748,7 @@ export class ArchiveScene {
     this.targetDetail = this.detail = 0;
     for (const old of this.outgoing) { this.scene.remove(old.group); this.appearance.dispose(old.group); }
     this.outgoing = [];
-    this.covers.reset(records.length);
+    this.covers.reset(records);
     this.covers.array.visible = musicLibrary && records.length > 0;
     this.covers.selected.visible = musicLibrary && records.length > 0;
     this.model.visible = records.length > 0;
@@ -1159,6 +1157,10 @@ export class ArchiveScene {
       this.composer.removePass(old);
       this.composer.insertPass(this.ao, index);
       old.dispose();
+      // three's SSAOPass.dispose() leaves these two: the renderer would keep the material (and
+      // with it the noise texture on the GPU) for every kernel change.
+      old.ssaoMaterial.dispose();
+      old.noiseTexture.dispose();
       this.aoKernelSize = quality.aoSamples;
       if (this.selectionLighting) this.softenMusicContactShadows();
     }
@@ -1298,7 +1300,14 @@ export class ArchiveScene {
       if (label && musicLibrary && this.labelMesh) {
         // The returning copy keeps the label texture already on the GPU, and the lifted
         // case gets a fresh one for its next label: one upload per change, no canvas copy.
+        // It is drawn on a canvas of its own: the copy's texture keeps the old canvas, which
+        // nothing draws on again, so any upload of the copy (a quality change, a restored
+        // context) still reads the label of the song it leaves with.
         label.material = (label.material as THREE.MeshBasicMaterial).clone();
+        const canvas = document.createElement("canvas");
+        canvas.width = this.labelCanvas.width;
+        canvas.height = this.labelCanvas.height;
+        this.labelCanvas = canvas;
         this.labelTexture = this.createLabelTexture();
         (this.labelMesh.material as THREE.MeshBasicMaterial).map = this.labelTexture;
         this.musicLabelKey = "";
@@ -1500,17 +1509,6 @@ export class ArchiveScene {
       Math.max(1, Math.floor(dimensions.width * this.quality.aoResolution)),
       Math.max(1, Math.floor(dimensions.height * this.quality.aoResolution)),
     );
-    // three's SSAOPass copies the camera projection only when it is sized, so
-    // its shading follows the last real resize. Restoring a hidden window
-    // keeps that copy instead of taking a new one.
-    const ssao = this.ao.ssaoMaterial.uniforms;
-    if (this.restoringBuffers) {
-      ssao.cameraProjectionMatrix.value.copy(this.aoProjection.projection);
-      ssao.cameraInverseProjectionMatrix.value.copy(this.aoProjection.inverse);
-    } else {
-      this.aoProjection.projection.copy(ssao.cameraProjectionMatrix.value);
-      this.aoProjection.inverse.copy(ssao.cameraInverseProjectionMatrix.value);
-    }
     this.container.dataset.renderQuality = JSON.stringify({
       ...JSON.parse(this.container.dataset.renderQuality!),
       aoSamples: this.ao.enabled ? this.aoKernelSize : 0,
@@ -2748,8 +2746,12 @@ export class ArchiveScene {
     p.values(this.camera.projectionMatrix.elements);
     const cameraStill = p.unchanged();
     this.scene.traverseVisible((object) => p.transform(object as THREE.Object3D & { intensity?: number; color?: THREE.Color }));
-    if (this.instanceMatrices) p.values(this.instanceMatrices.array);
-    p.value(this.visibleInstances);
+    // The shelf's cases (and their prints) are hidden while there are no songs: their idle drift
+    // still moves the slots, but no pass draws them.
+    if (this.instanceMatrices && this.instances.some((mesh) => mesh.visible)) {
+      p.values(this.instanceMatrices.array);
+      p.value(this.visibleInstances);
+    }
     // Appearance and glass clarity follow these values.
     p.value(this.lift.value);
     p.value(this.decryption.clarity);

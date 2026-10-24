@@ -70,14 +70,26 @@ test('real WAV parsing exposes duration, lossless technical metadata, and byte-a
   assert.equal((await fetch(`${origin}/api/library`, { headers: { Origin: 'https://unrelated.example' } })).status, 403)
   assert.equal((await fetch(`${origin}/api/library/scan`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status, 415)
   assert.equal((await fetch(`${origin}/api/foobar/player`)).status, 503)
-  const library = await (await fetch(`${origin}/api/library`)).json()
+  const tagged = await fetch(`${origin}/api/library`)
+  const tag = tagged.headers.get('etag')
+  assert.match(tag, /^"[0-9a-f]{24}"$/)
+  const library = await tagged.json()
   assert.equal(library.albums.length, 1)
+  // A poll that sends the tag of the library it has, while it is unchanged: 304 and no body.
+  const unchanged = await fetch(`${origin}/api/library`, { headers: { 'If-None-Match': tag } })
+  assert.equal(unchanged.status, 304)
+  assert.equal(unchanged.headers.get('etag'), tag)
+  assert.equal((await unchanged.arrayBuffer()).byteLength, 0)
   store.introductionProvider = { lookup: async () => ({ status: 'matched', description: 'A synthetic encyclopedia introduction.', descriptionSource: { name: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Test_fixture' } }) }
   const introduction = await fetch(`${origin}/api/library/introductions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ albumIds: [library.albums[0].id], force: true }) })
   assert.equal(introduction.status, 202, 'introduction updates must not require a MusicBrainz contact')
   await store.introductionsPromise
   assert.equal(store.snapshot().introductions.updated, 1)
   assert.equal(store.snapshot().albums[0].description, 'A synthetic encyclopedia introduction.')
+  const changed = await fetch(`${origin}/api/library`, { headers: { 'If-None-Match': tag } })
+  assert.equal(changed.status, 200, 'a changed library is sent again')
+  assert.notEqual(changed.headers.get('etag'), tag)
+  assert.equal((await changed.json()).albums[0].description, 'A synthetic encyclopedia introduction.')
   const malformedUpdate = await fetch(`${origin}/api/library/introductions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"force":"yes"}' })
   assert.equal(malformedUpdate.status, 400)
 })
@@ -217,6 +229,76 @@ test('album introductions follow matched release-group links, retain attribution
   await store.enrich()
   assert.equal(requests.length, 4, 'automatic enrichment does not refetch a cached match')
   assert.equal(store.enrichPromise, null, 'empty enrichment queues do not leave a stale in-flight promise')
+})
+
+// The owner, 2026-10-06: one main folder. A new one that is not there (a typing error) is refused
+// before anything is saved or scanned, and one chosen during a scan is refused, not dropped (as the
+// client, library.rs). The chosen one, away for a while, can be saved again and stays offline.
+test('a new main folder that is not there, or one chosen during a scan, is refused, not saved or scanned', async (t) => {
+  const { root, store, temporary } = await fixture(t, { metadataParser: async () => ({ common: {}, format: {} }) })
+  await fakeAlbum(root)
+  await store.scan()
+  const config = await fs.readFile(path.join(store.dataDir, 'config.json'))
+  const missing = path.join(temporary, '没有这个文件夹')
+  await assert.rejects(store.updateConfig({ roots: [missing] }), /^Error: 找不到文件夹/)
+  await assert.rejects(store.updateConfig({ roots: [path.join(root, 'Album', '01.flac')] }), /^Error: 不是文件夹/)
+  assert.deepEqual(store.config.roots, [root])
+  assert.deepEqual(await fs.readFile(path.join(store.dataDir, 'config.json')), config)
+  const distDir = path.join(temporary, 'dist')
+  await fs.mkdir(distDir)
+  await fs.writeFile(path.join(distDir, 'index.html'), '<h1>fixture</h1>')
+  const { server } = await createMusicServer({ store, distDir, autoScan: false })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)) })
+  const scan = (body) => fetch(`http://127.0.0.1:${server.address().port}/api/library/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const refused = await scan({ roots: [missing] })
+  assert.equal(refused.status, 400)
+  assert.match((await refused.json()).error, /^找不到文件夹/)
+  assert.equal(store.scanPromise, null, 'nothing was scanned')
+  const other = path.join(temporary, '另一个文件夹')
+  await fs.mkdir(other)
+  let hold
+  store.scanPromise = new Promise((resolve) => { hold = resolve })
+  assert.equal((await scan({ roots: [other] })).status, 409)
+  assert.equal((await scan({})).status, 202)
+  hold(); store.scanPromise = null
+  assert.deepEqual(store.config.roots, [root])
+  // The chosen one while it is away: saved again, it keeps its index, offline.
+  await fs.rename(root, `${root}-away`)
+  t.after(() => fs.rename(`${root}-away`, root).catch(() => {}))
+  await store.updateConfig({ roots: [root] })
+  await store.scan()
+  assert.equal(store.snapshot().roots[0].status, 'offline')
+  assert.equal(store.snapshot().albums.length, 1)
+})
+
+// A data file damaged (say by a power cut) or written by a newer version must not keep the service
+// from starting: it is set aside under a new name, as it was, and the start goes on without it.
+test('a damaged or newer data file is set aside and the store starts; a valid config is not written again', async (t) => {
+  const { root, store } = await fixture(t, { metadataParser: async () => ({ common: {}, format: {} }) })
+  await fakeAlbum(root)
+  await store.scan()
+  const file = (name) => path.join(store.dataDir, name)
+  const open = () => new MusicLibraryStore({ dataDir: store.dataDir }).init()
+  const config = await fs.readFile(file('config.json'))
+  await fs.writeFile(file('config.json'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), config]))
+  const before = await fs.stat(file('config.json'))
+  const reopened = await open()
+  assert.deepEqual(reopened.config.roots, [root], 'a byte order mark is read')
+  assert.equal((await fs.stat(file('config.json'))).mtimeMs, before.mtimeMs, 'not written again')
+  assert.equal(reopened.snapshot().setAside, undefined)
+  const index = await fs.readFile(file('library-index.json'))
+  for (const [name, bytes] of [['config.json', Buffer.alloc(120)], ['library-index.json', Buffer.from('{"version":2,"albums":[]}')], ['library-index.json', index.subarray(0, index.length >> 1)], ['genre-rules.json', Buffer.alloc(64)]]) {
+    await fs.writeFile(file(name), bytes)
+    const started = await open()
+    assert.equal(started.setAside.length, 1, name)
+    assert.ok(started.setAside[0].startsWith(`${name}.unreadable-`), name)
+    assert.deepEqual(await fs.readFile(file(started.setAside[0])), bytes, `${name} kept as it was`)
+    assert.deepEqual(started.snapshot().setAside, started.setAside)
+    if (name === 'config.json') { assert.deepEqual(started.config.roots, [], 'the main folder is not guessed'); await fs.writeFile(file(name), config) }
+    if (name === 'library-index.json') { assert.deepEqual(started.index.albums, []); await fs.writeFile(file(name), index) }
+    await fs.rm(file(started.setAside[0]))
+  }
 })
 
 test('Range validation rejects malformed and multipart requests and clips an excessive end', () => {

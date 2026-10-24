@@ -115,6 +115,53 @@ test('slot refresh updates only its own rows at every level and preserves top/bo
   texture.dispose();
 });
 
+test('interim art sends only the levels it changed; the finer ones wait for the sharp chain', () => {
+  const print = new CoverMipTexture(1, 1, 8), atlas = new CoverMipTexture(2, 1, 2);
+  atlas.setTile(1, coverMipmaps(solid(2, [0, 255, 0, 255]), 2));
+  const sent = [], gl = {
+    TEXTURE_2D: 'TEXTURE_2D', RGBA: 'RGBA', UNSIGNED_BYTE: 'UNSIGNED_BYTE',
+    pixelStorei() {},
+    texSubImage2D(_target, level) { sent.push(level); },
+  };
+  const uploaded = { __webglTexture: {} };
+  const renderer = { properties: { get: () => uploaded }, getContext: () => gl, state: { bindTexture() {}, unbindTexture() {} } };
+  const sharp = () => coverMipmaps(solid(8, [255, 0, 0, 255]), 8);
+  print.setTile(0, sharp());
+  print.flush(renderer);
+  assert.deepEqual(sent, [], 'the first upload is three\'s, of every level');
+  uploaded.__version = print.version;
+  // Lifted again: the shelf tile shows at once in the coarser levels (8 px print, 2 px tile: from level 2).
+  print.setLevelsFrom(atlas, 1);
+  assert.equal(print.coverMinLod.value, 2);
+  print.flush(renderer);
+  assert.deepEqual(sent, [2, 3], 'not the two finest levels (1024 and 512 px in the app), which are not sampled and did not change');
+  print.setTile(0, sharp());
+  print.flush(renderer);
+  assert.deepEqual(sent.splice(0), [2, 3, 0, 1, 2, 3], 'then the sharp chain, every level once');
+  // A sharp print superseded before it is drawn: its finer levels are never sent.
+  print.setTile(0, sharp());
+  print.setLevelsFrom(atlas, 1);
+  print.flush(renderer);
+  assert.deepEqual(sent.splice(0), [2, 3]);
+  print.flush(renderer);
+  assert.deepEqual(sent, [], 'they wait, without a call to the GPU each frame');
+  print.setTile(0, sharp());
+  print.flush(renderer);
+  assert.deepEqual(sent.splice(0), [0, 1, 2, 3]);
+  print.flush(renderer);
+  assert.deepEqual(sent, [], 'nothing is sent twice');
+  // A full upload (a restored context, a new texture) sends what was waiting as well.
+  print.setTile(0, sharp());
+  print.setLevelsFrom(atlas, 1);
+  uploaded.__version = -1;
+  print.flush(renderer);
+  uploaded.__version = print.version;
+  print.setTile(0, sharp());
+  print.flush(renderer);
+  assert.deepEqual(sent.splice(0), [0, 1, 2, 3]);
+  print.dispose(); atlas.dispose();
+});
+
 test('cover art fills its texture and its quad keeps the art aspect inside the margin', () => {
   const art = 1 - 2 / 128;
   assert.deepEqual(coverArtScale(), [art, art], 'missing covers use the full printed square');
@@ -205,6 +252,19 @@ test('a returning snapshot compiles against its own texture and its own quality 
   }
 });
 
+test('a returning copy\'s label keeps a canvas of its own, so an upload of it never prints the next song', () => {
+  // scene.ts needs a browser to load: read as written. The copy keeps the label texture it has;
+  // three uploads a texture again from its canvas (a quality change, a restored context).
+  const scene = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const from = scene.indexOf('if (label && musicLibrary && this.labelMesh) {');
+  assert.ok(from >= 0);
+  const branch = scene.slice(from, scene.indexOf('} else if (label) {', from));
+  assert.match(branch, /label\.material = \(label\.material as THREE\.MeshBasicMaterial\)\.clone\(\);/, 'the copy keeps the old texture');
+  assert.match(branch, /const canvas = document\.createElement\("canvas"\);\n\s*canvas\.width = this\.labelCanvas\.width;\n\s*canvas\.height = this\.labelCanvas\.height;\n\s*this\.labelCanvas = canvas;\n\s*this\.labelTexture = this\.createLabelTexture\(\);/,
+    'the lifted case draws its next label on a new canvas');
+  assert.match(scene, /private createLabelTexture\(\) \{\n\s*const texture = new THREE\.CanvasTexture\(this\.labelCanvas\);/);
+});
+
 // A painter double: records requests and resolves them on demand.
 function fakePainter() {
   let next = 1;
@@ -263,8 +323,10 @@ test('a case with a new key but the same picture keeps its painted tile', async 
   const painter = fakePainter();
   const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
   const listed = { id: 'netease-list:7:42', title: 'Song', album: { coverUrl: '/covers/42.jpg' } };
+  // Each paint here finds its art (it has a colour); a picture that cannot be loaded is below.
+  const art = [0.25, 0.5, 0.75];
   atlas.setSlot(0, listed);
-  await painter.finish([...painter.jobs.keys()][0]);
+  await painter.finish([...painter.jobs.keys()][0], undefined, art);
   showSlots(atlas, 1);
   const scale = atlas.array.geometry.getAttribute('coverScale');
   const revision = atlas.revision;
@@ -277,15 +339,88 @@ test('a case with a new key but the same picture keeps its painted tile', async 
   // it, and the case keeps its tile whatever address it loads from.
   const served = (host) => ({ ...listed, id: 'netease-track:42', album: { coverUrl: `https://${host}.music.126.net/a.jpg`, coverKey: 'netease-picture:/a.jpg' } });
   atlas.setSlot(1, served('p1'));
-  await painter.finish([...painter.jobs.keys()][0]);
+  await painter.finish([...painter.jobs.keys()][0], undefined, art);
   atlas.setSlot(1, served('p3'));
   assert.equal(painter.jobs.size, 0, 'the same picture on another server is not painted again');
-  // A picture of its own (another cover, another title, an external card) is another tile.
-  for (const other of [{ ...listed, album: { coverUrl: '/covers/43.jpg' } }, { ...listed, title: 'Other' }, { ...listed, id: 'external:42' }]) {
+  // Another song of the album shows the same picture: the title is printed only on the
+  // missing-cover card, so it shares the tile.
+  atlas.setSlot(2, { ...listed, id: 'netease-track:43', title: 'Other' });
+  assert.equal(painter.jobs.size, 0, 'another title on the same picture is not painted again');
+  // A picture of its own (another cover, an external card, or no cover: its card prints its title) is another tile.
+  const bare = { id: 'local:7', title: 'Bare', album: {} };
+  for (const other of [{ ...listed, album: { coverUrl: '/covers/43.jpg' } }, { ...listed, id: 'external:42' }, bare, { ...bare, title: 'Other' }]) {
     atlas.setSlot(0, other);
     assert.equal(painter.jobs.size, 1, JSON.stringify(other));
     await painter.finish([...painter.jobs.keys()][0]);
   }
+  atlas.dispose();
+});
+
+// The songs of an album share its picture (local music: one artwork address per album).
+test('songs showing one picture share one tile, and the atlas is sized by pictures, not songs', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(64, 4096, 4, undefined, painter);
+  const songs = Array.from({ length: 60 }, (_, i) => ({ id: `local:${i}`, title: `Song ${i}`, album: { coverUrl: `/api/artwork/album-${i % 5}` } }));
+  atlas.reset(songs);
+  assert.equal(atlas.array.material.map.rows, 1, 'five pictures: one row, where sixty songs asked for four');
+  atlas.reset([...songs, { id: 'local:bare', title: 'Bare', album: {} }, ...Array.from({ length: 16 }, (_, i) => ({ id: `x${i}`, title: `X${i}`, album: { coverUrl: `/covers/x${i}.jpg` } }))]);
+  assert.equal(atlas.array.material.map.rows, 2, 'one more for each sixteen pictures, and a song without one');
+  atlas.reset(songs);
+  for (let slot = 0; slot < 60; slot++) atlas.setSlot(slot, songs[slot]);
+  assert.equal(painter.jobs.size, 5, 'one painting per picture');
+  for (const id of [...painter.jobs.keys()]) await painter.finish(id, [0.9, 0.6], [0.25, 0.5, 0.75]);
+  showSlots(atlas, 60);
+  const rect = atlas.array.geometry.getAttribute('coverTile'), scale = atlas.array.geometry.getAttribute('coverScale');
+  for (let slot = 0; slot < 60; slot++) {
+    assert.deepEqual([rect.getX(slot), rect.getY(slot)], [rect.getX(slot % 5), rect.getY(slot % 5)], 'the album\'s tile');
+    assert.deepEqual([scale.getX(slot), scale.getY(slot)], [0.9, 0.6].map(Math.fround));
+  }
+  // A lifted song shows its album's tile at once while its sharp print is painted.
+  void atlas.select(songs[7]);
+  assert.equal(atlas.selected.material.map.coverMinLod.value, 2);
+  assert.deepEqual(atlas.selectedTint.toArray(), [0.25, 0.5, 0.75, 1]);
+  assert.equal(atlas.shows(songs[12]), true, 'relayout: another song of the album is the same print');
+  atlas.dispose();
+});
+
+test('a picture that cannot be loaded gives each song its own missing-cover card, with its own title', async () => {
+  const painter = fakePainter();
+  const atlas = new CoverAtlas(16, 4096, 4, undefined, painter);
+  const song = (title) => ({ id: `local:${title}`, title, album: { coverUrl: '/api/artwork/broken' } });
+  const [a, b] = [song('A'), song('B')];
+  // Shelf tiles still being painted for a title (the lifted print's 1024 px chain aside).
+  const tileFor = (title) => [...painter.jobs].filter(([, job]) => job.request.title === title && job.request.size < 1024).map(([id]) => id);
+  atlas.setSlot(0, a);
+  atlas.setSlot(1, b);
+  atlas.setSlot(2, a);
+  assert.equal(painter.jobs.size, 1, 'one picture, one painting');
+  assert.equal(tileFor('A').length, 1, 'the first song\'s title goes with it');
+  void atlas.select(b);
+  // The picture could not be loaded: the painter printed the missing-cover card with A's title.
+  await painter.finish(tileFor('A')[0]);
+  showSlots(atlas, 3);
+  const scale = atlas.array.geometry.getAttribute('coverScale'), rect = atlas.array.geometry.getAttribute('coverTile');
+  assert.deepEqual([scale.getX(0), scale.getX(2)], [0.5, 0.5], 'A\'s cases show the card at once');
+  assert.deepEqual([rect.getX(0), rect.getY(0)], [rect.getX(2), rect.getY(2)]);
+  assert.deepEqual([scale.getX(1), scale.getY(1)], [0, 0], 'B\'s case never shows A\'s card');
+  assert.equal(atlas.selected.material.map.coverScale.value.x, 0, 'nor does the lifted B');
+  assert.equal(tileFor('B').length, 1, 'B\'s own card is painted');
+  await painter.finish(tileFor('B')[0]);
+  showSlots(atlas, 3);
+  assert.deepEqual([scale.getX(1), scale.getY(1)], [0.5, 0.75]);
+  assert.notDeepEqual([rect.getX(1), rect.getY(1)], [rect.getX(0), rect.getY(0)], 'in a tile of its own');
+  assert.equal(atlas.selected.material.map.coverMinLod.value, 2, 'the lifted B takes its own card meanwhile');
+  // The picture stays keyed by title: another song of it gets its own card too.
+  atlas.setSlot(3, song('C'));
+  assert.equal(tileFor('C').length, 1);
+  atlas.setSlot(4, b);
+  assert.equal(tileFor('B').length, 0, 'a known card is shown again without repainting');
+  // A new library tries the picture again, as one tile for its songs.
+  atlas.reset(4);
+  assert.equal(painter.jobs.size, 0, 'the work for the old library is cancelled');
+  atlas.setSlot(0, a);
+  atlas.setSlot(1, b);
+  assert.equal(painter.jobs.size, 1);
   atlas.dispose();
 });
 

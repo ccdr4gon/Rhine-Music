@@ -522,6 +522,14 @@
 .song-row-play:hover::before {
   opacity: 0.65;
 }
+/* Forced colours (Windows' contrast themes): its transparent borders would be forced to the text's
+   colour, a block; it keeps out of the forcing, in a button's system colour (music-chrome.css). */
+@media (forced-colors: active) {
+  .song-row-play::before {
+    forced-color-adjust: none;
+    border-left-color: ButtonText;
+  }
+}
 .music-song[data-play="true"] .song-row:not(.playing, .pending):is(:hover, :focus-visible, .selected) .song-row-play,
 .music-song[data-resume="true"] .song-row.playing:not(.pending):is(:hover, :focus-visible, .selected) .song-row-play {
   display: block;

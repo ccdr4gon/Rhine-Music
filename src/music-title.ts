@@ -53,6 +53,35 @@ function fillCandidate(candidate: Candidate, text: string) {
 let sharedSegmenter: Intl.Segmenter | null | undefined;
 let sharedCanvas: CanvasRenderingContext2D | undefined;
 
+// Letters the font joins to their neighbours across graphemes: the cursive scripts' (Arabic and
+// the like; tatweel is Common), and a grapheme left open by a virama or a joiner (a conjunct its
+// script's grapheme clusters do not hold together, as Kannada's or Sinhala's).
+const CURSIVE =
+  /[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Nko}\p{Script=Mongolian}\p{Script=Adlam}\p{Script=Hanifi_Rohingya}\p{Script=Mandaic}\p{Script=Manichaean}\p{Script=Psalter_Pahlavi}\p{Script=Sogdian}\p{Script=Old_Uyghur}\p{Script=Phags_Pa}\u0640]/u;
+const OPEN = /[\u094D\u09CD\u0A4D\u0ACD\u0B4D\u0BCD\u0C4D\u0CCD\u0D3B\u0D3C\u0D4D\u0DCA\u1039\u17D2\u1A60\u1B44\u1BAB\uA9C0\uAAF6\u200D]$/u;
+
+/**
+ * A line's glyphs with each run the font shapes together as one face: a reel per grapheme would
+ * set every letter of an Arabic word apart, in its isolated form (and cut, its slot being the joined
+ * form's width). Such a run rolls as one reel; anything else keeps a reel per grapheme. Keys follow
+ * the line's faces in order, as before.
+ */
+export function joinShaped(row: TitleGlyph[], line: number) {
+  const faces: TitleGlyph[] = [];
+  for (const glyph of row) {
+    const last = faces.at(-1);
+    if (last && ((CURSIVE.test(last.text) && CURSIVE.test(glyph.text)) || (OPEN.test(last.text) && /^\p{L}/u.test(glyph.text)))) {
+      // Logical neighbours on a line stand side by side, either way round (right to left).
+      const left = Math.min(last.x, glyph.x);
+      last.width = Math.max(last.x + last.width, glyph.x + glyph.width) - left;
+      last.x = left;
+      last.text += glyph.text;
+    } else faces.push({ ...glyph });
+  }
+  faces.forEach((glyph, index) => (glyph.key = `${glyph.kind}:${line}:${index}`));
+  return faces;
+}
+
 /**
  * The glyphs of a candidate as the browser wrapped them (one read pass over native grapheme
  * boxes; the reel renderer consumes these positions directly). With `overflow`, two lines,
@@ -143,7 +172,7 @@ function snapshotTitle(
           letterSpacing: style.letterSpacing,
         });
       }
-      for (const glyph of row) {
+      for (const glyph of joinShaped(row, line)) {
         glyph.y = y + line * lineHeight;
         glyphs.push(glyph);
       }

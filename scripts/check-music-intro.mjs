@@ -350,8 +350,10 @@ test('the setting: on by default, saved with the other preferences, in 动效与
   assert.match(app, /reduced: boolean;\n\s*intro: boolean;\n/);
   assert.match(app, /if \(typeof preferences\.intro !== "boolean"\) preferences\.intro = true;/);
   assert.match(app, /boot = new MusicBoot\(stage, \{\n\s*reduced: \(\) => preferences\.reduced,\n\s*intro: \(\) => preferences\.intro,\n/);
-  const motion = app.slice(app.indexOf('<h3>动效与显示</h3>'), app.indexOf('</section>', app.indexOf('<h3>动效与显示</h3>')));
-  assert.match(motion, /<label class="settings-row"><span>开场动画<small>[^<]*下次启动时生效<\/small><\/span><input type="checkbox" id="intro-setting" \$\{preferences\.intro \? "checked" : ""\}><\/label>/);
+  // 设置 → 动效与显示 (design A, 2026-10-24): a switch whose one note says it waits for the next start.
+  const motion = app.slice(app.indexOf('  motion: () =>'), app.indexOf('  sound: () =>'));
+  assert.match(motion, /settingSwitch\("intro-setting", "开场动画", preferences\.intro, "下次启动时生效"\)/);
+  assert.match(app, /const settingSwitch = \(id: string, label: string, on: boolean, note = "", tip = ""\) =>\s*`<label class="settings-row"\$\{tip \? ` title="\$\{tip\}"` : ""\}><span>\$\{label\}\$\{note \? `<small>\$\{note\}<\/small>` : ""\}<\/span><input type="checkbox" role="switch" class="settings-switch" id="\$\{id\}"\$\{tip \? ` aria-description="\$\{tip\}"` : ""\}\$\{on \? " checked" : ""\}><\/label>`;/);
   // Switching it saves it and does nothing else: the opening is decided when the page starts.
   const change = app.slice(app.indexOf('if (el.id === "intro-setting") {'), app.indexOf('if (el.id === "bgm-setting")'));
   assert.match(change, /^if \(el\.id === "intro-setting"\) \{\n\s*preferences\.intro = el\.checked;\n\s*savePrefs\(\);\n\s*\}\n\s*$/);

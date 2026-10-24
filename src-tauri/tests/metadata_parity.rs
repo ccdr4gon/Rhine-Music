@@ -9,6 +9,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 fn save(path: &Path, bytes: &[u8]) {
@@ -177,6 +179,95 @@ fn store(path: &Path, root: &Path) -> Store {
     store
 }
 
+fn ogg_page(header_type: u8, granule: u64, sequence: u32, packet: &[u8]) -> Vec<u8> {
+    let mut page = b"OggS\0".to_vec();
+    page.push(header_type);
+    page.extend(granule.to_le_bytes());
+    page.extend(0x5248_494Eu32.to_le_bytes());
+    page.extend(sequence.to_le_bytes());
+    // The checksum is not checked when a file is read.
+    page.extend(0u32.to_le_bytes());
+    page.push(1);
+    page.push(u8::try_from(packet.len()).unwrap());
+    page.extend(packet);
+    page
+}
+/// A made-up Ogg Opus file: its identification header with `channels`, its comments (a title) and
+/// one audio page ending `samples` after the pre-skip.
+fn opus(path: &Path, channels: u8, samples: u64) {
+    let pre_skip = 312u16;
+    let mut head = b"OpusHead\x01".to_vec();
+    head.push(channels);
+    head.extend(pre_skip.to_le_bytes());
+    head.extend(48_000u32.to_le_bytes());
+    head.extend([0, 0, 0]);
+    let mut tags = b"OpusTags".to_vec();
+    for text in ["fixture".as_bytes(), "TITLE=虚构的歌".as_bytes()] {
+        if text.starts_with(b"TITLE") {
+            tags.extend(1u32.to_le_bytes());
+        }
+        tags.extend(u32::try_from(text.len()).unwrap().to_le_bytes());
+        tags.extend(text);
+    }
+    let mut bytes = ogg_page(2, 0, 0, &head);
+    bytes.extend(ogg_page(0, 0, 1, &tags));
+    bytes.extend(ogg_page(4, u64::from(pre_skip) + samples, 2, &[0xFC, 0xFF, 0xFE]));
+    save(path, &bytes);
+}
+
+/// lofty 0.25.4 panics on some Opus headers: a channel count of 0 (a damaged file), and fewer than
+/// 24 samples after the pre-skip (which a valid encode of a very short sound has). Such a song is
+/// still indexed, with its tags, and the scan goes on and ends: a reader's panic must not end the
+/// scan, nor (release builds unwind, see below) the client, at this and every later start.
+#[test]
+fn opus_files_the_reader_panics_on_are_indexed_and_the_scan_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("music");
+    let playlist = root.join("虚构歌单");
+    opus(&playlist.join("正常.opus"), 2, 48_000);
+    opus(&playlist.join("零声道.opus"), 0, 48_000);
+    opus(&playlist.join("极短.opus"), 2, 10);
+    let normal = metadata::read(&playlist.join("正常.opus"), false).unwrap();
+    assert_eq!(normal.track["codec"], "Opus");
+    assert_eq!(normal.track["numberOfChannels"], 2);
+    assert!((normal.track["duration"].as_f64().unwrap() - 1.0).abs() < 0.01);
+    for name in ["零声道.opus", "极短.opus"] {
+        let damaged = metadata::read(&playlist.join(name), true).unwrap();
+        assert_eq!(damaged.track["title"], "虚构的歌", "{name}: its tags are still read");
+        assert_eq!(damaged.track["duration"], 0, "{name}");
+        assert!(damaged.track.get("codec").is_none(), "{name}");
+        assert_eq!(metadata::lyrics(&playlist.join(name)), None, "{name}");
+    }
+    // The client's own path: the scan a start begins ends, and is saved.
+    let shared = Arc::new(Mutex::new(store(&temp.path().join("index"), &root)));
+    Store::begin_scan(&shared, None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while shared.lock().unwrap().scan["running"] == true {
+        assert!(Instant::now() < deadline, "the scan never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let s = shared.lock().unwrap();
+    assert!(s.scan.get("error").is_none(), "{}", s.scan);
+    assert_eq!(s.index["roots"][0]["status"], "online");
+    let tracks = s.index["albums"][0]["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 3);
+    assert!(tracks.iter().all(|t| t["title"] == "虚构的歌"));
+    assert!(s.data_dir.join("library-index.json").is_file());
+}
+
+/// Release builds unwind on a panic, so that the readers' panics above are caught: with "abort",
+/// one such song ended the client at every start. (metadata.rs does not build without it.)
+#[test]
+fn release_builds_unwind_on_a_panic() {
+    let manifest = include_str!("../Cargo.toml");
+    let release = manifest.split("[profile.release]").nth(1).unwrap();
+    let release = release.split("\n[").next().unwrap();
+    assert!(
+        !release.lines().any(|line| line.trim().replace(' ', "").starts_with("panic=")),
+        "[profile.release] must keep the default panic strategy (unwind)"
+    );
+}
+
 #[test]
 fn codec_comes_from_audio_contents_including_compressed_wave_and_aifc() {
     let temp = tempfile::tempdir().unwrap();
@@ -320,9 +411,11 @@ fn zero_tag_numbers_use_filename_and_invalid_index_is_preserved() {
         json!({"version":1,"albums":[{"tracks":[false]}]}),
     ] {
         library::write_json(&store.data_dir.join("library-index.json"), &invalid).unwrap();
-        assert!(Store::open(store.data_dir.clone()).is_err());
+        // Set aside as it was, and the store opens without it.
+        let reopened = Store::open(store.data_dir.clone()).unwrap();
+        assert!(reopened.index["albums"].as_array().unwrap().is_empty());
         let saved: Value =
-            serde_json::from_slice(&fs::read(store.data_dir.join("library-index.json")).unwrap())
+            serde_json::from_slice(&fs::read(store.data_dir.join(&reopened.set_aside[0])).unwrap())
                 .unwrap();
         assert_eq!(saved, invalid);
     }
@@ -334,9 +427,11 @@ fn zero_tag_numbers_use_filename_and_invalid_index_is_preserved() {
     }
 }
 
+/// A song in use by another program keeps its tags from the last scan, and the rest of the main
+/// folder stays online: one file must not take the library offline.
 #[cfg(windows)]
 #[test]
-fn sharing_violation_keeps_previous_root_instead_of_replacing_tags() {
+fn sharing_violation_keeps_previous_tags_and_the_root_online() {
     use std::os::windows::fs::OpenOptionsExt;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("music");
@@ -359,11 +454,15 @@ fn sharing_violation_keeps_previous_root_instead_of_replacing_tags() {
         .open(&path)
         .unwrap();
     store.scan_sync().unwrap();
-    assert_eq!(store.index["roots"][0]["status"], "offline");
+    assert_eq!(store.index["roots"][0]["status"], "online");
+    assert_eq!(store.index["roots"][0]["unreadable"], 1);
+    assert_eq!(store.index["albums"][0]["offline"], false);
     assert_eq!(store.index["albums"][0]["tracks"], previous);
     drop(locked);
     store.scan_sync().unwrap();
     assert_eq!(store.index["roots"][0]["status"], "online");
+    assert!(store.index["roots"][0].get("unreadable").is_none());
+    assert_ne!(store.index["albums"][0]["tracks"][0]["_fingerprint"], previous[0]["_fingerprint"]);
 }
 
 #[test]

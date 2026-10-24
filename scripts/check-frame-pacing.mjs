@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { FramePacing } from '../src/frame-pacing.ts';
 import { FrameCap } from '../src/frame-cap.ts';
 
@@ -99,6 +100,24 @@ test('a pause, a hidden page or an open viewer redraws on return', () => {
   assert.equal(pacing.due(2), true);
   pacing.begin(); pacing.value(0);
   assert.equal(pacing.needsDraw(), true);
+});
+
+test('the empty page is not drawn again: hidden cases drifting are not part of the picture', () => {
+  // With no songs the shelf's cases (and prints) are hidden, but their idle drift still moves the
+  // slots: described, it drew an unchanged page about 57 times a second.
+  const drifting = run(new FramePacing(), { hz: 60, seconds: 2, inputs: t => [0, Math.sin(t)] });
+  assert.equal(drifting.draws, drifting.updates, 'what is described draws');
+  const still = run(new FramePacing(), { hz: 60, seconds: 2, inputs: () => [0] });
+  assert.equal(still.draws, 1, 'the first frame only');
+  // scene.ts (it needs a browser to load) describes the shared instance matrices, and how many are
+  // drawn, only while a mesh that draws them is shown; the songs arriving invalidate (refreshLibrary).
+  const scene = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const from = scene.indexOf('  private describeFrame() {');
+  const describe = scene.slice(from, scene.indexOf('\n  }\n', from));
+  assert.match(describe, /if \(this\.instanceMatrices && this\.instances\.some\(\(mesh\) => mesh\.visible\)\) \{\n\s*p\.values\(this\.instanceMatrices\.array\);\n\s*p\.value\(this\.visibleInstances\);\n\s*\}/);
+  assert.equal(describe.match(/instanceMatrices\.array|visibleInstances/g).length, 2, 'nowhere else');
+  const refresh = scene.slice(scene.indexOf('  async refreshLibrary('), scene.indexOf('this.covers.array.visible ='));
+  assert.match(refresh, /this\.pacing\.invalidate\(\);/);
 });
 
 // 帧率上限 (frame-cap.ts), with the music page's frame loop (music-app.ts frame() and

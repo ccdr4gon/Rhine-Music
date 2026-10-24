@@ -25,6 +25,14 @@ export const nativeQueuePort: QueuePort = {
   },
 };
 
+/**
+ * What the native side says when NetEase's port is open but did not answer in time (debug_port.rs
+ * ERR_NO_REPLY, ERR_UNANSWERED, the same words): NetEase busy, e.g. loading a playlist, not a closed
+ * port. A play request that reached it may still be carried out, and is waited for as any.
+ */
+export const PORT_NO_REPLY = "网易云调试端口没有及时回应";
+export const PLAY_UNANSWERED = "网易云还没有回应这次请求";
+
 export interface DebugPort {
   state(): Promise<DebugState>;
   /** Ask NetEase to play a song that is already in its queue; the queue order is untouched. */

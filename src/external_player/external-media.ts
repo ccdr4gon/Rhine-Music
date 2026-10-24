@@ -10,6 +10,11 @@ export interface ExternalMediaSource {
   artist: string;
   album: string;
   coverUrl?: string;
+  /**
+   * Changes whenever the cover does (absent while there never was one). The snapshot leaves out a
+   * cover the connection already holds at this revision (MediaPort.snapshot's `knownCovers`).
+   */
+  coverRev?: number;
   playback: "playing" | "paused" | "stopped" | "unknown";
   position?: number;
   duration?: number;
@@ -29,14 +34,15 @@ export interface ExternalMediaSource {
 }
 export interface MediaSnapshot { sources: ExternalMediaSource[]; warning?: string }
 export interface MediaPort {
-  snapshot(): Promise<MediaSnapshot>;
+  /** `knownCovers`: the cover revision of each source whose cover the reader holds; those are not sent again. */
+  snapshot(knownCovers?: Record<string, number>): Promise<MediaSnapshot>;
   control(sourceId: string, action: MediaAction, position: number | undefined, allowGlobalMediaKeys: boolean): Promise<unknown>;
 }
 
 export const nativeMediaPort: MediaPort = {
-  async snapshot() {
+  async snapshot(knownCovers = {}) {
     if (!window.__TAURI__) throw new Error("连接外部播放器需要 Windows 客户端。");
-    return window.__TAURI__.core.invoke<MediaSnapshot>("media_snapshot");
+    return window.__TAURI__.core.invoke<MediaSnapshot>("media_snapshot", { knownCovers });
   },
   async control(sourceId, action, position, allowGlobalMediaKeys) {
     if (!window.__TAURI__) throw new Error("连接外部播放器需要 Windows 客户端。");
@@ -121,7 +127,21 @@ export class ExternalMediaConnection {
   warning = "";
   error = "";
   busy = false;
+  /**
+   * The last snapshot could not be read: it says nothing of which sessions there are (a snapshot
+   * that was read can carry a warning too, so `warning` does not tell).
+   */
+  unread = false;
+  /** A snapshot was asked for and answered (or failed) at least once: before that, no list is known. */
+  read = false;
   private refreshTask?: Promise<void>;
+  /**
+   * A seek asked for while another control was on its way: only the newest target, for the song
+   * it was asked for, sent once that control is back (control) instead of being dropped.
+   */
+  private seekWanted?: { id: string; song: string; position: number };
+  /** The control on its way while `busy`. */
+  private sending?: MediaAction;
   /**
    * The source to connect by itself: the one last connected, also in an earlier session;
    * undefined while nothing was ever connected (the fallback is the default link then); null once
@@ -136,6 +156,13 @@ export class ExternalMediaConnection {
 
   get selected(): ExternalMediaSource | undefined {
     return this.disconnected ? undefined : this.sources.find(source => source.id === this.selectedId);
+  }
+  /**
+   * A source is selected and was not seen to disappear, but the last snapshot could not be read:
+   * `selected` shows nothing while retrying, and what was read for the source may stay.
+   */
+  get unreadable(): boolean {
+    return !!this.selectedId && !this.disconnected && !this.sources.some(source => source.id === this.selectedId);
   }
   /** The default link: the remembered source, or the fallback while nothing was ever connected. */
   get preferred(): PreferredPlayer | undefined {
@@ -205,8 +232,19 @@ export class ExternalMediaConnection {
   }
   private async readSnapshot(): Promise<void> {
     try {
-      const snapshot = await this.port.snapshot();
-      this.sources = snapshot.sources;
+      // The covers held are not sent again while they stay the same: each is kept from the last read.
+      const held = new Map(this.sources.map(source => [source.id, source]));
+      const known = Object.fromEntries(this.sources.flatMap(source =>
+        source.coverRev && source.coverUrl !== undefined ? [[source.id, source.coverRev]] : []));
+      const snapshot = await this.port.snapshot(known);
+      this.unread = false;
+      this.sources = snapshot.sources.map(read => {
+        // Text of spaces only is no text (曲名未提供, the album hidden) wherever the page reads it.
+        const source = { ...read, title: read.title.trim(), artist: read.artist.trim(), album: read.album.trim() };
+        const before = held.get(source.id);
+        return source.coverUrl === undefined && source.coverRev && before?.coverRev === source.coverRev && before.coverUrl !== undefined
+          ? { ...source, coverUrl: before.coverUrl } : source;
+      });
       this.warning = snapshot.warning || "";
       if (this.selectedId && !this.sources.some(source => source.id === this.selectedId)) {
         this.disconnected = true;
@@ -214,12 +252,15 @@ export class ExternalMediaConnection {
       }
       this.connectPreferred();
     } catch (error) {
+      this.unread = true;
       this.sources = [];
       this.warning = String(error instanceof Error ? error.message : error);
       // An unreadable snapshot is not proof that a session disappeared.
       // Keep its exact ID, but expose no stale metadata or controls while retrying.
       // A prior confirmed disappearance remains locked until explicit selection.
       this.allowGlobalMediaKeys = false;
+    } finally {
+      this.read = true;
     }
   }
   /** The default link. A new connection: the global media-key consent is asked for again. */
@@ -240,6 +281,13 @@ export class ExternalMediaConnection {
   can(action: MediaAction): boolean {
     return !this.busy && this.offers(action);
   }
+  /**
+   * A seek is on its way to the player, or waits for the control before it: a snapshot read
+   * meanwhile may still have where the song was (SessionClock).
+   */
+  get seeking(): boolean {
+    return this.sending === "seek" || !!this.seekWanted;
+  }
   /** Whether the player offers the action, also while another control is still on its way. */
   offers(action: MediaAction): boolean {
     const source = this.selected;
@@ -249,10 +297,17 @@ export class ExternalMediaConnection {
   }
   async control(action: MediaAction, position?: number): Promise<boolean> {
     const source = this.selected;
-    if (!source || !this.can(action)) return false;
+    if (!source) return false;
     if (action === "seek" && (typeof position !== "number" || !Number.isFinite(position))) return false;
+    if (action === "seek" && this.busy && this.offers("seek")) {
+      // Taken: it goes once the control on its way is back (a later seek replaces it).
+      this.seekWanted = { id: source.id, song: songOf(source), position: position! };
+      return true;
+    }
+    if (!this.can(action)) return false;
     const targetId = source.id;
     this.busy = true;
+    this.sending = action;
     this.error = "";
     try {
       await this.port.control(targetId, action,
@@ -265,16 +320,31 @@ export class ExternalMediaConnection {
       return false;
     } finally {
       this.busy = false;
+      this.sending = undefined;
+      // The newest seek asked for meanwhile, if it is still for the song on show; a failure of it is in `error`.
+      const wanted = this.seekWanted;
+      this.seekWanted = undefined;
+      const now = this.selected, earlier = this.error;
+      if (wanted && now?.id === wanted.id && songOf(now) === wanted.song) {
+        await this.control("seek", wanted.position);
+        this.error ||= earlier;
+      }
     }
   }
 }
+
+/** A session's song, as far as a seek asked for it is concerned. */
+const songOf = (source: ExternalMediaSource) => JSON.stringify([source.title, source.artist, source.album]);
 
 export function mediaCover(source?: ExternalMediaSource): string | undefined {
   return source?.coverUrl && /^data:image\/(?:png|jpe?g|webp|gif|bmp);base64,/i.test(source.coverUrl)
     ? source.coverUrl : undefined;
 }
 export function mediaVisualKey(source?: ExternalMediaSource): string {
-  return source ? JSON.stringify([source.id, source.name, source.title, source.artist, source.album, mediaCover(source)]) : "";
+  // The cover by its revision where it has one (the same revision is the same picture): a picture
+  // of up to 2 MB is not copied into the key at every poll.
+  const cover = source?.coverRev ? [source.coverRev, !!mediaCover(source)] : mediaCover(source);
+  return source ? JSON.stringify([source.id, source.name, source.title, source.artist, source.album, cover]) : "";
 }
 /** A single observed song is a card, never a fabricated album or audio queue. */
 export function mediaLibrary(source?: ExternalMediaSource): MusicLibrary {
@@ -317,6 +387,8 @@ export function mediaConnectionLabel(connection: ExternalMediaConnection, playba
 }
 
 export function mediaSourcesMarkup(connection: ExternalMediaConnection): string {
+  // Not read yet (the panel opens before the first snapshot): no list, rather than "none found".
+  if (!connection.read) return "";
   return connection.sources.length ? connection.sources.map(source => {
     const selected = connection.selected?.id === source.id;
     const preferred = connection.preferred?.match(source) ? " · 默认" : "";

@@ -275,12 +275,14 @@ fn payload(statement: &mut Statement<'_>, key: &str, cap: usize) -> Result<Paylo
 }
 
 /// Invalid JSON is what a half-written payload looks like; valid JSON of another shape
-/// means NetEase changed its format.
+/// means NetEase changed its format. A lone half of a character in it costs that character.
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Problem> {
-    serde_json::from_slice(bytes).map_err(|error| match error.classify() {
-        serde_json::error::Category::Data => Problem::Failed(ERR_FORMAT.into()),
-        _ => Problem::Busy,
-    })
+    serde_json::from_slice(bytes)
+        .or_else(|_| serde_json::from_slice(&super::super::mend_surrogates(bytes)))
+        .map_err(|error| match error.classify() {
+            serde_json::error::Category::Data => Problem::Failed(ERR_FORMAT.into()),
+            _ => Problem::Busy,
+        })
 }
 
 // Only the fields below are deserialized; serde skips every other key of NetEase's
@@ -412,7 +414,9 @@ fn resolve(statement: &mut Statement<'_>, id: &str) -> Result<Option<QueueTrack>
     let Payload::Text(bytes) = payload(statement, id, MAX_TRACK_BYTES)? else {
         return Ok(None);
     };
-    let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+    let record = serde_json::from_slice::<Value>(&bytes)
+        .or_else(|_| serde_json::from_slice(&super::super::mend_surrogates(&bytes)));
+    let Ok(record) = record else {
         return Ok(None);
     };
     Ok(display_track(&record).filter(|track| track.id == id))
@@ -1031,6 +1035,14 @@ mod tests {
         assert!(fixture.read(None).unwrap_err().contains("无法识别"));
         std::fs::write(&fixture.path, "short").unwrap();
         assert!(fixture.read(None).unwrap_err().contains("无法识别"));
+    }
+
+    #[test]
+    fn a_lone_half_of_a_character_in_a_payload_costs_that_character_only() {
+        // As JavaScript writes broken text. The name is made up.
+        let Ok(value) = parse::<Value>(br#"{"name":"Mine\ud800"}"#) else { panic!("refused") };
+        assert_eq!(value["name"], "Mine\u{FFFD}");
+        assert!(matches!(parse::<Value>(br#"{"name":"Mi"#), Err(Problem::Busy)), "a half-written payload stays one");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use crate::{
     http::{self, json_response, serve_file},
     local_music::data::{
-        library::{SharedStore, Store},
+        library::{self, SharedStore, Store},
         lyrics, online,
     },
 };
@@ -30,31 +30,59 @@ pub fn respond(
             return proxy_foobar(request, store, suffix, query, input);
         }
     }
+    // The library with its tag (ETag): a page polling it sends back the tag of the one it has and,
+    // while that is still the library, gets 304, without the snapshot being built or sent again.
+    // The genre rules are read again first, as before (they may be edited by hand meanwhile).
+    if route == "/api/library" && get {
+        let reply = {
+            let mut s = store.lock().unwrap();
+            s.reload_rules().map(|()| {
+                let tag = s.library_tag();
+                let same =
+                    http::get_header(&request, "If-None-Match").is_some_and(|sent| sent == tag);
+                let library = (!same).then(|| s.snapshot());
+                (tag, library)
+            })
+        };
+        return match reply {
+            Ok((tag, Some(library))) => http::tagged_json_response(request, library, &tag),
+            Ok((tag, None)) => http::not_modified(request, &tag),
+            Err(error) => json_response(request, 400, json!({ "error": error })),
+        };
+    }
     let result: Result<(u16, Value), (u16, String)> = (|| {
         let bad = |error: String| (400, error);
+        // A new main folder during a scan (found so after its folder was looked for, too) is 409.
+        let refused = |error: String| (if error == library::SCANNING { 409 } else { 400 }, error);
         match route {
             "/api/health" if get => Ok((
                 200,
                 json!({"service":"rhine-native-music","backend":"rust","pid":std::process::id()}),
             )),
-            "/api/library" if get => {
-                let mut s = store.lock().unwrap();
-                s.reload_rules().map_err(bad)?;
-                Ok((200, s.snapshot()))
-            }
             "/api/library/scan" if post => {
-                Store::begin_scan(store, input.get("roots")).map_err(bad)?;
+                // A new main folder is refused while a scan runs, as on /api/config.
+                if input.get("roots").is_some() && store.lock().unwrap().scan["running"] == true {
+                    return Err((409, "正在扫描，请完成后再更改根目录".into()));
+                }
+                Store::begin_scan(store, input.get("roots")).map_err(refused)?;
                 Ok((202, store.lock().unwrap().snapshot()))
             }
             "/api/config" | "/api/library/config" if get => {
                 Ok((200, store.lock().unwrap().config_snapshot()))
             }
             "/api/config" | "/api/library/config" if post => {
+                // A new main folder is looked for on the disk with the store unlocked; one asked
+                // for while a scan runs is refused (409) before that and again once it is locked.
+                let checked = match input.get("roots") {
+                    Some(roots) => Store::checked_main_folder(store, roots).map_err(refused)?,
+                    None => None,
+                };
                 let mut s = store.lock().unwrap();
-                if input.get("roots").is_some() && s.scan["running"] == true {
-                    return Err((409, "正在扫描，请完成后再更改根目录".into()));
-                }
-                Ok((200, s.update_config(input).map_err(bad)?))
+                Ok((
+                    200,
+                    s.update_config_checked(input, checked.as_deref())
+                        .map_err(refused)?,
+                ))
             }
             "/api/genre-rules" if get => {
                 let mut s = store.lock().unwrap();

@@ -76,6 +76,11 @@
   inherits: true;
   initial-value: rgba(245, 244, 239, 0.97);
 }
+@property --panel-solid {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgb(245, 244, 239);
+}
 @property --page-bg {
   syntax: "<color>";
   inherits: true;
@@ -128,6 +133,7 @@
     --spine-glow-mid,
     --surface,
     --panel,
+    --panel-solid,
     --page-bg,
     --veil,
     --music-night-mix,

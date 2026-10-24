@@ -4,6 +4,7 @@
 //! database, the playlists the user created; `netease_music::data::queue` and
 //! `netease_music::data::playlists` state exactly which fields.
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +37,11 @@ pub struct Source {
     pub album: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
+    /// Changes whenever the source's cover does (0 while it has never had one). A cover the page
+    /// already holds at this revision (`snapshot_known`) is left out of the snapshot: the page
+    /// keeps it, and the bytes cross only when they change, not at every poll for every session.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cover_rev: u64,
     pub playback: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<f64>,
@@ -55,6 +61,10 @@ pub struct Source {
     /// request); nothing the player plays is ever saved with it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -106,12 +116,19 @@ pub fn player_source(app: &str, source: Source) -> Source {
 /// Blocking native operations are serialized on their own initialized WinRT
 /// thread. The Tauri command should call this through spawn_blocking.
 pub fn snapshot() -> Result<Snapshot, String> {
+    snapshot_known(&HashMap::new())
+}
+
+/// A snapshot for a reader that already holds some covers: `known_covers` maps a source id to the
+/// `cover_rev` it holds, and that source's cover is left out while it is still the same.
+pub fn snapshot_known(known_covers: &HashMap<String, u64>) -> Result<Snapshot, String> {
     #[cfg(target_os = "windows")]
     {
-        windows_media::snapshot()
+        windows_media::snapshot(known_covers.clone())
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = known_covers;
         Err("unsupported：本机播放器连接目前仅支持 Windows".into())
     }
 }
@@ -161,6 +178,7 @@ mod tests {
             artist: "Fictional Artist".into(),
             album: String::new(),
             cover_url: None,
+            cover_rev: 0,
             playback: "playing".into(),
             position: Some(12.0),
             duration: Some(180.0),
@@ -208,6 +226,15 @@ mod tests {
             assert_eq!(other.app.as_deref(), Some(app), "{app}");
             assert_eq!((other.name.as_str(), other.player), (app, None), "{app}");
         }
+    }
+    #[test]
+    fn a_cover_revision_is_sent_only_once_there_was_a_cover() {
+        let none = serde_json::to_value(listed("Chrome")).unwrap();
+        assert!(none.get("coverRev").is_none() && none.get("coverUrl").is_none());
+        // A cover the reader holds goes without its bytes: the revision says it is the same one.
+        let held = serde_json::to_value(Source { cover_rev: 3, ..listed("Chrome") }).unwrap();
+        assert_eq!(held["coverRev"], 3);
+        assert!(held.get("coverUrl").is_none());
     }
     #[test]
     fn invalid_seek_is_rejected_before_contacting_any_player() {

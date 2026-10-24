@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { PLAY_GESTURE, playHop } from '../src/motion.ts';
+import { MusicPresentation } from '../src/music-presentation.ts';
 import { songSceneMarkup } from '../src/song-list.ts';
 import { SHORTCUTS, shortcutTable } from '../src/shortcuts.ts';
+import { joinShaped } from '../src/music-title.ts';
 
 const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
 const scene = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8');
@@ -87,7 +90,7 @@ test('play / pause and an external player\'s stop, by button or key, answer with
   // The details page's controls work NetEase as it is (its play / pause too, with the gesture).
   assert.match(app, /if \(target\.dataset\.mediaAction === "toggle"\) toggleExternal\(\);\s*else if \(target\.dataset\.mediaAction === "stop"\) stopPlayback\(\);\s*else void controlExternal\(target\.dataset\.mediaAction as MediaAction\);/);
   // NetEase's own previous / next: the shelf follows its next change of song, once it was sent (not before).
-  assert.match(app, /if \(await pending && \(action === "previous" \|\| action === "next"\)\) netease\.followNextAt = performance\.now\(\);/);
+  assert.match(app, /const sent = await pending;\s*if \(sent && \(action === "previous" \|\| action === "next"\)\) netease\.followNextAt = performance\.now\(\);/);
   assert.match(session, /if \(this\.queueJump \|\| now - this\.followNextAt < QUEUE_JUMP_TIMEOUT_MS\) this\.queueFollowPaused = false;\s*this\.followNextAt = -Infinity;/);
   const remote = body(app, 'function toggleExternal() {', '\nfunction ');
   assert.match(remote, /if \(!externalMedia\?\.can\("toggle"\)\) return;\s*void controlExternal\("toggle"\);\s*scene\?\.playGesture\(\);/);
@@ -123,6 +126,19 @@ test('Space pauses or resumes in the three scenes whatever button has the focus;
   // window in the capture phase (before the opening, a key being set, panels and text fields).
   assert.match(app, /window\.addEventListener\("keydown", \(e\) => \{\s*if \(e\.altKey && \(e\.key === "ArrowLeft" \|\| e\.key === "ArrowRight"\)\) e\.preventDefault\(\);\s*\}, true\);/);
   assert.doesNotMatch(keys, /e\.altKey && \(e\.key === "ArrowLeft"/, 'not only where the scenes\' keys get to');
+  // Nor the mouse's back and forward buttons (the review of 2026-10-23: they went back to the other
+  // source's page, frozen mid-switch when it came from the back-forward cache). A source switch replaces
+  // the page, so there is no entry to go back to (check-music-sources.mjs), and such a page starts again.
+  assert.match(app, /window\.addEventListener\("mouseup", \(e\) => \{\s*if \(e\.button === 3 \|\| e\.button === 4\) e\.preventDefault\(\);\s*\}, true\);/);
+  assert.match(app, /window\.addEventListener\("pageshow", \(e\) => \{\s*if \(e\.persisted\) location\.reload\(\);\s*\}\);/);
+  assert.doesNotMatch(app, /location\.assign\(|history\.pushState\(/, 'no new entry in the page\'s history');
+  // Under the loading cover (the start, a source switch) the scenes' keys and the wheel wait for it to go
+  // (the review of 2026-10-23: Enter or P there played the first song unseen); the panels' keys before.
+  assert.match(app, /\$\("#music-loading"\)\.remove\(\);\s*sceneShown = true;/);
+  assert.equal((app.match(/\bsceneShown = true\b/g) || []).length, 1, 'only once the cover has gone');
+  const shown = keys.indexOf('if (!sceneShown) return;');
+  assert.ok(shown > keys.indexOf('if (panel) {') && shown < keys.indexOf('const target = e.target as HTMLElement;'));
+  assert.match(body(app, 'function wheelCanNavigate() {', '\n}'), /return ready && sceneShown && !!scene/);
   assert.doesNotMatch(keys, /if \(e\.code === "Space"\) \{/, 'no Space of its own, nor one per focus');
   assert.doesNotMatch(keys, /closest\("#song-list"\)\)\) \{|Space stays play \/ pause on a playlist row/);
   assert.deepEqual([shortcutTable({}).get('Space'), shortcutTable({}).get('Enter')], ['pause', 'open']);
@@ -151,11 +167,14 @@ test('the play mode: browsing never switches the song; ▶ and P play the select
   // is not playing it: the port's action can start a song, never pause one.
   assert.match(app, /function playsCurrent\(\) \{\s*if \(externalMedia\?\.offers\("toggle"\) \|\| mediaPlayback\(\) === "playing"\) return undefined;\s*return netease\.queueSongToPlay\(true, playingRecord\(\)\);\s*\}/);
   const asked = method('async playQueueSong(');
-  assert.match(asked, /if \(key !== this\.queuePlaying\) \{\s*if \(this\.queueJump\) this\.queueJumpsSuperseded\.set/, 'a request for the playing song is not a switch to wait for');
+  // (With its playlist it is: NetEase's queue becomes the playlist, which is waited for, answered.)
+  assert.match(asked, /if \(key !== this\.queuePlaying \|\| playlist\) \{\s*if \(this\.queueJump\) this\.queueJumpsSuperseded\.set/, 'a request for the playing song is not a switch to wait for');
+  assert.match(asked, /\.\.\.\(key === this\.queuePlaying \? \{ answered: true \} : \{\}\),/);
   // What may be asked (songRequest): a song of NetEase's queue as it is, or since 2026-10-10 a song of
   // another playlist column with its playlist (check-external-media.mjs runs both).
   const request = method('songRequest(');
-  assert.match(request, /const key = this\.host\.recordId\(index\);\s*if \(!key \|\| !this\.shownQueue\(\)\) return undefined;\s*const lane = this\.laneAt\(index\);/);
+  // Nothing while the media sessions cannot be read (no controls while retrying).
+  assert.match(request, /const key = this\.host\.recordId\(index\);\s*\/\/[^\n]*\n\s*if \(!key \|\| !this\.shownQueue\(\) \|\| this\.host\.media\?\.unreadable\) return undefined;\s*const lane = this\.laneAt\(index\);/);
   assert.match(request, /if \(lane && !lane\.live\) \{[\s\S]*\/\/ The name NetEase stores \(its own 播放全部 hands over the same\), not the one shown\.\s*return \{ key: queueTrackKey\(song\), song, playlist: \{ id: lane\.id, name: lane\.sourceName \}, from: key \};\s*\}\s*const song = this\.queueSong\(key\);\s*return song \? \{ key, song \} : undefined;/);
   assert.match(app, /recordId: \(index\) => records\[index\]\?\.id,/, 'the record of a case, as before');
   const wanted = method('queueSongToPlay(');
@@ -215,7 +234,7 @@ test('the play mode: browsing never switches the song; ▶ and P play the select
   assert.match(button, /pressed: playback === "playing"/);
   assert.match(button, /const disabled = !externalMedia\?\.offers\("toggle"\) && !playsCurrent\(\);/, 'not dimmed while a control is on its way');
   assert.match(button, /disabled: !loaded,/, '本地音乐: disabled while nothing is loaded');
-  assert.match(button, /: disabled \? `\$\{source\.name\}没有提供\$\{playback === "playing" \? "暂停" : "播放 \/ 暂停"\}`/);
+  assert.match(button, /: disabled \? \(consent \? "需先在“播放器”面板中允许发送全局媒体键" : `\$\{source\.name\}没有提供\$\{playback === "playing" \? "暂停" : "播放 \/ 暂停"\}`\)/);
   assert.match(button, /title: loaded \? `\$\{label\}：\$\{loaded\.title\}` : "没有正在播放的歌"/);
   // P, L, ● and the key hints follow a selection still pending (a detail switch), which they already act on.
   assert.match(app, /presentation\.select\(\{ index: wrap\(index, records\.length\), navigation, route \}, openAfter\);\s*\/\/[^\n]*\n\s*syncPlayButton\(\);/);
@@ -231,7 +250,11 @@ test('the play mode: browsing never switches the song; ▶ and P play the select
   assert.match(follow, /\} else if \(!unanswered && !this\.queueJumpsSuperseded\.delete\(key\)\) \{[^}]*if \(this\.queueJump \|\| now - this\.followNextAt < QUEUE_JUMP_TIMEOUT_MS\) this\.queueFollowPaused = false;/);
   // ... but not while NetEase still plays the song it played when asked: the case changed with the
   // queue (a 播放全部 replaced it), not because NetEase answered (2026-10-12).
-  assert.match(follow, /const unanswered = !!this\.queueJump\?\.fromTrack && this\.debugState\.available && this\.debugState\.trackId === this\.queueJump\.fromTrack;/);
+  // A reading the port did not give (late: NetEase busy, or an error) cannot tell NetEase answered either.
+  assert.match(follow, /const unanswered = !!this\.queueJump\?\.fromTrack\s*&& \(this\.debugState\.available \? this\.debugState\.trackId === this\.queueJump\.fromTrack : !!this\.debugError\);/);
+  // A playlist's 播放全部 whose song plays before NetEase saved the playlist as its queue stands (answered)
+  // until the queue is read: not taken for NetEase changing song by itself.
+  assert.match(follow, /if \(this\.queueJump\?\.answered\) \{\s*\/\/[^\n]*\n\s*this\.queueJumpsSuperseded\.clear\(\);\s*\} else if \(this\.queueJump\?\.key === key\) \{/);
   // The header and the details show NetEase's own state when the port answers.
   assert.match(session, /return isNeteaseSource\(source\) && this\.debugState\.available && this\.debugState\.playback \? this\.debugState\.playback : source\?\.playback;/);
   assert.match(app, /function mediaPlayback\(source = externalMedia\?\.selected\) \{\s*return netease\.playback\(source\);\s*\}/);
@@ -242,14 +265,25 @@ test('NetEase\'s answer to a play / pause is read again within a few hundred mil
   const refresh = body(app, 'async function refreshExternal() {', '\nasync function controlExternal');
   // A read asked for while one runs is not dropped: it runs right after.
   assert.match(refresh, /if \(externalRefreshing\) \{\s*externalRefreshAgain = true;\s*return;\s*\}/);
-  assert.match(refresh, /const delay = externalRefreshAgain \? 0 : confirmUntil \? CONFIRM_STEP_MS : document\.hidden \? 2000\s*: netease\.awaiting\(\) \? AWAITING_STEP_MS : 1000;/);
+  // A new song whose position NetEase does not show yet (its slider still has the last song's) is read
+  // again as quickly.
+  assert.match(refresh, /const settling = sessionSettling\(performance\.now\(\)\);\s*const delay = externalRefreshAgain \? 0 : confirmUntil \|\| netease\.playbackClock\.settling\(performance\.now\(\)\) \|\| settling \? CONFIRM_STEP_MS\s*: document\.hidden \? 2000 : netease\.awaiting\(\) \? AWAITING_STEP_MS : 1000;/);
   // Quick reads until the state changes, for at most 1.5 s; the same reads as the poll's. A play request
   // NetEase has not answered where it was asked for (a playlist's 播放全部: its queue saved a moment after
   // the song starts) is read every 250 ms after that, until it is or the request lapses (2026-10-17).
   assert.match(app, /const CONFIRM_STEP_MS = 150, CONFIRM_MS = 1500, AWAITING_STEP_MS = 250;/);
-  assert.match(refresh, /if \(confirmUntil && \(performance\.now\(\) >= confirmUntil \|\| playbackKey\(\) !== confirmFrom\)\) confirmUntil = 0;/);
+  // A media session's new song without its timeline yet (QQ Music) is read every 150 ms, at most 5 s:
+  // only a session that writes timelines, never NetEase's (its timeline is the port's: 2026-10-24).
+  assert.match(body(app, 'function sessionSettling(now: number) {', '\n}'), /if \(!source \|\| source\.kind !== "smtc" \|\| source\.player === "netease"\) return false;[\s\S]*return sessionTimed === source\.id && source\.playback === "playing" && typeof source\.duration !== "number" && now - sessionSongAt < 5000;/);
+  // Two quick actions: each change read confirms one, so the second is not left to the next second's
+  // read (one change ended the quick reads, and NetEase's answer to the second waited up to a second).
+  assert.match(refresh, /if \(confirmUntil\) \{[^}]*const key = playbackKey\(\);\s*(\/\/[^\n]*\n\s*)*const selectedNow = externalMedia\?\.selected, playbackNow = mediaPlayback\(selectedNow\) \?\? "unknown";\s*const passing = selectedNow\?\.kind === "smtc" && \(playbackNow === "unknown" \|\| \(confirmSkip && playbackNow === "stopped"\)\);\s*if \(key !== confirmFrom && !passing\) \{\s*confirmFrom = key;\s*confirmLeft--;\s*\}\s*if \(performance\.now\(\) >= confirmUntil \|\| confirmLeft <= 0\) \{\s*confirmUntil = 0;\s*confirmSkip = false;\s*\}/);
+  assert.match(app, /function confirmSoon\(skip = false\) \{\s*if \(!confirmUntil\) \{\s*confirmSkip = skip;\s*confirmFrom = playbackKey\(\);\s*confirmLeft = 0;\s*\} else if \(skip && !confirmSkip\) \{\s*confirmSkip = true;\s*confirmFrom = playbackKey\(\);\s*\}\s*confirmLeft\+\+;\s*confirmUntil = performance\.now\(\) \+ CONFIRM_MS;\s*\}/);
+  // 上一曲 / 下一曲 are answered by the song, not by the stopped / changing a player passes through
+  // first (QQ Music, 2026-10-24: the new title waited for the next second's read).
+  assert.match(app, /return JSON\.stringify\(\[confirmSkip \? "" : mediaPlayback\(source\) \?\? "", source\?\.title \?\? "", netease\.debugState\.trackId \?\? ""\]\);/);
   const control = body(app, 'async function controlExternal(', '\nfunction ');
-  assert.match(control, /if \(action !== "seek"\) confirmSoon\(\);\s*const pending = externalMedia\.control\(action, position\);/);
+  assert.match(control, /if \(action !== "seek"\) confirmSoon\(action === "previous" \|\| action === "next"\);\s*const pending = externalMedia\.control\(action, position\);/);
   // Still no invented state: the button changes when NetEase says so.
   assert.doesNotMatch(app, /aria-pressed", "true"|optimistic/);
 });
@@ -282,9 +316,19 @@ test('every scene leads to the other two, with the same keys everywhere', () => 
   // Esc returns to the shelf, from the details and from the song scene alike. Since 2026-10-09 ("also
   // play this song") every way into the details from the shelf or the song scene plays their song
   // (openCase, run below); S into the song scene plays nothing.
-  assert.match(body(app, 'function toggleSongs() {', '\n}'), /if \(menu !== "song"\) openSongs\(\);\s*(\/\/[^\n]*\n\s*)?else openCase\(true, swapToDetail\);/);
+  assert.match(body(app, 'function toggleSongs() {', '\n}'), /if \(menu !== "song" \|\| returningToShelf\(\)\) openSongs\(\);\s*(\/\/[^\n]*\n\s*)?else openCase\(true, swapToDetail\);/);
   assert.match(body(app, 'function leaveMenu() {', '\n}'), /^function leaveMenu\(\) \{\s*setMode\("archive"\);\s*$/);
-  assert.match(body(app, 'function showDetails() {', '\n}'), /if \(menu === "song"\) return swapToDetail\(\);\s*setMode\("detail"\);\s*return true;/);
+  assert.match(body(app, 'function showDetails() {', '\n}'), /if \(menu === "song" && !returningToShelf\(\)\) return swapToDetail\(\);\s*(\/\/[^\n]*\n\s*)?menuAfterReturn = undefined;\s*setMode\("detail"\);\s*return true;/);
+  // S and Enter while the shelf returns after Esc (the text leaving, the camera returning) mean what they
+  // mean on the shelf, and wait for it as there (the review of 2026-10-23: S was dropped for 1.6 s, and
+  // Enter right after Esc from the song scene). A swap or a step inside an opened album keeps its refusals.
+  assert.match(body(app, 'function returningToShelf() {', '\n}'), /return !presentation\.openingOrDetail && \(phase === "hiding" \|\| phase === "returning" \|\| phase === "selecting"\);/);
+  const songs = body(app, 'function openSongs() {', '\n}');
+  assert.match(songs, /\|\| \(menu === "song" && !returningToShelf\(\)\)\) return;\s*if \(presentation\.phase === "archive" \|\| returningToShelf\(\)\) \{\s*songOrigin = "archive";/);
+  // While the text still leaves the menu is the leaving one's: the song scene comes with the shelf (the mode port).
+  assert.match(songs, /if \(mode === "archive"\) setMenu\("song"\);\s*else menuAfterReturn = "song";\s*presentation\.open\(\);/);
+  assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /if \(next === "archive"\) \{\s*setMenu\(menuAfterReturn && presentation\.openingOrDetail \? menuAfterReturn : "detail"\);\s*menuAfterReturn = undefined;/);
+  assert.match(body(app, 'function select(', '\n}'), /if \(route === "archive"\) menuAfterReturn = undefined;/, 'a search result opens the details');
   // The song scene swaps to the details wherever it was opened from.
   assert.doesNotMatch(body(app, 'function swapToDetail() {', '\n}'), /songOrigin/);
   assert.match(app, /if \(e\.key === "Escape" && panel\) \{\s*closePanel\(\);\s*return;\s*\}/);
@@ -329,7 +373,9 @@ test('clicking the selected case opens its details and plays it as ▶ does, nev
   // closed the header's open menu; and the details. The rows the wheel still owes go: they would carry
   // the details away from the song that was clicked and plays. (Run with stand-ins below.)
   const open = body(app, 'function openCase(play = true, open: () => boolean | void = showDetails) {', '\n}');
-  assert.match(open, /if \(presentation\.openingOrDetail && menu === "detail"\) return void open\(\);\s*const index = selected;\s*const plays = play && navigationSelection\(\) === index;\s*wheelNavigation\.reset\(\);/);
+  // From the shelf (also on its way back after Esc: ↓ then Enter) the song the details open on plays,
+  // where the selection is going (the review of 2026-10-23); a library rebuild holds it (only the details).
+  assert.match(open, /if \(presentation\.openingOrDetail && menu === "detail"\) return void open\(\);\s*(\/\/[^\n]*\n\s*)*const shelf = menu !== "song" \|\| returningToShelf\(\);\s*const index = shelf && !libraryRebuilding \? navigationSelection\(\) : selected;\s*const plays = play && navigationSelection\(\) === index;\s*wheelNavigation\.reset\(\);/);
   assert.doesNotMatch(open, /togglePlayback|controlExternal|player\?\.|playQueueSong|toggle|playSelection/, 'never a pause, nothing but ▶\'s play');
   assert.match(body(app, 'function requestPlay(', '\n}'), /if \(selectionPlay\(index\)\) \{\s*playSelection\(index, hop\);\s*return true;\s*\}\s*explainNoPlay\(index\);\s*return false;\s*$/);
   // A playing song is not one ▶ plays (so a click never pauses it), nor the one NetEase was just asked for.
@@ -359,6 +405,150 @@ test('clicking the selected case opens its details and plays it as ▶ does, nev
   assert.doesNotMatch(app, /caseSecondPress|casePlayPress|casePlay\b/);
   assert.match(app, /const DOUBLE_PRESS = \{ ms: 500, px: 16 \} as const;/, 'the rings\' double press (ringPlay)');
   assert.match(app, /stage\.addEventListener\("pointerdown", \(\) => \{\s*pressClosesMenu = stage\.dataset\.chromeMenu === "open";\s*\}, true\);/);
+});
+
+// The review of 2026-10-23: after Esc, S did nothing until the shelf had settled (about 1.6 s), Enter
+// right after Esc from the song scene did nothing, and Esc, ↓, Enter opened the new song's details
+// while the old song went on. The app's own functions, run on the real presentation with stand-ins.
+test('keys while the shelf returns after Esc: S and Enter mean what they mean on the shelf, and Enter plays the song it opens', () => {
+  const fn = (name) => body(app, `function ${name}`, '\n}') + '\n}';
+  const source = [
+    fn('returningToShelf() {'), fn('openSongs() {'), fn('swapToDetail() {'), fn('toggleSongs() {'),
+    fn('showDetails() {'), fn('setMode('), fn('openCase('), fn('navigationSelection() {'),
+  ].join('\n');
+  const modePort = body(app, '  mode: (next) => {', '\n  prepareMenu:');
+  const { outputText } = ts.transpileModule(`
+    let menu = "detail", mode = "archive", menuAfterReturn, songOrigin = "archive", menuSwapping = false;
+    let songStay = false, pendingSongFocus = false, detailStay = false, selected = 4, libraryIntent;
+    const libraryRebuilding = false, boot = undefined, ready = true, panel = null, viewer = undefined;
+    const stage = { dataset: {} }, $ = () => ({ hidden: true, dataset: {}, setAttribute() {} });
+    const preferences = { reduced: false }, detailTransition = { hide() {} }, scene = { setSongStage() {} };
+    const syncSelectionMotion = () => {}, syncLyrics = () => {}, cancelSearchTrack = () => {};
+    const songsAvailable = () => true, currentAlbum = () => ({}), wheelNavigation = { reset() {} };
+    const requestPlay = (index, hop) => env.plays.push([index, hop]);
+    function setMenu(next) { menu = next; }
+    const ports = { ${modePort} };
+    const presentation = new MusicPresentation({
+      presentationReady: () => env.presentationReady, archiveReady: () => env.archiveReady,
+      archiveInteractive: () => env.archiveInteractive, enterCamera() {}, returnCamera() {},
+      select: ({ index }) => { selected = index; }, switchDetail: ({ index }) => { selected = index; },
+      prepareMenu: () => env.log.push("prepare:" + menu), showMenu: () => env.log.push("show:" + menu),
+      hideMenu: (done) => env.exits.push(done), hideBrowse: (done) => done(), showBrowse() {},
+      mode: (next) => ports.mode(next),
+    });
+    ${source}
+    return {
+      presentation, toggleSongs, openCase, setMode,
+      down: () => presentation.select({ index: navigationSelection() + 1 }, presentation.openingOrDetail),
+      get state() { return { phase: presentation.phase, menu, selected, wants: presentation.openingOrDetail }; },
+    };`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+  const start = (menu = 'detail') => {
+    const env = { log: [], exits: [], plays: [], presentationReady: false, archiveReady: true, archiveInteractive: false };
+    const run = new Function('MusicPresentation', 'env', outputText)(MusicPresentation, env);
+    // A menu open and settled, then Esc: its text is leaving (the presentation's 'hiding').
+    if (menu === 'song') run.toggleSongs(); else run.setMode('detail');
+    env.presentationReady = true;
+    run.presentation.update();
+    assert.deepEqual([run.state.phase, run.state.menu], ['detail', menu]);
+    env.log.length = 0;
+    env.plays.length = 0;
+    run.setMode('archive');
+    assert.equal(run.state.phase, 'hiding');
+    env.archiveReady = env.presentationReady = false;
+    const left = () => env.exits.shift()();
+    // The camera back, then the shelf settled.
+    const settle = () => {
+      env.archiveReady = env.archiveInteractive = true;
+      for (let i = 0; i < 3; i++) run.presentation.update();
+    };
+    return { env, run, left, settle };
+  };
+  // S while the details' text leaves: the song scene opens once the shelf is back (not dropped).
+  let t = start();
+  t.run.toggleSongs();
+  assert.deepEqual([t.run.state.menu, t.run.state.wants], ['detail', true], 'the leaving menu stays until it has left');
+  t.left();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu], ['returning', 'song']);
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.env.log], ['opening', ['prepare:song']]);
+  assert.deepEqual(t.env.plays, [], 'S plays nothing');
+  // S while the camera returns.
+  t = start();
+  t.left();
+  t.run.toggleSongs();
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu, t.env.log], ['opening', 'song', ['prepare:song']]);
+  // Enter right after Esc from the song scene: the details open (and their song plays), as from the shelf.
+  t = start('song');
+  t.run.openCase();
+  assert.deepEqual(t.env.plays, [[4, false]]);
+  t.left();
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu, t.env.log], ['opening', 'detail', ['prepare:detail']]);
+  // S right after Esc from the song scene: the song scene again, once the shelf is back.
+  t = start('song');
+  t.run.toggleSongs();
+  t.left();
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu, t.env.log], ['opening', 'song', ['prepare:song']]);
+  // Esc, ↓, Enter: the details open on the song ↓ went to, and that song plays (not the one that left).
+  for (const early of [true, false]) {
+    t = start();
+    if (!early) t.left();
+    t.run.down();
+    t.run.openCase();
+    assert.deepEqual(t.env.plays, [[5, false]], early ? 'its text leaving' : 'the camera returning');
+    if (early) t.left();
+    t.settle();
+    assert.deepEqual([t.run.state.phase, t.run.state.selected, t.env.log], ['opening', 5, ['prepare:detail']]);
+  }
+  // Esc, S, Esc: the shelf, with the details as its menu again; nothing opens.
+  t = start();
+  t.run.toggleSongs();
+  t.run.setMode('archive');
+  t.left();
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu, t.env.log], ['archive', 'detail', []]);
+  // Esc, S, Enter: the details instead (the song scene was only asked for).
+  t = start();
+  t.run.toggleSongs();
+  t.run.openCase();
+  t.left();
+  t.settle();
+  assert.deepEqual([t.run.state.phase, t.run.state.menu, t.env.log], ['opening', 'detail', ['prepare:detail']]);
+  // A swap inside an opened album keeps its refusal: S while the details are still opening does nothing.
+  const env = { log: [], exits: [], plays: [], presentationReady: false, archiveReady: true, archiveInteractive: true };
+  const opening = new Function('MusicPresentation', 'env', outputText)(MusicPresentation, env);
+  opening.setMode('detail');
+  opening.toggleSongs();
+  assert.deepEqual([opening.state.phase, opening.state.menu], ['opening', 'detail']);
+});
+
+// The review of 2026-10-23: the focus fell to <body> as a scene changed with 减少动态效果 on, and as a
+// panel closed whose opener could not have it back.
+test('the focus is never left on the page: reduced motion, a panel closing, a scene that cannot take it yet', () => {
+  const css = readFileSync(new URL('../src/music.css', import.meta.url), 'utf8');
+  // Reduced motion has no transitions at all: a 1 ms one kept a surface just shown visibility: hidden
+  // for a frame, where its focus() did nothing. (The ?original=1 entry's style.css rule is its own.)
+  const reduced = /\.music-app\.reduce-motion \* \{([^}]*)\}/.exec(css)?.[1] ?? '';
+  assert.match(reduced, /transition-duration: 0s !important;/);
+  assert.doesNotMatch(reduced.replace(/\/\*[\s\S]*?\*\//g, ''), /transition-duration: (?!0s)/);
+  assert.match(readFileSync(new URL('../src/style.css', import.meta.url), 'utf8'), /\.reduce-motion \* \{[^}]*transition-delay: 0s !important;/, 'and no delay');
+  // The details' document (or its ‹ ›) and the shelf's 查看这首歌 try again where the focus was left on
+  // the page: the details for a few frames at most (the loop does not rest meanwhile), the shelf once.
+  assert.match(app, /pendingDetailFocus = \(!document\.activeElement \|\| document\.activeElement === document\.body\) && \+\+detailFocusTries < 6;/);
+  // (A single card's new song rebuilds the shelf: focus outside the scenes, the header's, stays: 2026-10-24.)
+  assert.match(body(app, '  showMenu: () => {', '\n  hideMenu:'), /pendingDetailFocus = !detailKeepFocus;\s*detailKeepFocus = false;\s*detailFocusTries = 0;/);
+  assert.match(body(app, 'function showBrowseSurface(focus = true) {', '\n}'), /if \(!panel && focus\) \$\("\[data-action=open\]"\)\.focus\(\{ preventScroll: true \}\);\s*(\/\/[^\n]*\n\s*)?if \(!panel && focus && document\.activeElement === document\.body\) requestAnimationFrame\(\(\) => \{\s*if \(document\.activeElement === document\.body\) focusScene\(\);\s*\}\);/);
+  assert.match(app, /const inScene = !!focused\?\.closest\("#music-browse, #music-detail, #music-song"\);\s*const sceneFocus = !focused \|\| focused === document\.body \|\| inScene \|\| !!focused\.closest\("#music-empty"\);/);
+  assert.match(app, /\} else showBrowseSurface\(sceneFocus\);/);
+  // A panel whose opener cannot have the focus back (none: the panel a source switch kept open over the
+  // new page; a notice's button, gone with the notice) leaves it on the scene's selection.
+  const close = body(app, 'function closePanel(', '\nfunction ');
+  assert.match(close, /panelFocus\?\.focus\(\{ preventScroll: true \}\);\s*(\/\/[^\n]*\n\s*)*if \(!document\.activeElement \|\| document\.activeElement === document\.body\) focusScene\(\);/);
+  const scene = body(app, 'function focusScene() {', '\n}');
+  assert.match(scene, /if \(!albums\.length \|\| boot\?\.active \|\| panel\) return;/);
+  assert.match(scene, /if \(presentation\.phase === "archive"\) \$\("\[data-action=open\]"\)\.focus\(\{ preventScroll: true \}\);\s*else if \(presentation\.phase === "detail" && menu === "song"\) songView\.focusCurrent\(\);\s*else if \(presentation\.phase === "detail"\) \$\("#album-detail-content"\)\.focus\(\{ preventScroll: true \}\);/);
 });
 
 test('the desktop window draws its own title bar: no title, three buttons, the top edge drags it', () => {
@@ -453,7 +643,26 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(app, /new SurfaceTransition\(\s*\$\("#album-detail-content"\),\s*\$\("#album-detail-content"\),\s*250,\s*170,\s*DETAIL_SWAP,\s*\)/);
   const hide = body(app, '  hideMenu: (done) => {', '\n  hideBrowse:');
   assert.match(hide, /detailStay = presentation\.openingOrDetail && !menuSwapping && presentation\.pendingSelection\?\.route !== "archive"/);
-  assert.match(hide, /if \(detailStay\) \{\s*\$\("#album-detail-content"\)\.inert = true;\s*documentSwap\.hide\(preferences\.reduced, done\);\s*return;\s*\}/);
+  // The old song's title and body are out of reach at once; the tag row with its ‹ › only once the
+  // document has faded, so a second press while it fades (a double click) adds up as ↓ does (the
+  // review of 2026-10-23: it fell through the inert document to the canvas, which ignores it there).
+  assert.match(hide, /if \(detailStay\) \{\s*(\/\/[^\n]*\n\s*)*\$\("#detail-title"\)\.inert = \$\("#detail-body"\)\.inert = true;\s*documentSwap\.hide\(preferences\.reduced, \(\) => \{\s*\$\("#album-detail-content"\)\.inert = true;\s*done\(\);\s*\}\);\s*return;\s*\}/);
+  assert.match(body(app, '  showMenu: () => {', '\n  hideMenu:'), /content\.inert = \$\("#detail-title"\)\.inert = \$\("#detail-body"\)\.inert = false;/);
+  // ‹ › pressed from the keyboard keep the focus: the new document's same button has it (a pointer's
+  // press leaves it to the document, as before).
+  assert.match(app, /case "prev":\s*case "next":\s*(\/\/[^\n]*\n\s*)*detailStepFocus = target\.classList\.contains\("detail-step"\) && e\.detail === 0 \? action : undefined;\s*stepAlbum\(action === "prev" \? -1 : 1\);\s*break;/);
+  // (The details' player control that had the focus first: a single card's 下一曲 pressed from the keyboard.)
+  assert.match(app, /const target = \(detailMediaFocus && document\.querySelector<HTMLElement>\(`#detail-body \[data-media-action="\$\{detailMediaFocus\}"\]:not\(:disabled\)`\)\) \|\|\s*\(detailStepFocus && document\.querySelector<HTMLElement>\(`#detail-head \[data-action="\$\{detailStepFocus\}"\]`\)\) \|\|\s*\$\("#album-detail-content"\);\s*target\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(hide, /detailStepFocus = detailMediaFocus = undefined;\s*detailKeepFocus = false;\s*\$\("#music-detail"\)\.inert = true;/, 'leaving the details forgets it');
+  // A scan applied in place (or NetEase's queue growing) under the same song's open details: its tag
+  // row says where the song now stands, of how many; only the row is written again, a focused ‹ › kept.
+  assert.equal((app.match(/writeDetailHead\(songDetailHead\(\)\);/g) || []).length, 2, 'a local song\'s and NetEase\'s');
+  assert.doesNotMatch(app, /\$\("#detail-head"\)\.innerHTML = detailHead\(/);
+  assert.match(body(app, 'async function applyLibrary(', '\n}\n'), /menu === "song" \? renderSongs\(\) : renderDetail\(\);\s*(\/\/[^\n]*\n\s*)*else if \(mode === "detail" && menu === "detail"\) refreshDetailHead\(\);/);
+  const head = body(app, 'function refreshDetailHead() {', '\n}\n');
+  assert.match(head, /if \(markup === detailHeadShown\) return;/);
+  assert.match(head, /writeDetailHead\(markup\);\s*if \(focused\) document\.querySelector<HTMLElement>\(`#detail-head \[data-action="\$\{focused\}"\]`\)\?\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /detailStay = false;\s*detailStepFocus = detailMediaFocus = undefined;\s*detailKeepFocus = false;/, 'also with Esc during the swap');
   // Esc or a search while the document is away: the page leaves with the camera.
   assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /detailStay = false;[\s\S]*detailTransition\.hide\(preferences\.reduced\);/);
   // The title has the shelf's reel (no per-character stagger), rolled in only when the document returns.
@@ -490,7 +699,7 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.doesNotMatch(css, /\.detail-limit/);
   // An unknown length keeps the words 播放位置: the times say — and the dashed line has 时长不可用 in its title.
   assert.match(app, /if \(label\) setText\(label, "播放位置"\);/);
-  assert.match(app, /syncSeekFill\(slider, placed, !known \? "时长不可用"/);
+  assert.match(app, /const reason = !known \? "时长不可用"[\s\S]*?syncSeekFill\(slider, placed, reason\);/);
   assert.match(css, /input\.detail-seek\[data-known="false"\]::-webkit-slider-runnable-track \{\s*background: repeating-linear-gradient/);
   // Local songs (2026-10-06): the same document; the ring plays this song, or pauses / resumes it
   // once it is the one loaded (with the gesture: ringPlay, below); previous / next the header's; four
@@ -506,7 +715,8 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(body(app, 'function detailKey() {', '\n}'), /const album = localSong\(\)\?\.album;\s*return JSON\.stringify\(\[currentAlbum\(\), album && \[album\.id, album\.title, album\.description, album\.descriptionSource\]\]\);/);
   const refresh = body(app, 'async function applyLibrary() {', '\nfunction ');
   assert.match(refresh, /const previousDetail = detailKey\(\);/);
-  assert.match(refresh, /if \(mode === "detail" && \(previousDetail !== detailKey\(\) \|\| \(menu === "song" && shapeChanged\)\)\)\s*menu === "song" \? renderSongs\(\) : renderDetail\(\);/);
+  // (Not for a lone live card whose picture alone changed: its details do not show it.)
+  assert.match(refresh, /if \(mode === "detail" && \(\(previousDetail !== detailKey\(\) && !coverOnly\) \|\| \(menu === "song" && shapeChanged\)\)\)\s*menu === "song" \? renderSongs\(\) : renderDetail\(\);/);
   assert.doesNotMatch(app, /RELEASE \/ 发行年份|ARTIST \/ 歌手/);
   // A search result's song: outlined with a 搜索结果 tag for 1100 ms, no accent pulse, no autoplay.
   assert.match(focus, /tag\.textContent = "搜索结果";/);
@@ -514,7 +724,8 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.doesNotMatch(focus, /--accent|search-track-tint/);
   // Placement follows data-layout; width queries only size (large windows, narrow portrait); short
   // windows (desktop and compact, 700 px or less) put the two ways out on one line above the case.
-  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(min-width: 1700px)', '(max-height: 700px)', '(max-width: 700px)']);
+  // (Forced colours only keep the transport's marks drawn.)
+  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(forced-colors: active)', '(min-width: 1700px)', '(max-height: 700px)', '(max-width: 700px)']);
   assert.match(css, /@media \(max-height: 700px\) \{\s*\.music-app:is\(\[data-layout="desktop"\], \[data-layout="compact"\]\) \.detail-exits \{\s*flex-direction: row;/);
   assert.match(css, /\.music-app #album-detail-content \{[^}]*left: 52%;[^}]*right: max\(60px, calc\(48% - 632px\)\);/);
   assert.match(css, /\.music-app\[data-layout="portrait"\] \.detail-exits \{[^}]*flex-direction: row;/);
@@ -623,7 +834,7 @@ test('the shelf (2026-10-05 design): tag, facts, a play ring with its note, the 
   assert.match(reels, /slot\.host\.style\.paddingBottom = `\$\{descentRoom\(lineHeight\)\}px`;/);
   assert.match(title, /const min = Math\.min\(base, floor, Math\.max\(14, budget \/ \(lineRatio \* 2\)\)\);/);
   // Placement follows data-layout; width queries only size (large windows inside the desktop layout).
-  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(max-height: 650px)', '(min-width: 1700px)', '(max-width: 700px)']);
+  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(forced-colors: active)', '(max-height: 650px)', '(min-width: 1700px)', '(max-width: 700px)']);
   assert.match(css, /\.music-app \.album-callout \{[^}]*left: max\(60\.5%, calc\(100% - 568px\)\);[^}]*right: 40px;/);
 });
 
@@ -656,6 +867,86 @@ test('the song scene (2026-10-05 design, direction B): one pane, its tab and ree
   assert.match(body(app, 'function syncSongCard() {', '\n}'), /songView\.setCard\(songCardRect\([^\n]*\), chromeBottom\);/);
   // The steps say what they do in their tooltip as well as their name.
   assert.match(render, /\$\(id\)\.setAttribute\("aria-label", words\);\s*\$\(id\)\.title = words;/);
+});
+
+test('the titles\' measuring probes never transition: after a resize a title breaks as one laid out at that size', () => {
+  const music = readFileSync(new URL('../src/music.css', import.meta.url), 'utf8');
+  const title = readFileSync(new URL('../src/music-title.ts', import.meta.url), 'utf8');
+  // Reduced motion gives every element a tiny transition of every property (transition-property's
+  // initial value is all): a probe's width or font size written and read in one task read the old one.
+  assert.match(music, /\.music-app\.reduce-motion \* \{[^}]*transition-duration: 0s !important;/);
+  assert.match(music, /\.music-title-probe,\s*\.music-title-probe \*,\s*\.detail-title-probe,\s*\.detail-title-probe \* \{\s*transition-property: none !important;\s*\}/);
+  assert.match(title, /probe\.className = "music-title-probe";/);
+  assert.match(title, /probe\.className = "detail-title-probe";/);
+  // The shelf's probe sets its width and the candidates' sizes, the details' its width and data-long, then reads.
+  assert.match(title, /if \(probe\.style\.width !== `\$\{width\}px`\) probe\.style\.width = `\$\{width\}px`;/);
+  assert.match(title, /candidate\.root\.style\.fontSize = `\$\{size\}px`;/);
+});
+
+test('a run the font joins (an Arabic word, a conjunct its clusters leave open) rolls as one face; other titles keep a reel per grapheme', () => {
+  const title = readFileSync(new URL('../src/music-title.ts', import.meta.url), 'utf8');
+  assert.match(title, /for \(const glyph of joinShaped\(row, line\)\) \{/);
+  const glyph = (text, x, width) => ({ key: '', text, kind: 'main', x, y: 0, width, height: 40, font: '700 38px MiSans', letterSpacing: 'normal' });
+  const keyed = (row, line) => row.map((g, index) => ({ ...g, key: `main:${line}:${index}` }));
+  // Latin, Han, an emoji and Devanagari (whose clusters hold its conjuncts): a face per grapheme, keys as before.
+  const plain = [glyph('0', 0, 20), glyph('2', 20, 20), glyph(' ', 40, 10), glyph('雨', 50, 38), glyph('🎵', 88, 38), glyph('क्ष', 126, 30), glyph('त', 156, 18)];
+  const before = JSON.stringify(plain);
+  assert.deepEqual(joinShaped(plain, 2), keyed(plain, 2));
+  assert.equal(JSON.stringify(plain), before, 'the measured glyphs are not changed');
+  // A fictional Arabic word between Latin ones, laid out right to left: one face over its letters.
+  const mixed = [glyph('A', 0, 20), glyph(' ', 20, 10), glyph('م', 72, 12), glyph('ر', 64, 8), glyph('ح', 50, 14), glyph('ب', 40, 10), glyph('ا', 30, 10), glyph(' ', 84, 10), glyph('B', 94, 20)];
+  assert.deepEqual(joinShaped(mixed, 0), keyed([mixed[0], mixed[1], { ...mixed[2], text: 'مرحبا', x: 30, width: 54 }, mixed[7], mixed[8]], 0));
+  // Two words stay two faces; tatweel joins; the Arabic comma (Common) and Arabic-Indic digits next to a word.
+  const words = [glyph('ك', 90, 10), glyph('ـ', 80, 10), glyph('ل', 70, 10), glyph(' ', 60, 10), glyph('ن', 50, 10), glyph('ا', 40, 10), glyph('،', 30, 10)];
+  assert.deepEqual(joinShaped(words, 1).map((g) => [g.text, g.x, g.width]), [['كـل', 70, 30], [' ', 60, 10], ['نا', 40, 20], ['،', 30, 10]]);
+  assert.deepEqual(joinShaped([glyph('ب', 20, 10), glyph('١', 10, 10)], 0).map((g) => g.text), ['ب١']);
+  // Syriac, N'Ko and Mongolian join as Arabic does.
+  for (const word of [['ܫ', 'ܠ', 'ܡ'], ['ߒ', 'ߞ', 'ߏ'], ['ᠮ', 'ᠣ', 'ᠩ']])
+    assert.equal(joinShaped(word.map((text, index) => glyph(text, index * 10, 10)), 0).length, 1, word.join(''));
+  // A virama or a joiner left at a cluster's end joins the next letter (Kannada, Sinhala); a ZWNJ asks for no conjunct.
+  assert.deepEqual(joinShaped([glyph('ಕ್', 0, 14), glyph('ಕ', 14, 12)], 0).map((g) => [g.text, g.width]), [['ಕ್ಕ', 26]]);
+  assert.deepEqual(joinShaped([glyph('ශ්\u200D', 0, 14), glyph('රී', 14, 12)], 0).map((g) => g.text), ['ශ්\u200Dරී']);
+  assert.equal(joinShaped([glyph('क्\u200C', 0, 14), glyph('ष', 14, 12)], 0).length, 2);
+  assert.equal(joinShaped([glyph('ಕ್', 0, 14), glyph(' ', 14, 6)], 0).length, 2, 'not across a space');
+});
+
+test('Windows\' contrast themes (forced colours) keep the rings, the triangles and the bars drawn', () => {
+  for (const file of ['music-chrome.css', 'music-shelf.css', 'music-detail.css', 'song-scene.css']) {
+    const css = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '');
+    // The forced-colours blocks (to their closing brace), and the rules outside them.
+    const blocks = [];
+    let rest = css;
+    for (let at; (at = rest.indexOf('@media (forced-colors: active) {')) >= 0; ) {
+      let depth = 0, end = rest.length;
+      for (let i = rest.indexOf('{', at); i < rest.length; i++) {
+        if (rest[i] === '{') depth++;
+        else if (rest[i] === '}' && --depth === 0) { end = i + 1; break; }
+      }
+      blocks.push(rest.slice(rest.indexOf('{', at) + 1, end - 1));
+      rest = rest.slice(0, at) + rest.slice(end);
+    }
+    assert.ok(blocks.length > 0, `${file} has its forced-colours rules`);
+    const rules = (text) => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .map(([, selector, declarations]) => ({ selectors: selector.split(',').map((s) => s.trim().replace(/\s+/g, ' ')), declarations }));
+    const forced = rules(blocks.join('\n'));
+    const kept = new Set(forced.filter((rule) => /forced-color-adjust: none;/.test(rule.declarations)).flatMap((rule) => rule.selectors));
+    // Every mark drawn with a gradient (gone), its own background (forced to the page's colour) or
+    // transparent borders (forced to the text's: a block) keeps out of the forcing.
+    const marks = rules(rest).filter((rule) => /solid transparent|conic-gradient\(|background: currentColor;/.test(rule.declarations))
+      .flatMap((rule) => rule.selectors).filter((selector) => !selector.includes('::-webkit-scrollbar'));
+    assert.ok(marks.length > 0, file);
+    for (const selector of marks) assert.ok(kept.has(selector), `${file}: ${selector} keeps out of forced colours`);
+    // Kept out, they are drawn in system colours only (an author colour would not be forced).
+    assert.doesNotMatch(forced.map((rule) => rule.declarations).join('\n').replace(/var\(--progress, 0%\)/g, ''), /var\(--|#[0-9a-f]{3}|rgba?\(/i, file);
+  }
+  const chrome = readFileSync(new URL('../src/music-chrome.css', import.meta.url), 'utf8');
+  const detail = readFileSync(new URL('../src/music-detail.css', import.meta.url), 'utf8');
+  // The progress in Highlight over the button's own forced colour; a plain or unknown ring all of it.
+  assert.match(chrome, /\.music-app \.play-ring::before \{\s*background: conic-gradient\(Highlight 0 var\(--progress, 0%\), currentColor var\(--progress, 0%\) 100%\);\s*\}\s*\.music-app \.play-ring\[data-ring="unknown"\]::before,\s*\.music-app \.play-ring\[data-ring="plain"\]::before \{\s*background: currentColor;/);
+  assert.match(detail, /\.music-app \.detail-ring::before \{\s*background: conic-gradient\(Highlight 0 var\(--progress, 0%\), currentColor var\(--progress, 0%\) 100%\);\s*\}\s*\.music-app \.detail-toggle\[data-ring="unknown"\] \.detail-ring::before,\s*\.music-app \.detail-toggle\[data-ring="plain"\] \.detail-ring::before \{\s*background: currentColor;/);
+  // The scene under them is not forced: the rings and previous / next get a plate, as text does.
+  assert.match(chrome, /\.music-app \.play-ring \{\s*border-radius: 50%;\s*background: ButtonFace;\s*\}\s*\.music-app \.music-topnav \.transport-skip \{\s*background: ButtonFace;/);
+  assert.match(detail, /\.music-app \.detail-ring \{\s*border-radius: 50%;\s*background: ButtonFace;\s*\}\s*\.music-app \.detail-control:not\(\.detail-toggle\) \{\s*background: ButtonFace;/);
 });
 
 test('the song rows\' ▶, P, and ● 012 / L back to the playing song (2026-10-07/08); the lifted case has no ▶ of its own (2026-10-10)', () => {
@@ -727,8 +1018,10 @@ test('the song rows\' ▶, P, and ● 012 / L back to the playing song (2026-10-
   assert.match(songSceneMarkup(), /<span class="song-tally-row"><button id="song-go-playing" class="song-go-playing" data-action="go-playing" aria-label="回到正在播放的歌" hidden>/);
   // The play gesture answers ▶ too: at once on the lifted case, or once the selection has arrived
   // (a click that also opens the case leaves its hop out: below).
-  assert.match(body(app, 'function answerPlay(', '\n}'), /if \(index === selected && navigationSelection\(\) === selected\) \{\s*gestureFor = undefined;\s*if \(hop\) scene\?\.playGesture\(\);\s*else playWaves\(\);\s*if \(records\.length\) tickMotion\.ripple\(\);\s*\} else gestureFor = index;/);
-  assert.match(body(app, 'function commitSelection(', '\nfunction '), /if \(gestureFor !== undefined\) \{\s*const due = gestureFor === selected;\s*gestureFor = undefined;\s*if \(due\) \{\s*scene\?\.playGesture\(\);/);
+  assert.match(body(app, 'function answerPlay(', '\n}'), /if \(index === selected && navigationSelection\(\) === selected\) \{\s*gestureFor = undefined;\s*if \(hop\) scene\?\.playGesture\(\);\s*else playWaves\(\);\s*if \(records\.length\) tickMotion\.ripple\(\);\s*\} else \{\s*gestureFor = index;\s*gestureHop = hop;\s*\}/);
+  // On arrival, with its hop, or only the waves where the case is being opened (Enter while the shelf
+  // returns: openCase, the 2026-10-08 rule that the case drawn out does not hop first).
+  assert.match(body(app, 'function commitSelection(', '\nfunction '), /if \(gestureFor !== undefined\) \{\s*const due = gestureFor === selected;\s*gestureFor = undefined;\s*if \(due\) \{\s*if \(gestureHop\) scene\?\.playGesture\(\);\s*else playWaves\(\);\s*if \(records\.length\) tickMotion\.ripple\(\);/);
   // The empty pages keep only what is under way or what the user must do, and their buttons.
   assert.doesNotMatch(app, /上次连接的是它，它出现后会自动连接|在运行时会自动连接，也可以选择其他播放器|这里只提供连接和控制|其中每个子文件夹是一个歌单，每首歌一张卡片/);
   assert.match(body(app, 'function updateStatus() {', '\n}'), /const emptyText = externalMedia\.ambiguous \? `\$\{preferredName\}有多个媒体会话，请选择要连接的一个`\s*: awaited \? `等待\$\{spacedName\(preferredName\)\}…` : "";/);
@@ -784,21 +1077,28 @@ test('a press that closes the header\'s open menu opens the lifted case as befor
   // case, and then without the hop. From the song scene the song plays once the swap to the details
   // was accepted; with the details open (or opening) already, it only does what opening did there.
   const open = body(app, 'function openCase(', '\n}').replace(/\r/g, '').replace('open: () => boolean | void = showDetails', 'open = showDetails') + '\n}';
-  const run = (arg, { cursor = 4, scene = 'shelf', swap = true, opener } = {}) => {
+  const run = (arg, { cursor = 4, scene = 'shelf', swap = true, opener, rebuilding = false } = {}) => {
     const calls = [];
-    const menu = scene === 'song' ? 'song' : 'detail';
-    const showDetails = () => (calls.push(['open']), menu === 'song' ? swap : true);
+    // 'returning': the song scene's Esc, its text still leaving (the menu is still the song scene's).
+    const menu = scene === 'song' || scene === 'returning' ? 'song' : 'detail';
+    const showDetails = () => (calls.push(['open']), scene === 'song' ? swap : true);
     const custom = opener && (() => { calls.push(['open', opener]); });
-    new Function('selected', 'navigationSelection', 'requestPlay', 'showDetails', 'wheelNavigation', 'presentation', 'menu', 'arg', 'custom',
+    new Function('selected', 'navigationSelection', 'requestPlay', 'showDetails', 'wheelNavigation', 'presentation', 'menu', 'returningToShelf', 'libraryRebuilding', 'arg', 'custom',
       `${open}\nopenCase(arg, ...(custom ? [custom] : []));`)(
       4, () => cursor, (...args) => calls.push(['play', ...args]), showDetails, { reset: () => calls.push(['wheel']) },
-      { openingOrDetail: scene !== 'shelf' }, menu, arg, custom);
+      { openingOrDetail: scene === 'song' || scene === 'detail' }, menu, () => scene === 'returning', rebuilding, arg, custom);
     return calls;
   };
   assert.deepEqual(run(true), [['wheel'], ['play', 4, false], ['open']]);
   assert.deepEqual(run(undefined), [['wheel'], ['play', 4, false], ['open']], 'a click plays by default');
   assert.deepEqual(run(false), [['wheel'], ['open']], 'the press that closed the menu only opens');
-  assert.deepEqual(run(true, { cursor: 5 }), [['wheel'], ['open']], 'a selection still moving elsewhere: only the details');
+  // A selection still moving (↓ while the shelf returns after Esc): the details open on it, and its song
+  // plays (the review of 2026-10-23); while the library is rebuilt only the details open.
+  assert.deepEqual(run(true, { cursor: 5 }), [['wheel'], ['play', 5, false], ['open']], 'the song the details open on');
+  assert.deepEqual(run(true, { cursor: 5, rebuilding: true }), [['wheel'], ['open']], 'a rebuild: only the details');
+  // Enter right after Esc from the song scene: the shelf's, not a swap of the scene that leaves.
+  assert.deepEqual(run(true, { scene: 'returning' }), [['wheel'], ['play', 4, false], ['open']]);
+  assert.deepEqual(run(true, { scene: 'returning', cursor: 6 }), [['wheel'], ['play', 6, false], ['open']]);
   // 查看这首歌 (its own way of opening, setMode) plays as the lifted case does.
   assert.deepEqual(run(true, { opener: 'setMode' }), [['wheel'], ['play', 4, false], ['open', 'setMode']]);
   // The song scene (its large card, 这首歌, S, Enter): the swap first, then the song, if it was accepted.
@@ -962,6 +1262,33 @@ test('the details\' timeline is the song\'s that plays: folded away on another s
   assert.equal(moving, 5);
 });
 
+test('本地音乐\'s timeline seeks where it is clicked or dragged: the position is written back after the range\'s change', () => {
+  // Chromium's order for a click or a drag on a range: pointerdown, input, pointerup, then the range
+  // commits (its change, which seeks) on the mouseup or the touchend of the same press.
+  const listeners = body(app.replace(/\r\n/g, '\n'), '  // 本地音乐\'s details timeline:', '\n}\n')
+    .replace(': ReturnType<typeof setTimeout> | undefined', '').replace(' as HTMLElement', '').replace(' as const', '');
+  const on = new Map(), timers = [];
+  const target = { addEventListener: (type, listener) => on.set(type, listener) };
+  const slider = { id: 'local-seek', value: '5' };
+  let position = 5;
+  const run = new Function('document', 'window', 'setTimeout', 'clearTimeout', 'syncLocalTransport', 'held',
+    `let localSeekHeld = false;\n${listeners}\nheld(() => localSeekHeld);`);
+  let isHeld;
+  // syncLocalTransport writes the player's position into the range unless it is held.
+  run(target, target, (callback) => timers.push(callback), () => {}, () => { if (!isHeld()) slider.value = String(position); }, (get) => { isHeld = get; });
+  const change = () => { position = Number(slider.value); };
+  for (const [from, to] of [[5, 23], [23, 8]]) {
+    on.get('pointerdown')({ target: slider });
+    slider.value = String(to);
+    on.get('pointerup')();
+    assert.equal(slider.value, String(to), 'the range still has the value it was given when it commits it');
+    change();
+    timers.splice(0).forEach((callback) => callback());
+    assert.equal(position, to, `seeked from ${from} to ${to}`);
+    assert.equal(isHeld(), false);
+  }
+});
+
 test('no silent failure: a song NetEase may not be asked for now says why, with a way to 播放器, and nothing is sent', () => {
   // playBlock: a song NetEase can be asked for (its queue's, or since 2026-10-10 another playlist's,
   // with that playlist: songRequest), or the song it plays that ▶ would start where NetEase has no
@@ -1003,20 +1330,42 @@ test('no silent failure: a song NetEase may not be asked for now says why, with 
   assert.match(chrome, /\.music-app #music-toast \{[^}]*opacity: 0;\s*visibility: hidden;[^}]*pointer-events: none;[^}]*visibility 0s linear 200ms;/);
   assert.match(chrome, /\.music-app #music-toast\.visible \{\s*opacity: 1;\s*visibility: visible;\s*transform: none;\s*transition-delay: 0s;\s*\}/);
   assert.match(chrome, /\.music-app #music-toast \.toast-action \{[^}]*pointer-events: auto;/);
+  // Its words wrap inside the box, also a long path with no break in it (an offline main folder's).
+  assert.match(chrome, /\.music-app #music-toast-text \{\s*min-width: 0;\s*overflow-wrap: anywhere;\s*\}/);
+  // The header's open list (its menu form) stands above a notice under the row, which covered its first
+  // items (the one focused) and took presses on them with its button; only while it is open, under the intro.
+  const toastLayer = Number(/\.music-app #music-toast \{[^}]*z-index: (\d+);/.exec(chrome)[1]);
+  const openLayer = Number(/\.music-app\[data-chrome="menu"\]\[data-chrome-menu="open"\] \.music-header \{\s*z-index: (\d+);\s*\}/.exec(chrome)[1]);
+  assert.ok(openLayer > toastLayer, 'the open list above the notice');
+  assert.ok(Number(/\.music-app \.music-header \{[^}]*z-index: (\d+);/.exec(chrome)[1]) < toastLayer, 'closed, the header stays under it');
+  const boot = readFileSync(new URL('../src/music-boot.css', import.meta.url), 'utf8');
+  assert.ok(openLayer < Number(/\.music-boot-overlay \{[^}]*z-index: (\d+);/.exec(boot)[1]), 'and under the intro');
 });
 
-// The owner, 2026-10-10: "a settings tab where users can customize the hotkeys".
-test('设置 has the tabs 通用 and 快捷键, whose keys take the next key pressed before the page does', () => {
+// The owner, 2026-10-10: "a settings tab where users can customize the hotkeys"; 2026-10-24 (design
+// A): an index of sections beside the one it shows, 快捷键 one of them.
+test('设置 is an index of sections, 快捷键 among them, whose keys take the next key pressed before the page does', () => {
   const settings = body(app, 'function renderSettingsPanel() {', '\n}');
-  assert.match(settings, /<div class="music-tabs panel-tabs" role="tablist" aria-label="设置分类">\$\{tab\("general", "01", "通用"\)\}\$\{tab\("keys", "02", "快捷键"\)\}/);
-  assert.match(settings, /<div id="settings-tabpanel" role="tabpanel"/);
+  assert.match(settings, /<button role="tab" id="settings-tab-\$\{id\}" data-action="settings-tab" data-settings-tab="\$\{id\}" aria-selected="false" aria-controls="settings-tabpanel" tabindex="-1"/);
+  assert.match(app, /const SETTINGS_SECTIONS: \[SettingsSection, string\]\[\] = \[\s*\["look", "外观"\], \["motion", "动效与显示"\], \["sound", "声音"\], \["quality", "画质"\],\s*\["notes", "专辑介绍"\], \["keys", "快捷键"\], \["about", "关于"\],\s*\];/);
+  assert.match(app, /<div class="settings-tabs" role="tablist" aria-orientation="vertical" aria-label="设置分类"><\/div>/);
+  assert.match(app, /<div id="panel-body" class="settings-body"><div id="settings-tabpanel" role="tabpanel"><\/div><\/div>/);
   assert.match(app, /settings: \["SYSTEM SETTINGS", "设置"\],/);
   assert.match(app, /<button data-action="settings" aria-label="设置">设置<i/);
-  // 通用 is what the panel had; a player as the current source trims it inside the tab.
-  const general = body(app, 'function renderGeneralSettings(body: HTMLElement) {', '\n}');
-  assert.match(general, /<h3>动效与显示<\/h3>/);
-  assert.match(general, /body\.querySelector\("#introduction-settings"\)\?\.remove\(\);/);
-  // The tabs' keys in the open panel, before its Tab trap; the chosen tab takes the focus.
+  // A player as the current source keeps the sound and the library in its own player: no 声音, no 专辑介绍.
+  assert.match(body(app, 'function settingsSections() {', '\n}'), /!playerCurrent \|\| \(id !== "sound" && id !== "notes"\)/);
+  // The chosen section is shown by itself (the one tabpanel), and its index button says so.
+  const section = body(app, 'function renderSettingsSection() {', '\n}');
+  assert.match(section, /button\.setAttribute\("aria-selected", String\(on\)\);\s*button\.tabIndex = on \? 0 : -1;/);
+  assert.match(section, /body\.setAttribute\("aria-labelledby", `settings-tab-\$\{settingsSection\}`\);/);
+  // The entrance and a section's rise never play when motion is reduced; the rise has its own
+  // attribute, so choosing a section during the entrance does not cut the entrance off.
+  assert.match(body(app, 'function playSettingsMotion(kind: "enter" | "reveal") {', '\n}'), /if \(preferences\.reduced\) \{\s*delete node\.dataset\[key\];\s*return;\s*\}/);
+  const musicCss = readFileSync(new URL('../src/music.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(musicCss, /\.music-app \.settings-panel #settings-tabpanel\[data-reveal\] > \* \{\s*animation: settings-rise/);
+  // Reduced: no animation and no transition, on the pseudo-elements (marks, knobs) too.
+  assert.match(musicCss, /\.music-app\.reduce-motion \.settings-panel \*::before,\s*\.music-app\.reduce-motion \.settings-panel \*::after \{\s*animation: none !important;\s*transition: none !important;\s*\}/);
+  // The index's keys in the open panel, before its Tab trap; the chosen section takes the focus.
   const keys = body(app, 'document.addEventListener("keydown", (e) => {', '\n});');
   assert.ok(keys.indexOf('if (settingsTabKey(e)) return;') > keys.indexOf('if (panel) {') && keys.indexOf('if (settingsTabKey(e)) return;') < keys.indexOf('if (e.key === "Tab") {'));
   assert.match(app, /document\.querySelector<HTMLElement>\('#music-panel-root \[role="tab"\]\[aria-selected="true"\]'\)/);
@@ -1057,8 +1406,10 @@ test('帧率上限 caps the frame loop (frame-cap.ts): a held-back frame only me
   assert.match(app, /const FRAME_CAPS = \[0, 144, 120, 90, 60, 30\];/);
   assert.match(app, /frameCap: 0,/);
   assert.match(app, /if \(!FRAME_CAPS\.includes\(preferences\.frameCap\)\) preferences\.frameCap = 0;/);
-  const general = body(app, 'function renderGeneralSettings(body: HTMLElement) {', '\n}');
-  assert.match(general, /<h3>动效与显示<\/h3>[\s\S]*<select id="frame-cap" aria-label="帧率上限">/);
+  // 动效与显示's row of words: 不限 and the caps (radios named frame-cap).
+  const motion = app.slice(app.indexOf('  motion: () =>'), app.indexOf('  sound: () =>'));
+  assert.match(motion, /role="radiogroup" aria-labelledby="frame-cap-label"[^>]*>\$\{FRAME_CAPS\.map\(\(cap\) => settingChoice\("frame-cap", cap, cap \? String\(cap\) : "不限", preferences\.frameCap === cap,/);
+  assert.match(app, /if \(el\.name === "frame-cap"\) \{\s*const cap = Number\(el\.value\);/);
   assert.match(app, /const frameCap = new FrameCap\(\);\s*frameCap\.set\(preferences\.frameCap\);/);
   assert.match(app, /preferences\.frameCap = FRAME_CAPS\.includes\(cap\) \? cap : 0;\s*frameCap\.set\(preferences\.frameCap\);\s*requestFrame\(\);/);
   const loop = body(app, 'function frame(ms: number) {', '\n}');

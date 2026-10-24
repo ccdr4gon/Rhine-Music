@@ -12,6 +12,8 @@ use crate::{
 };
 use serde_json::json;
 use std::{
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -20,6 +22,18 @@ use std::{
     time::Duration,
 };
 use tiny_http::{Request, Server};
+
+/// The requests waiting on each connection behind the one being answered (dispatch).
+type Waiting = Arc<Mutex<HashMap<SocketAddr, VecDeque<Request>>>>;
+
+/// The Content-Security-Policy sent with the page's documents (its .html files), which hold every
+/// Tauri command. The window loads the page from here, so the `csp` in tauri.conf.json, which Tauri
+/// adds only to the files it embeds (the bootstrap page, never shown), does not reach it. The page,
+/// its styles, fonts, models, sounds and cover worker come from this server, and /api is the local
+/// music's; NetEase's covers from its public image hosts, always over https
+/// (netease_music::data::queue::cover); a media session's cover is a data: URL; Tauri's IPC is
+/// `ipc:` and http://ipc.localhost. Nothing else is sent with it: the /api routes keep their answers.
+pub const PAGE_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.music.126.net; connect-src 'self' ipc: http://ipc.localhost data: blob: https://*.music.126.net; media-src 'self' blob:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub struct Service {
     pub port: u16,
@@ -46,14 +60,19 @@ impl Service {
         let server = Arc::new(server);
         let store = Arc::new(Mutex::new(store));
         let stop = Arc::new(AtomicBool::new(false));
-        // Audio responses stream from File; large tracks never enter a JSON buffer.
-        for _ in 0..6 {
+        // Audio responses stream from File; large tracks never enter a JSON buffer. tiny_http puts
+        // no time limit on a socket, so a client that stops reading a response, or never sends the
+        // body it announced, holds whatever answers it until it closes: each connection is answered
+        // on a thread of its own (dispatch), and such a client holds up only itself. (Six of them
+        // used to hold all six shared threads, and the page, covers, audio and /api hung.)
+        {
             let (server, store, assets, stop) =
-                (server.clone(), store.clone(), assets.clone(), stop.clone());
+                (server.clone(), store.clone(), Arc::new(assets), stop.clone());
+            let waiting = Waiting::default();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match server.recv_timeout(Duration::from_millis(250)) {
-                        Ok(Some(request)) => handle(request, &store, &assets),
+                        Ok(Some(request)) => dispatch(request, &waiting, &store, &assets),
                         Ok(None) => {}
                         Err(_) => break,
                     }
@@ -71,14 +90,48 @@ impl Service {
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        for _ in 0..6 {
-            self.server.unblock();
-        }
+        self.server.unblock();
     }
 }
 impl Drop for Service {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+/// Answers `request` on its connection's thread, after the requests that came before it on the
+/// same connection (they are answered in order anyway); the thread is started here when the
+/// connection has none and ends when nothing is left waiting on it. tiny_http already keeps a thread
+/// for every open connection, so this adds at most one more for each, however many requests a
+/// connection sends ahead.
+fn dispatch(request: Request, waiting: &Waiting, store: &SharedStore, assets: &Arc<PathBuf>) {
+    let connection = request.remote_addr().copied();
+    if let Some(connection) = connection {
+        let mut queues = waiting.lock().unwrap();
+        if let Some(queue) = queues.get_mut(&connection) {
+            return queue.push_back(request);
+        }
+        queues.insert(connection, VecDeque::new());
+    }
+    let answering = {
+        let (waiting, store, assets) = (waiting.clone(), store.clone(), assets.clone());
+        std::thread::Builder::new()
+            .name("page-connection".into())
+            .spawn(move || {
+                let mut next = Some(request);
+                while let Some(request) = next.take() {
+                    handle(request, &store, &assets);
+                    let Some(connection) = connection else { break };
+                    let mut queues = waiting.lock().unwrap();
+                    next = queues.get_mut(&connection).and_then(VecDeque::pop_front);
+                    if next.is_none() {
+                        queues.remove(&connection);
+                    }
+                }
+            })
+    };
+    // No thread to be had: the request went with it, and tiny_http answered it 500.
+    if let (Err(_), Some(connection)) = (answering, connection) {
+        waiting.lock().unwrap().remove(&connection);
     }
 }
 fn handle(mut request: Request, store: &SharedStore, assets: &Path) {
@@ -130,8 +183,13 @@ fn handle(mut request: Request, store: &SharedStore, assets: &Path) {
     } else {
         route.trim_start_matches('/')
     });
-    let mime = http::mime(&path).into();
-    http::serve_file(
+    let mime: String = http::mime(&path).into();
+    let policy = if mime.starts_with("text/html") {
+        vec![http::header("Content-Security-Policy", PAGE_POLICY)]
+    } else {
+        Vec::new()
+    };
+    http::serve_file_with(
         request,
         AllowedFile {
             path,
@@ -143,5 +201,6 @@ fn handle(mut request: Request, store: &SharedStore, assets: &Path) {
         } else {
             "no-cache"
         },
+        policy,
     );
 }

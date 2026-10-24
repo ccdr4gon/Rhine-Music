@@ -31,6 +31,7 @@ mod tests {
             artist: "Fictional Artist".into(),
             album: String::new(),
             cover_url: None,
+            cover_rev: 0,
             playback: "paused".into(),
             position: None,
             duration: None,

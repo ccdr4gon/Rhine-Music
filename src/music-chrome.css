@@ -136,7 +136,7 @@
   color: var(--ink);
   transition: opacity 120ms ease, color 120ms ease;
 }
-.music-app .music-topnav button:not(:disabled):hover {
+.music-app .music-topnav button:not(:disabled, [aria-disabled="true"]):hover {
   opacity: 0.65;
 }
 /* The two sources, 播放器 and 本地音乐 (2026-10-06: one app, one current source): the current one
@@ -204,7 +204,7 @@
   position: absolute;
   inset: -3px -9px;
 }
-.music-app .music-topnav .transport-skip:not(:disabled):hover {
+.music-app .music-topnav .transport-skip:not(:disabled, [aria-disabled="true"]):hover {
   opacity: 1;
   color: var(--ink);
 }
@@ -311,6 +311,44 @@
 .music-app.reduce-motion .play-ring .transport-glyph {
   transition: none;
 }
+/* Windows' contrast themes (forced colours): Chromium drops gradient backgrounds, gives every other
+   background the page's colour and every border the text's, transparent ones too, so the rings were
+   gone, the bars took the page's colour and the triangles were blocks. These marks keep out of the
+   forcing, in a button's system colours (ButtonText, GrayText while disabled: kept out, they would
+   inherit the theme's own ink) and the progress in Highlight; a ring and a previous / next get the
+   plate text gets (the scene under them is not forced). The details', the hints' and the song rows'
+   marks: music-detail.css, music-shelf.css, song-scene.css. */
+@media (forced-colors: active) {
+  .music-app .play-ring::before,
+  .music-app .play-ring .transport-play::before,
+  .music-app .play-ring .transport-pause i,
+  .music-app .skip-bar,
+  .music-app .skip-tri {
+    forced-color-adjust: none;
+    color: ButtonText;
+  }
+  .music-app .play-ring:is(:disabled, [aria-disabled="true"])::before,
+  .music-app .play-ring:is(:disabled, [aria-disabled="true"]) .transport-play::before,
+  .music-app .play-ring:is(:disabled, [aria-disabled="true"]) .transport-pause i,
+  .music-app button:is(:disabled, [aria-disabled="true"]) .skip-bar,
+  .music-app button:is(:disabled, [aria-disabled="true"]) .skip-tri {
+    color: GrayText;
+  }
+  .music-app .play-ring::before {
+    background: conic-gradient(Highlight 0 var(--progress, 0%), currentColor var(--progress, 0%) 100%);
+  }
+  .music-app .play-ring[data-ring="unknown"]::before,
+  .music-app .play-ring[data-ring="plain"]::before {
+    background: currentColor;
+  }
+  .music-app .play-ring {
+    border-radius: 50%;
+    background: ButtonFace;
+  }
+  .music-app .music-topnav .transport-skip {
+    background: ButtonFace;
+  }
+}
 
 /* ---- the menu form: now · previous · play · next | 菜单, the rest in a list below ------------ */
 .music-app[data-chrome="menu"] .minimal-transport {
@@ -351,6 +389,12 @@
 }
 .music-app[data-chrome="menu"][data-chrome-menu="open"] .topnav-modes {
   display: flex;
+}
+/* The open list stands above a notice under the row (#music-toast, z-index 50), which otherwise
+   covered its first items (the one focused as it opens) and took presses on them with its button.
+   The notice stays, whole again once the list closes; a panel opened from the list closes it first. */
+.music-app[data-chrome="menu"][data-chrome-menu="open"] .music-header {
+  z-index: 51;
 }
 .music-app[data-chrome="menu"] .topnav-modes > button,
 .music-app[data-chrome="menu"] .topnav-theme {
@@ -466,6 +510,12 @@
   visibility: visible;
   transform: none;
   transition-delay: 0s;
+}
+/* Its words wrap inside the box, also a long path without a break (an offline main folder's): as
+   the players' names do (external-media.css). */
+.music-app #music-toast-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .music-app #music-toast .toast-action {
   flex: none;

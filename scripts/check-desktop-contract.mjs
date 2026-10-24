@@ -3,7 +3,7 @@
  * All audio is synthesized in an isolated temporary directory. No external queries run.
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,6 +104,20 @@ function wav(tags = {}) {
   return Buffer.concat([header, body]);
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** Windows: holds files and folders open with no sharing, as another program writing them can, so
+ * that nothing else may open them (nor list a folder) until the returned function releases them. */
+async function holdExclusively(paths) {
+  const source = 'using System; using System.Runtime.InteropServices; public static class RhineHold { [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template); }';
+  // GENERIC_READ, no sharing, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS (a folder can be opened too).
+  const script = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition '${source}'; foreach ($p in (ConvertFrom-Json $env:RHINE_HOLD)) { $h = [RhineHold]::CreateFileW($p, [uint32]2147483648, 0, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero); if ($h.ToInt64() -eq -1) { [Console]::Error.WriteLine("cannot hold $p"); exit 1 } }; [Console]::Out.WriteLine('held'); [void][Console]::In.ReadLine()`;
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, RHINE_HOLD: JSON.stringify(paths) }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '';
+  holder.stdout.on('data', bytes => { output += bytes; });
+  holder.stderr.on('data', bytes => { output += bytes; });
+  const exited = new Promise(resolve => holder.once('exit', resolve));
+  await until(() => { assert.equal(holder.exitCode, null, output); return output.includes('held'); }, 'files held', 30000);
+  return async () => { holder.stdin.end(); await exited; };
+}
 async function until(task, description, timeout = 15000) {
   const deadline = Date.now() + timeout;
   let last;
@@ -289,6 +303,47 @@ try {
   } finally { await fs.rename(disconnected, root); }
   await scanBoth();
   await compare('reconnected directory');
+  if (process.platform === 'win32') {
+    // One song in use by another program, or one folder that cannot be listed, takes only itself
+    // out of a scan, not the main folder: the rest stays online, a known song keeps its record, the
+    // folder's album stays (offline), a new song waits for the next scan.
+    const busy = path.join(root, 'Busy folder');
+    const changed = path.join(root, 'Album A', '1-04 Changed.wav');
+    const added = path.join(root, 'Album A', '1-05 Added.wav');
+    await fs.mkdir(busy, { recursive: true });
+    await fs.writeFile(path.join(busy, 'held.wav'), wav());
+    await fs.writeFile(changed, wav());
+    await scanBoth();
+    const before = await compare('songs and a folder before they are held');
+    await fs.utimes(changed, new Date(), new Date(Date.now() + 60_000));
+    await fs.writeFile(added, wav());
+    const release = await holdExclusively([busy, changed, added]);
+    let held;
+    try {
+      await scanBoth();
+      held = await compare('a held song or folder takes only itself out of the scan');
+    } finally { await release(); }
+    assert.deepEqual([held.roots[0].status, held.roots[0].unreadable], ['online', 3]);
+    assert.deepEqual(held.albums.filter(a => a.offline).map(a => a.folder), [busy]);
+    assert.deepEqual(held.albums.find(a => a.id === tagged.id).tracks, before.albums.find(a => a.id === tagged.id).tracks, 'the held song keeps its record');
+    await scanBoth();
+    const released = await compare('released songs and folder are read again');
+    assert.equal(released.roots[0].unreadable, undefined);
+    assert.ok(released.albums.every(a => !a.offline));
+    assert.ok(released.albums.find(a => a.id === tagged.id).tracks.some(t => t.relativePath.endsWith('1-05 Added.wav')));
+    await fs.rm(busy, { recursive: true });
+    await fs.rm(changed);
+    await fs.rm(added);
+    await scanBoth();
+    await compare('held fixtures removed');
+  }
+  // A new main folder that is not there is refused before anything is saved or scanned, and one
+  // chosen during a scan is refused (409), not dropped.
+  for (const origin of [nativeOrigin, nodeOrigin]) {
+    assert.match((await json(origin, '/api/library/scan', { roots: [path.join(temporary, 'no such folder')] }, 400)).error, /^找不到文件夹/);
+    assert.deepEqual((await json(origin, '/api/config')).roots, [root]);
+  }
+  await compare('a missing new main folder changes nothing');
   for (const [file, bytes] of original) assert.deepEqual(await fs.readFile(path.join(root, file)), bytes, `Source file changed: ${file}`);
   // A second folder saved by an earlier version stays saved after the main one, unused.
   const earlier = path.join(temporary, 'earlier second folder');
@@ -302,7 +357,41 @@ try {
   await Promise.all([nativeOrigin, nodeOrigin].map(origin => json(origin, '/api/config', { roots: [] })));
   const removed = await compare('removed root hides its albums');
   assert.equal(removed.albums.length, 0);
+  // A scan without a main folder (none chosen yet, or config.json set aside at a start) keeps the
+  // index as it is, unshown; the same folder chosen again finds its albums in it.
+  const indexed = async (data) => JSON.parse(await fs.readFile(path.join(data, 'library-index.json'), 'utf8')).albums.length;
+  await scanBoth();
+  await compare('a scan without a main folder shows nothing');
+  assert.deepEqual([await indexed(rustData), await indexed(nodeData)], [4, 4], 'the index is kept');
+  await Promise.all([nativeOrigin, nodeOrigin].map(origin => json(origin, '/api/library/scan', { roots: [root] }, 202)));
+  assert.equal((await compare('the same main folder chosen again')).albums.length, 4);
   await stopNative();
+  if (process.platform === 'win32') {
+    // A data folder that holds valid data but cannot be written stops the start, which says why
+    // (main.rs shows it), in both services: a deny entry for the current user, removed again.
+    const system = (name) => path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name);
+    const sid = `*${execFileSync(system('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).trim().split(',').pop().replaceAll('"', '')}`;
+    const files = async (data) => Object.fromEntries(await Promise.all((await fs.readdir(data, { withFileTypes: true })).filter(entry => entry.isFile()).map(async entry => [entry.name, (await fs.readFile(path.join(data, entry.name))).toString('base64')])));
+    const before = [await files(rustData), await files(nodeData)];
+    for (const data of [rustData, nodeData]) execFileSync(system('icacls.exe'), [data, '/deny', `${sid}:(OI)(CI)(WD,AD,WA,WEA,DC)`, '/T', '/Q'], { stdio: 'ignore' });
+    try {
+      const env = { ...process.env, MUSIC_DATA_DIR: rustData };
+      const denied = spawn(binary, ['--headless', '--data-dir', rustData, '--assets', assets, '--port', '0'], { cwd: project, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      let said = '';
+      denied.stdout.on('data', bytes => { said += bytes; });
+      denied.stderr.on('data', bytes => { said += bytes; });
+      let timer;
+      const code = await Promise.race([new Promise(resolve => denied.once('exit', resolve)), new Promise(resolve => { timer = setTimeout(() => { denied.kill(); resolve('still running'); }, 15000); })]);
+      clearTimeout(timer);
+      assert.equal(code, 1, `Rust must refuse a data folder it cannot write: ${said}`);
+      assert.ok(said.trim() && !said.includes('"backend"'), said);
+      await assert.rejects(new MusicLibraryStore({ dataDir: nodeData, defaultRoots: [], musicBrainzContact: '' }).init());
+    } finally {
+      for (const data of [rustData, nodeData]) execFileSync(system('icacls.exe'), [data, '/remove:d', sid, '/T', '/Q'], { stdio: 'ignore' });
+    }
+    assert.deepEqual([await files(rustData), await files(nodeData)], before, 'nothing in them changed');
+    console.log('PASS a data folder that cannot be written stops the start of both services');
+  }
   console.log(`PASS desktop contract: ${checkpoints} comparisons; Rust PID/health, Range bytes, read-only files and process shutdown verified.`);
 } finally {
   await stopNative();

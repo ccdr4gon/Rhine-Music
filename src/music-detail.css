@@ -307,7 +307,7 @@
 .music-app .detail-control:first-child {
   padding: 0 22px 0 4px;
 }
-.music-app .detail-control:not(:disabled):hover {
+.music-app .detail-control:not(:disabled, [aria-disabled="true"]):hover {
   opacity: 0.65;
 }
 .music-app .music-detail .detail-control:focus-visible {
@@ -394,6 +394,37 @@
 }
 .music-app.reduce-motion .detail-ring .transport-glyph {
   transition: none;
+}
+/* Forced colours (Windows' contrast themes): the ring, its triangle and bars and the stop square keep
+   out of the forcing as the header's do (music-chrome.css), and the controls get the plate text gets. */
+@media (forced-colors: active) {
+  .music-app .detail-ring::before,
+  .music-app .detail-ring .transport-play::before,
+  .music-app .detail-ring .transport-pause i,
+  .music-app .detail-stop i {
+    forced-color-adjust: none;
+    color: ButtonText;
+  }
+  .music-app .detail-toggle:is(:disabled, [aria-disabled="true"]) .detail-ring::before,
+  .music-app .detail-toggle:is(:disabled, [aria-disabled="true"]) .detail-ring .transport-play::before,
+  .music-app .detail-toggle:is(:disabled, [aria-disabled="true"]) .detail-ring .transport-pause i,
+  .music-app .detail-stop:is(:disabled, [aria-disabled="true"]) i {
+    color: GrayText;
+  }
+  .music-app .detail-ring::before {
+    background: conic-gradient(Highlight 0 var(--progress, 0%), currentColor var(--progress, 0%) 100%);
+  }
+  .music-app .detail-toggle[data-ring="unknown"] .detail-ring::before,
+  .music-app .detail-toggle[data-ring="plain"] .detail-ring::before {
+    background: currentColor;
+  }
+  .music-app .detail-ring {
+    border-radius: 50%;
+    background: ButtonFace;
+  }
+  .music-app .detail-control:not(.detail-toggle) {
+    background: ButtonFace;
+  }
 }
 
 /* 播放位置 and the times, then the timeline: a 1 px line, the 2 px ink fill to the position and
@@ -639,59 +670,7 @@
   transition: none;
 }
 
-/* ---- local albums: the tabs, the track list, the introduction and the credits ------------- */
-.music-app .music-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: stretch;
-  gap: 28px;
-  height: 44px;
-  margin-top: 28px;
-  border-bottom: 1px solid var(--line);
-}
-/* Over the songs scrolled under them, the tabs take the veil. */
-.music-app #album-detail-content[data-stuck="true"] .music-tabs {
-  background: var(--veil);
-  backdrop-filter: blur(18px);
-}
-.music-app .music-tabs > button[role="tab"] {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  line-height: 1;
-  font-weight: 400;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.music-app .music-tabs > button[aria-selected="true"] {
-  font-weight: 600;
-  color: var(--ink);
-}
-.music-app .music-tabs > button > span {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-}
-.music-app .music-tabs > button[role="tab"]:focus-visible {
-  outline-offset: -4px;
-}
-.music-app .music-tab-indicator {
-  position: absolute;
-  left: 0;
-  bottom: -1px;
-  width: 1px;
-  height: 2px;
-  background: var(--ink);
-  transform-origin: left;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  pointer-events: none;
-}
-
+/* ---- local albums: the track list, the introduction and the credits ---------------------- */
 /* The songs, in the song scene's row style: 48 high, the number (the playing song's level meter
    instead, in the playback colour), title over artist, format and length. */
 .music-app .track-row {
@@ -1124,17 +1103,6 @@
     width: 40px;
     height: 6px;
   }
-  .music-app[data-layout="desktop"] .music-tabs {
-    gap: 32px;
-    height: 50px;
-    margin-top: 32px;
-  }
-  .music-app[data-layout="desktop"] .music-tabs > button[role="tab"] {
-    font-size: 15px;
-  }
-  .music-app[data-layout="desktop"] .music-tabs > button > span {
-    font-size: 11px;
-  }
   .music-app[data-layout="desktop"] .track-row {
     grid-template-columns: 46px minmax(0, 1fr) auto auto;
     gap: 14px;
@@ -1222,9 +1190,6 @@
 .music-app[data-layout="compact"] .detail-caption {
   bottom: 18px;
 }
-.music-app[data-layout="compact"] .music-tabs {
-  margin-top: 22px;
-}
 .music-app[data-layout="compact"] .track-row {
   grid-template-columns: 28px minmax(0, 1fr) auto auto;
   gap: 10px;
@@ -1305,9 +1270,6 @@
 }
 .music-app[data-layout="portrait"] .detail-caption {
   display: none;
-}
-.music-app[data-layout="portrait"] .music-tabs {
-  margin-top: 20px;
 }
 .music-app[data-layout="portrait"] .track-row {
   grid-template-columns: 28px minmax(0, 1fr) auto;

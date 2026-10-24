@@ -1,6 +1,7 @@
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { promises as fs, createReadStream } from 'node:fs'
 import { MusicLibraryStore, safeRootList } from './music-library.mjs'
 
@@ -100,12 +101,26 @@ export async function createMusicServer({
       if (route === '/api/library' && get) {
         // A user or Codex can edit genre-rules.json while the player is running.
         await store.reloadRules()
-        return json(response, 200, store.snapshot())
+        // Tagged by its content (ETag), as the Windows client's service tags it: a poll that sends
+        // the tag of the library it has gets 304, with no body to send, read and compare again.
+        const body = JSON.stringify(store.snapshot())
+        const tag = `"${createHash('sha256').update(body).digest('hex').slice(0, 24)}"`
+        if (request.headers['if-none-match'] === tag) {
+          response.writeHead(304, { ETag: tag, 'Cache-Control': 'no-store' })
+          return response.end()
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ETag: tag })
+        return response.end(body)
       }
       if (route === '/api/library/scan' && request.method === 'POST') {
         const value = await bodyJson(request)
-        if (store.scanPromise) return json(response, 202, store.snapshot())
+        // A new main folder is refused while a scan runs (as on /api/config), not dropped; one that is
+        // not there is refused before anything is saved or scanned (checkMainFolder).
+        if (store.scanPromise) return value.roots === undefined ? json(response, 202, store.snapshot()) : json(response, 409, { error: '正在扫描，请完成后再更改根目录' })
         const roots = value.roots === undefined ? undefined : safeRootList(value.roots)
+        if (roots !== undefined) await store.checkMainFolder(roots)
+        // A scan started while the folder was looked for takes no new one either.
+        if (roots !== undefined && store.scanPromise) return json(response, 409, { error: '正在扫描，请完成后再更改根目录' })
         void store.scan({ roots }).catch(() => {})
         return json(response, 202, store.snapshot())
       }
@@ -119,6 +134,11 @@ export async function createMusicServer({
         if (request.method === 'POST') {
           const value = await bodyJson(request)
           if (value.roots !== undefined && store.scanPromise) return json(response, 409, { error: '正在扫描，请完成后再更改根目录' })
+          if (value.roots !== undefined) {
+            await store.checkMainFolder(safeRootList(value.roots))
+            // A scan started while the folder was looked for takes no new one either (as library.rs).
+            if (store.scanPromise) return json(response, 409, { error: '正在扫描，请完成后再更改根目录' })
+          }
           return json(response, 200, { ...await store.updateConfig(value), musicBrainzConfigured: !!store.musicBrainzContact })
         }
       }

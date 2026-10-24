@@ -3295,6 +3295,7 @@ dependencies = [
  "url",
  "uuid",
  "webbrowser",
+ "webview2-com",
  "windows",
  "windows-future",
 ]

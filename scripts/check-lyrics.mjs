@@ -128,6 +128,16 @@ test('a lyrics file\'s bytes: byte-order marks, UTF-8, UTF-16 without a mark and
   // 虚构 in GBK.
   assert.equal(decodeLyricBytes(new Uint8Array([...new TextEncoder().encode('[00:01.00]'), 0xd0, 0xe9, 0xb9, 0xb9])), '[00:01.00]虚构');
   assert.equal(decodeLyricBytes(new ArrayBuffer(0)), '');
+  // UTF-8 with a damaged byte or two stays UTF-8 (the damage shows as U+FFFD); it is not read as GBK,
+  // which turned every line into other characters.
+  const lines = new TextEncoder().encode('[00:01.00]虚构的第一行\n[00:02.00]虚构的第二行\n');
+  const stray = new Uint8Array([...lines.subarray(0, 29), 0xff, ...lines.subarray(29)]);
+  assert.equal(decodeLyricBytes(stray), '[00:01.00]虚构的第一行\n�[00:02.00]虚构的第二行\n');
+  assert.equal(decodeLyricBytes(lines.subarray(0, lines.length - 2)), '[00:01.00]虚构的第一行\n[00:02.00]虚构的第二�', 'its last character cut short');
+  // GBK whose bytes are not UTF-8 is still GBK, a line or several: 虚构的歌 / 第二行.
+  const gbk = (text) => [...new TextEncoder().encode(text)];
+  const several = new Uint8Array([...gbk('[00:01.00]'), 0xd0, 0xe9, 0xb9, 0xb9, 0xb5, 0xc4, 0xb8, 0xe8, ...gbk('\n[00:02.00]'), 0xb5, 0xda, 0xb6, 0xfe, 0xd0, 0xd0]);
+  assert.equal(decodeLyricBytes(several), '[00:01.00]虚构的歌\n[00:02.00]第二行');
 });
 
 test('NetEase\'s word-timed lyrics: lines and their words, parentheses in the words kept', () => {
@@ -356,6 +366,59 @@ test('a local song\'s lyrics are read from the music service, kept, and a song w
   assert.equal(local.get('track-4'), null, 'an error is none');
   assert.equal(changes, 4);
   assert.equal(asked[0], '/api/lyrics/track-1');
+});
+
+test('a scan read again: a local song\'s kept lyrics are read again, the old ones shown until the new ones land', async (t) => {
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  let text = '[00:01.00]Fictional line one OLD';
+  let hold;
+  globalThis.fetch = async (url) => {
+    asked.push(url);
+    if (hold) await new Promise((resolve) => { const go = hold; hold = undefined; go.push(resolve); });
+    return new Response(new TextEncoder().encode(text), { status: 200 });
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  const local = new LocalLyrics(() => {});
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  local.want('track-1');
+  await settle();
+  const old = local.get('track-1');
+  assert.equal(old.lines[0].text, 'Fictional line one OLD');
+  // The same lyrics again: the same object (nothing drawn again).
+  local.refresh();
+  local.want('track-1');
+  assert.equal(local.get('track-1'), old, 'shown while read again');
+  await settle();
+  assert.equal(asked.length, 2);
+  assert.equal(local.get('track-1'), old, 'unchanged: the same lyrics');
+  local.want('track-1');
+  await settle();
+  assert.equal(asked.length, 2, 'kept again until the next scan');
+  // The .lrc edited, then a scan: the new lines.
+  text = '[00:01.00]Fictional line one NEW';
+  local.refresh();
+  local.want('track-1');
+  await settle();
+  assert.equal(local.get('track-1').lines[0].text, 'Fictional line one NEW');
+  // A read on its way when a scan ends is not taken as fresh: it is asked again.
+  text = '[00:01.00]Fictional line one NEWER';
+  local.refresh();
+  const waiting = [];
+  hold = waiting;
+  local.want('track-1');
+  await settle();
+  local.refresh();
+  waiting[0]();
+  await settle();
+  local.want('track-1');
+  await settle();
+  assert.equal(asked.length, 5);
+  assert.equal(local.get('track-1').lines[0].text, 'Fictional line one NEWER');
+  // Read again when a scan ends (this page's, or the service's own), while 本地音乐 is the source.
+  const receive = body(app, 'async function receiveLibrary(', '\n}');
+  assert.match(receive, /const scanEnded = !next\.scan\.running &&\s*\(asked \|\| \(libraryReceived && \(previousScan\.running \|\| next\.scan\.finishedAt !== previousScan\.finishedAt\)\)\);/);
+  assert.match(receive, /if \(scanEnded && !playerCurrent\) \{\s*localLyrics\.refresh\(\);\s*syncLyrics\(\);\s*\}/);
 });
 
 test('the details\' lyrics are the song\'s that plays, asked for and followed only while the details show', () => {

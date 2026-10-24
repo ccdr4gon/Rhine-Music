@@ -90,6 +90,14 @@
     top: 40px;
   }
 }
+/* 设置 fills a short window's height, and its stacked form fills any height in a window just over
+   700 px: there it keeps below the strip, as the other panels do with their max-height (700 px and
+   narrower, the scrim itself starts below it). */
+@media (width > 700px) {
+  .music-app[data-window-frame="custom"] .music-panel.settings-panel {
+    max-height: calc(100% - 24px);
+  }
+}
 .music-app[data-window-frame="custom"][data-layout="portrait"] .music-header,
 .music-app[data-window-frame="custom"][data-layout="portrait"] .music-boot-skip {
   margin-top: 14px;

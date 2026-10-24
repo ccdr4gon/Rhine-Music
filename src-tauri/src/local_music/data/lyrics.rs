@@ -25,8 +25,9 @@ pub fn read(song: &AllowedFile) -> Result<Option<Vec<u8>>, (u16, String)> {
             e.to_string(),
         )
     };
-    let root = dunce::canonicalize(&song.root).map_err(failure)?;
-    let path = dunce::canonicalize(&song.path).map_err(failure)?;
+    // Compared in the one form the system gives, long paths too (as http::serve_file).
+    let root = std::fs::canonicalize(&song.root).map_err(failure)?;
+    let path = std::fs::canonicalize(&song.path).map_err(failure)?;
     if !path.starts_with(&root) {
         return Err((403, "文件已移出允许的目录".into()));
     }
@@ -42,7 +43,7 @@ pub fn read(song: &AllowedFile) -> Result<Option<Vec<u8>>, (u16, String)> {
 /// `<song>.lrc` beside the song: on its real path inside `root`, a file, not empty and not over
 /// MAX_BYTES.
 fn sidecar(song: &Path, root: &Path) -> Option<Vec<u8>> {
-    let path = dunce::canonicalize(song.with_extension("lrc")).ok()?;
+    let path = std::fs::canonicalize(song.with_extension("lrc")).ok()?;
     if !path.starts_with(root) || !path.is_file() {
         return None;
     }
@@ -104,6 +105,20 @@ mod tests {
         let other = song(dir.path(), "other.mp3");
         fs::create_dir(dir.path().join("other.lrc")).unwrap();
         assert_eq!(read(&other).unwrap(), None);
+    }
+
+    #[test]
+    fn a_song_and_its_lrc_on_a_path_over_260_characters_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = dir.path().join("library");
+        while folder.to_string_lossy().encode_utf16().count() < 280 {
+            folder.push("a-long-fictional-folder-name");
+        }
+        fs::create_dir_all(&folder).unwrap();
+        let mut file = song(&folder, "长路径的歌.mp3");
+        file.root = dir.path().join("library");
+        fs::write(folder.join("长路径的歌.lrc"), b"[00:01.00]x").unwrap();
+        assert_eq!(read(&file).unwrap(), Some(b"[00:01.00]x".to_vec()));
     }
 
     #[test]

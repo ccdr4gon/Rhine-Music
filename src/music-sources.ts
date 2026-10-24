@@ -100,13 +100,13 @@ export const playerSource = (source: ExternalMediaSource): ExternalMediaSource =
 
 /**
  * The media port the app reads: each known player's sources as its module shows them, everything
- * else as the snapshot has it. Controls go to the port unchanged (the same source, action,
- * position and global media-key consent).
+ * else as the snapshot has it. The covers the connection holds, and controls, go to the port
+ * unchanged (the same source, action, position and global media-key consent).
  */
 export function playerMediaPort(port: MediaPort): MediaPort {
   return {
-    async snapshot() {
-      const snapshot = await port.snapshot();
+    async snapshot(knownCovers) {
+      const snapshot = await port.snapshot(knownCovers);
       return { ...snapshot, sources: snapshot.sources.map(playerSource) };
     },
     control: (sourceId, action, position, allowGlobalMediaKeys) => port.control(sourceId, action, position, allowGlobalMediaKeys),

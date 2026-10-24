@@ -945,7 +945,9 @@ async function start() {
   } catch (error) {
     console.error(error);
     $("#loading").innerHTML =
-      '<div class="error-state"><strong>CONNECTION INTERRUPTED</strong><p>三维档案资源未能载入。请确认浏览器已启用硬件加速，然后重新连接。</p><button onclick="location.reload()">RECONNECT →</button></div>';
+      '<div class="error-state"><strong>CONNECTION INTERRUPTED</strong><p>三维档案资源未能载入。请确认浏览器已启用硬件加速，然后重新连接。</p><button>RECONNECT →</button></div>';
+    // Not an inline onclick: the page's Content-Security-Policy (app_server.rs) runs no inline script.
+    $("#loading").querySelector("button")?.addEventListener("click", () => location.reload());
   }
 }
 updateSelection();

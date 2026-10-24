@@ -25,15 +25,17 @@ Windows PowerShell 可用 `$env:MUSIC_ROOTS = 'D:\Music;E:\Albums'` 和 `$env:MU
 - `genre-rules.json`：流派归并、别名和 `albumOverrides` 人工覆盖（仍由 API 维护，界面不再使用）。扫描不修改这个文件。通过 API 更新时保留一份 `.backup`。
 - `artwork/`：从歌曲内嵌图片提取的原始封面缓存，不裁切或拉伸。文件夹封面直接读取原文件。
 
+`config.json`、`library-index.json`、`genre-rules.json` 读不了时（损坏，例如断电后全为零；或来自较新版本），改名为 `<原名>.unreadable-<UTC 时间>` 留在原处，不删除、不覆盖，服务按没有这个文件启动：设置回到默认（不猜测主文件夹），流派规则用默认；`GET /api/library` 的 `setAside` 列出改名后的文件名，“音乐库”面板写出它们。只有读取数据文件夹本身出错时才停止启动。带 UTF-8 BOM 的 JSON 照常读取；`config.json` 只在新建或需要清理时写入，设置与流派规则写入时先落盘再改名。启动时在数据文件夹里新建并删去一个 `.write-test-<uuid>.tmp`，不可写时停止启动并说明（Windows 客户端弹出“Rhine Music 启动失败”）。以上都自 2026-10-23 起，两个服务相同。
+
 **歌单。** 主文件夹的每个直接子文件夹是一个歌单，以文件夹名命名；其中任意深度的音频都是这个歌单的歌，按它们在主文件夹中的相对路径自然排序（逐级比较文件夹名与文件名，数字按大小，不区分大小写）。直接放在主文件夹里的音频组成一个以主文件夹命名的歌单，排在最前（`main: true`）；其余歌单按名称自然排序。没有音频的文件夹没有歌单。`GET /api/library` 的 `playlists` 给出每个歌单的 `id`（由文件夹路径决定）、`name`、`folder`、`main` 与按顺序排列的 `trackIds`；它由已索引歌曲的路径得出，不另外读取文件。界面把每个歌单作为专辑架的一列，每首歌一个盒子。
 
 **专辑记录。** 索引内部仍按专辑记录保存：主文件夹里直接放的每个音频各为一条记录，以歌曲 title（缺失时文件名）展示，ID 由该音频路径决定；子文件夹中每个含音频的文件夹为一条记录。专辑记录提供封面和专辑介绍、在线资料的身份。扫描递归进入子文件夹，跳过符号链接（包括 Windows 的目录联接）、名称以 `.` 开头的文件和文件夹（包括 macOS 的 `._` 副本），Windows 客户端还跳过带“隐藏”或“系统”属性的文件夹（旧 Node 入口无法读取这些属性，只按名称跳过）。QQ 音乐的加密下载（`.mflac`、`.mgg`、`.qmc*` 及其编号变体）不当作音频、不读取、不解密，只在主文件夹的扫描结果中计数（`roots[0].encrypted`）。多张 CD 若在同一文件夹中，优先按 disc 标签、再按 `1-01` 这样的文件名前缀排序。移动歌曲文件或文件夹会建立新 ID；当前版本尚未自动识别迁移。重扫时按专辑 ID 匹配缓存。
 
 每首歌在 `tracks` 中除原有字段外还给出它自己的 `album` 与 `year` 标签（有时才有），用于歌曲详情；一条专辑记录里的歌可以来自不同专辑。
 
-启动时先能读取缓存，随后后台扫描。未改动的音频不再解析标签。主文件夹内删除的歌曲会移出当前列表；主文件夹断开或扫描访问失败保留原索引并标记离线。每首歌的封面来自它的专辑记录：子文件夹优先 `cover`、`folder`、`front` 命名的 JPG/PNG/WebP，其次其他图片，最后使用第一份可用内嵌封面；主文件夹里直接放的歌优先各自音频的内嵌封面，其次与音频同名的图片，不共享主文件夹的任意封面。
+启动时先能读取缓存，随后后台扫描；页面就地更新扫描的结果，不重新载入（2026-10-23 起；此前扫描结束后页面约 2 秒后刷新）。未改动的音频不再解析标签，与缓存的比较按表查找，与曲库大小成线性。主文件夹内删除的歌曲会移出当前列表；主文件夹本身断开或读不了时保留原索引并标记离线。2026-10-23 起，主文件夹里一首暂时读不了的歌（正被其他程序使用、没有权限）保留上次的记录、下次扫描再读，新的等下次扫描；一个列不出的子文件夹保留它上次的专辑，只把它们标为离线（`offline: true`），其余照常在线；扫描期间消失的歌按已删除处理；名称不是有效 Unicode 的歌与文件夹不读。这些都计入 `roots[0].unreadable`。让标签读取器出错（包括 panic）的损坏文件只读标签或按读不了的文件处理，扫描照常结束。没有主文件夹时（例如 `config.json` 损坏另存后）扫描不改写索引，重新选择同一个主文件夹时沿用缓存的标签、封面、在线资料与介绍。每首歌的封面来自它的专辑记录：子文件夹优先 `cover`、`folder`、`front` 命名的 JPG/PNG/WebP，其次其他图片，最后使用第一份可用内嵌封面；主文件夹里直接放的歌优先各自音频的内嵌封面，其次与音频同名的图片，不共享主文件夹的任意封面。
 
-API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件路径；只提供主文件夹中的歌曲和封面，文件读取再次检查实际位置仍在主文件夹内。服务只绑定回环地址，并拒绝跨站 Origin、陌生 Host 和非 JSON 写入。勿在公网反向代理本服务。
+API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件路径；只提供主文件夹中的歌曲和封面，文件读取再次检查实际位置仍在主文件夹内（2026-10-23 起文件夹与文件都用系统给出的同一种完整形式比较，完整路径超过 260 个字符的歌、封面与 .lrc 照常提供，此前回 403）。服务只绑定回环地址，并拒绝跨站 Origin、陌生 Host 和非 JSON 写入。勿在公网反向代理本服务。
 
 ## API
 
@@ -41,12 +43,13 @@ API 只能通过已索引的 ID 读取歌曲和封面，不能传入任意文件
 
 | 方法与路径 | 功能 |
 | --- | --- |
-| `GET /api/library` | 主文件夹的专辑记录与歌曲、`playlists`（歌单）、归并后的流派、目录（第一个是主文件夹）和扫描/补全状态；不虚构演示音乐 |
-| `POST /api/library/scan` | `{ "roots": ["/absolute/path"] }` 可选（第一个是主文件夹）；保存目录并扫描主文件夹，返回 202，轮询 GET 读取完成结果；并发请求合并 |
+| `GET /api/library` | 主文件夹的专辑记录与歌曲、`playlists`（歌单）、归并后的流派、目录（第一个是主文件夹，读不了的条目数为 `roots[0].unreadable`）、扫描/补全状态与另存的数据文件（`setAside`）；不虚构演示音乐。2026-10-23 起带 ETag，请求带相同的 If-None-Match 时回 304、没有正文（Rust 按索引的修订号与扫描等少量状态计算，旧 Node 服务按回复内容）；200 的正文与 `Cache-Control: no-store` 不变 |
+| `POST /api/library/scan` | `{ "roots": ["/absolute/path"] }` 可选（第一个是主文件夹）；保存目录并扫描主文件夹，返回 202，轮询 GET 读取完成结果；不带 `roots` 的并发请求合并。2026-10-23 起：新的主文件夹不存在、不是文件夹或打不开时回 400，不保存、不扫描；扫描进行中带 `roots` 时回 409，与 `/api/config` 相同（此前 202 却丢掉新文件夹）。磁盘检查在曲库锁之外进行，网络上不回应的路径只让这一个请求等待 |
 | `GET /api/audio/:trackId` | 原始音频，支持单一 HTTP Range 与 HEAD，用于跳转播放 |
 | `GET /api/artwork/:albumId` | 原比例封面图片；URL `v` 参数随封面变化更新 |
+| `GET /api/lyrics/:trackId` | 歌曲旁同名 .lrc 的原始字节（不超过 512 KiB）；没有时为歌曲标签里的歌词（ID3 同步歌词转为 LRC，或歌词文字）；都没有时 204。只读（2026-10-17） |
 | `GET/POST /api/genre-rules` | 获取或保存完整 `{version:1,genres:[{id,name,aliases:[]}],albumOverrides:{}}`（界面不再使用） |
-| `GET/POST /api/config` | 配置 `roots`（第一个是主文件夹）、`onlineEnabled`、`musicBrainzContact`、`foobarBaseUrl`；响应还给出 `musicBrainzConfigured` |
+| `GET/POST /api/config` | 配置 `roots`（第一个是主文件夹）、`onlineEnabled`、`musicBrainzContact`、`foobarBaseUrl`；响应还给出 `musicBrainzConfigured`。扫描进行中更改 `roots` 回 409；2026-10-23 起新的主文件夹不存在、不是文件夹或打不开时回 400，不保存 |
 | `POST /api/library/enrich` | 明确请求 MusicBrainz 补全；可选 `{ "albumIds": ["album-..."] }`；返回 202 |
 | `POST /api/library/introductions` | 独立查询/更新百科专辑介绍，无需 MusicBrainz 配置；`{ "albumIds": ["album-..."], "force": true }` 均可省略；返回 202 |
 | `GET /api/foobar/status` | 是否保存过本机桥接地址；不是实际连接成功证明 |
@@ -98,8 +101,8 @@ MUSICBRAINZ_CONTACT='your-project-contact' node scripts/music-server.mjs
 
 以下说明既有检查脚本的用途，不表示这些脚本在 V0.2.0 发布时全部重新运行；本次检查范围见 [发布检查](RELEASE-V0.2.0.md)。
 
-`node --test scripts/check-music-library.mjs` 使用临时合成 WAV 和元数据 fixture，验证实际 WAV 解析、字节范围、增删与断盘保留、缓存、封面优先、人工覆盖、并发扫描、含糊匹配，以及主文件夹的歌单（虚构的嵌套文件夹、散放文件、空文件夹、隐藏文件夹与加密下载）和旧版本的其余目录保留不用。测试不会读取或改写用户歌曲。`scripts/check-desktop-contract.mjs` 在同一批合成文件上比较 Rust 与 Node 两个服务的公开 JSON（包括 `playlists` 的顺序）。
+`node --test scripts/check-music-library.mjs` 使用临时合成 WAV 和元数据 fixture，验证实际 WAV 解析、字节范围、增删与断盘保留、缓存、封面优先、人工覆盖、并发扫描、含糊匹配，以及主文件夹的歌单（虚构的嵌套文件夹、散放文件、空文件夹、隐藏文件夹与加密下载）和旧版本的其余目录保留不用。测试不会读取或改写用户歌曲。`scripts/check-desktop-contract.mjs` 在同一批合成文件上比较 Rust 与 Node 两个服务的公开 JSON（包括 `playlists` 的顺序）。2026-10-23 起 `check-music-library` 另检查：不存在的新主文件夹被拒绝、扫描中更改主文件夹回 409、损坏的数据文件另存后照常启动、旧 Node 服务的 ETag 与 304；`check-desktop-contract` 另比较不存在的主文件夹、没有主文件夹的扫描（索引保留）、再次选择同一个主文件夹，并在 Windows 上用独占句柄锁住一首新歌、一首已知的歌和一个文件夹，以及给两个服务各一个不可写的数据文件夹（都应停止启动）。Rust 的 `tests/library.rs` 有对应的测试（Opus 的 panic、非 Unicode 名称、被独占的条目、线性扫描、长路径、磁盘检查在锁外、没有主文件夹的扫描、不可写的数据文件夹）。
 
-`node --experimental-strip-types --test scripts/check-music-player.mjs` 使用受控 Audio 和可推进时钟，验证两路独立音量、过渡静音门、快速开关与音量变化、恢复和迟到播放 Promise 的取消。测试不播放真实声音、不启动服务。
+`node --experimental-strip-types --test scripts/check-music-player.mjs` 使用受控 Audio 和可推进时钟，验证两路独立音量、过渡静音门、快速开关与音量变化、恢复和迟到播放 Promise 的取消；2026-10-23 起另验证读不出的歌（自动接续时跳过、连续第三首停下、用户点名的歌停在那首）、外部的暂停与继续、歌单播完后的上一首、在末尾暂停后继续，以及扫描后换上新队列（中途加的歌接着播放，空队列静静停下）。测试不播放真实声音、不启动服务。
 
 `node --test scripts/check-album-introductions.mjs` 仅使用人工 fixture 与网络替身，验证繁简/双语标题、错误身份/年份/作品类型的拒绝、来源归属、搜索片段隔离、全来源失败、空导言、并发与缓存、三次失败暂停和扫描期间保留介绍。`check-music-library` 另验证实际 HTTP 更新路由及无 MusicBrainz 配置也可调用，响应内容仍来自替身，不联网查询用户专辑。

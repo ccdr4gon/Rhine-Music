@@ -35,6 +35,12 @@ export const DETAIL_SWAP: SurfaceMotion = { from: "translateY(-6px)", to: "trans
  * they fade out (200 ms). The section itself never moves or fades (song-scene.css).
  */
 export const SONG_SCENE: SurfaceMotion = { from: "none", to: "none", rise: "0 6px" };
+/**
+ * 设置 (design A, the owner, 2026-10-24): the panel itself does not move in; its corners, sheet,
+ * index and rows draw themselves (music.css .settings-panel[data-motion="enter"]). It leaves as
+ * the other panels do.
+ */
+export const SETTINGS_PANEL: SurfaceMotion = { from: "none", to: "translateY(8px)" };
 
 /** Owns the visible lifetime, including a close that interrupts an opening. */
 export class SurfaceTransition {

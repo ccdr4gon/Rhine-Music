@@ -2,7 +2,7 @@
 .music-app .external-source { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 16px; border: 1px solid var(--line); background: transparent; text-align: left; }
 .external-source[aria-pressed="true"] { border-color: var(--accent); }
 .external-source span { display: grid; gap: 6px; min-width: 0; }
-.external-source strong, .external-source small { overflow-wrap: anywhere; }
+.external-source strong, .external-source small, #external-connection-status, #external-empty-note { overflow-wrap: anywhere; }
 .external-source small, .external-unavailable, .external-note, .external-warning { color: var(--muted); font-size: 12px; line-height: 1.8; }
 .external-source em { color: var(--accent); font-size: 12px; font-style: normal; flex-shrink: 0; }
 .external-warning { white-space: pre-line; }

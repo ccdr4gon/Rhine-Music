@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
@@ -61,26 +62,72 @@ pub fn normalized(value: &str) -> String {
         .into_owned()
 }
 pub fn write_json(file: &Path, data: &Value) -> Result<()> {
+    write_file(file, data, false)
+}
+/// As `write_json`, and on the disk before it takes the name, so that a power cut cannot leave
+/// the name holding data that never got there (it reads as zeros): for the settings and the genre
+/// rules, small and written when the user changes them. The index (written under the store's lock
+/// after every scan) and the preferences (on the window's thread, at every change) keep the plain
+/// write; a damaged index is set aside at the next start (`load`).
+fn write_json_synced(file: &Path, data: &Value) -> Result<()> {
+    write_file(file, data, true)
+}
+fn write_file(file: &Path, data: &Value, synced: bool) -> Result<()> {
     fs::create_dir_all(file.parent().ok_or("无效数据位置")?).map_err(|e| e.to_string())?;
     let temporary = file.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let outcome = (|| {
-        fs::write(
-            &temporary,
-            serde_json::to_vec_pretty(data).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec_pretty(data).map_err(|e| e.to_string())?;
+        let mut written = fs::File::create(&temporary).map_err(|e| e.to_string())?;
+        written.write_all(&bytes).map_err(|e| e.to_string())?;
+        if synced {
+            written.sync_all().map_err(|e| e.to_string())?;
+        }
+        drop(written);
         fs::rename(&temporary, file).map_err(|e| e.to_string())
     })();
     let _ = fs::remove_file(&temporary);
     outcome
 }
+/// JSON text without a UTF-8 byte order mark, which an editor may put before it.
+fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
+}
 fn read_json(file: &Path, fallback: Value) -> Result<Value> {
     match fs::read(file) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+        Ok(bytes) => serde_json::from_slice(without_bom(&bytes))
             .map_err(|e| format!("无法读取 {}：{e}；已保留原文件", file.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(fallback),
         Err(e) => Err(e.to_string()),
     }
+}
+/// One of the store's data files as read at a start, if it is there and `valid` takes it. A file
+/// this version cannot read (not JSON, say after a power cut, or of a shape it does not know, say
+/// written by a newer version) is set aside beside it as `<name>.unreadable-<UTC time>`, never
+/// deleted or written over, and the start goes on without it (None): one damaged file must not
+/// keep the client, and every source with it, from starting. Only an error reading the data
+/// folder itself does.
+fn load(file: &Path, valid: impl Fn(&Value) -> bool, set_aside: &mut Vec<String>) -> Result<Option<Value>> {
+    let bytes = match fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("无法读取 {}：{e}", file.display())),
+    };
+    if let Some(value) = serde_json::from_slice::<Value>(without_bom(&bytes)).ok().filter(&valid) {
+        return Ok(Some(value));
+    }
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let mut aside = format!("{name}.unreadable-{stamp}");
+    for n in 2.. {
+        if !file.with_file_name(&aside).exists() {
+            break;
+        }
+        aside = format!("{name}.unreadable-{stamp}-{n}");
+    }
+    fs::rename(file, file.with_file_name(&aside))
+        .map_err(|e| format!("无法另存 {}：{e}", file.display()))?;
+    set_aside.push(aside);
+    Ok(None)
 }
 
 /// The saved folders, cleaned. The first one is the main folder (the owner, 2026-10-06: "Local
@@ -136,6 +183,25 @@ fn path_key(path: &str) -> String {
 }
 fn contains_path(parent: &str, child: &str) -> bool {
     Path::new(child).starts_with(parent)
+}
+/// Said when a new main folder is asked for while a scan runs (the routes answer 409).
+pub const SCANNING: &str = "正在扫描，请完成后再更改根目录";
+/// Whether a new main folder is a folder that is there: a mistyped one neither replaces the chosen
+/// one nor is scanned as an empty library. It asks the disk, which for a folder on a network host
+/// that does not answer takes as long as Windows waits for it (about 21 s): never with the store
+/// locked, or every /api request (a playing song's audio too) would wait as long
+/// (`Store::checked_main_folder`).
+pub fn check_main_folder(main: &str) -> Result<()> {
+    match fs::metadata(main) {
+        Ok(found) if found.is_dir() => Ok(()),
+        Ok(_) => Err(format!("不是文件夹：{main}。音乐主文件夹保持不变。")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("找不到文件夹：{main}。音乐主文件夹保持不变。"))
+        }
+        Err(e) => Err(format!(
+            "无法打开文件夹 {main}：{e}。音乐主文件夹保持不变。"
+        )),
+    }
 }
 
 pub fn default_rules() -> Value {
@@ -233,6 +299,10 @@ pub struct Store {
     pub scan: Value,
     pub enrich: Value,
     pub introductions: Value,
+    /// The names the data files this start could not read were set aside under (`load`).
+    pub set_aside: Vec<String>,
+    /// Bumped whenever the index is saved (every change to it is): the library's tag (library_tag).
+    revision: u64,
 }
 // A file the library may serve (its real path must stay inside `root`), and the media types of
 // served files: shared with the page's server (crate::http), under their earlier paths here.
@@ -240,42 +310,63 @@ pub use crate::http::{mime, AllowedFile};
 impl Store {
     pub fn open(data_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        // A data folder that cannot be written stops the start, which says why (main.rs): a start
+        // on one that already holds valid data writes nothing else here, and would go on unable
+        // to save the settings, the index or the preferences. A file of its own, removed again.
+        let probe = data_dir.join(format!(".write-test-{}.tmp", uuid::Uuid::new_v4()));
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .and_then(|mut file| file.write_all(b"\n"));
+        let _ = fs::remove_file(&probe);
+        written.map_err(|e| e.to_string())?;
         let roots = std::env::var_os("MUSIC_ROOTS")
             .map(|s| {
                 std::env::split_paths(&s)
-                    .map(|p| json!(p))
+                    .map(|p| json!(p.to_string_lossy()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut config = read_json(
+        let mut set_aside = Vec::new();
+        let saved = load(
             &data_dir.join("config.json"),
-            json!({"version":1,"roots":roots,"onlineEnabled":false,"foobarBaseUrl":null}),
+            |config| config.is_object() && safe_roots(&config["roots"]).is_ok(),
+            &mut set_aside,
         )?;
+        let mut config = saved.clone().unwrap_or_else(
+            || json!({"version":1,"roots":roots,"onlineEnabled":false,"foobarBaseUrl":null}),
+        );
         config["roots"] = json!(safe_roots(&config["roots"])?);
-        let index = read_json(
+        let index = load(
             &data_dir.join("library-index.json"),
-            json!({"version":1,"albums":[],"roots":[],"scannedAt":null}),
+            |index| {
+                index["version"] == 1
+                    && index["albums"].is_array()
+                    && array(&index["albums"]).iter().all(|album| {
+                        album.is_object()
+                            && album["tracks"].is_array()
+                            && array(&album["tracks"]).iter().all(Value::is_object)
+                    })
+            },
+            &mut set_aside,
+        )?
+        .unwrap_or_else(|| json!({"version":1,"albums":[],"roots":[],"scannedAt":null}));
+        let rules = validate_rules(
+            load(
+                &data_dir.join("genre-rules.json"),
+                |rules| validate_rules(rules.clone()).is_ok(),
+                &mut set_aside,
+            )?
+            .unwrap_or_else(default_rules),
         )?;
-        if index["version"] != 1
-            || !index["albums"].is_array()
-            || array(&index["albums"]).iter().any(|album| {
-                !album.is_object()
-                    || !album["tracks"].is_array()
-                    || array(&album["tracks"])
-                        .iter()
-                        .any(|track| !track.is_object())
-            })
-        {
-            return Err("曲库索引版本或格式不受支持，已保留原文件".into());
-        }
-        let rules = validate_rules(read_json(
-            &data_dir.join("genre-rules.json"),
-            default_rules(),
-        )?)?;
         if !data_dir.join("genre-rules.json").exists() {
-            write_json(&data_dir.join("genre-rules.json"), &rules)?;
+            write_json_synced(&data_dir.join("genre-rules.json"), &rules)?;
         }
-        write_json(&data_dir.join("config.json"), &config)?;
+        // Written when it is new or was cleaned, not at every start.
+        if saved.as_ref() != Some(&config) {
+            write_json_synced(&data_dir.join("config.json"), &config)?;
+        }
         Ok(Self {
             data_dir,
             config,
@@ -284,6 +375,11 @@ impl Store {
             scan: json!({"running":false}),
             enrich: json!({"running":false,"completed":0,"total":0}),
             introductions: json!({"running":false,"completed":0,"total":0,"updated":0,"notFound":0,"failed":0}),
+            set_aside,
+            // Its own start for each run, so that a tag from before a restart is not taken for one now.
+            revision: std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos() as u64),
         })
     }
     pub fn contact(&self) -> String {
@@ -309,8 +405,28 @@ impl Store {
         self.main_folder()
             .is_some_and(|main| album["_root"].as_str() == Some(main))
     }
-    pub fn save_index(&self) -> Result<()> {
+    pub fn save_index(&mut self) -> Result<()> {
+        self.revision = self.revision.wrapping_add(1);
         write_json(&self.data_dir.join("library-index.json"), &self.index)
+    }
+    /// A tag for what `snapshot` shows (the ETag of /api/library): the index's revision and the
+    /// small state the snapshot reads beside it. The albums are neither copied nor serialized for
+    /// it, so a page polling an unchanged library is answered 304 at once (a large library's
+    /// snapshot is megabytes and took 0.4 s to build).
+    pub fn library_tag(&self) -> String {
+        let state = json!([
+            self.revision,
+            self.rules,
+            self.config["roots"],
+            self.config["onlineEnabled"],
+            self.scan,
+            self.enrich,
+            self.introductions
+        ]);
+        format!(
+            "\"{}\"",
+            hash(serde_json::to_vec(&state).unwrap_or_default())
+        )
     }
     pub fn reload_rules(&mut self) -> Result<()> {
         self.rules = validate_rules(read_json(
@@ -326,20 +442,59 @@ impl Store {
             fs::copy(&path, self.data_dir.join("genre-rules.json.backup"))
                 .map_err(|e| e.to_string())?;
         }
-        write_json(&path, &rules)?;
+        write_json_synced(&path, &rules)?;
         self.rules = rules;
         Ok(self.rules.clone())
     }
+    /// The folder `roots` would make the new main folder: their first, when it is not the main
+    /// folder now. Text only: nothing is read from the disk.
+    fn new_main_folder(&self, roots: &Value) -> Result<Option<String>> {
+        Ok(safe_roots(roots)?
+            .into_iter()
+            .next()
+            .filter(|main| self.main_folder().map(path_key) != Some(path_key(main))))
+    }
+    /// The new main folder `roots` name, if any, found on the disk (check_main_folder) with the
+    /// store's lock released: the lock is held only for the checks that need no disk (no new main
+    /// folder during a scan, the folders' text). Its answer goes to `update_config_checked`.
+    pub fn checked_main_folder(shared: &SharedStore, roots: &Value) -> Result<Option<String>> {
+        let new = {
+            let store = shared.lock().unwrap();
+            if store.scan["running"] == true {
+                return Err(SCANNING.into());
+            }
+            store.new_main_folder(roots)?
+        };
+        if let Some(main) = &new {
+            check_main_folder(main)?;
+        }
+        Ok(new)
+    }
     pub fn update_config(&mut self, value: &Value) -> Result<Value> {
+        self.update_config_checked(value, None)
+    }
+    /// As `update_config`, for a new main folder `checked_main_folder` has already found on the
+    /// disk (`checked`): it is not looked for again under the lock.
+    pub fn update_config_checked(&mut self, value: &Value, checked: Option<&str>) -> Result<Value> {
         if !value.is_object() {
             return Err("配置必须是 JSON 对象".into());
         }
         let mut next = self.config.clone();
         if let Some(roots) = value.get("roots") {
             if self.scan["running"] == true {
-                return Err("正在扫描，请完成后再更改根目录".into());
+                return Err(SCANNING.into());
             }
-            next["roots"] = json!(safe_roots(roots)?);
+            let roots = safe_roots(roots)?;
+            // A new main folder has to be a folder that is there (check_main_folder). The chosen
+            // one may be away (a drive not connected): saved again, it keeps its index, offline.
+            if let Some(main) = roots
+                .first()
+                .filter(|main| self.main_folder().map(path_key) != Some(path_key(main)))
+                .filter(|main| checked.map(path_key) != Some(path_key(main)))
+            {
+                check_main_folder(main)?;
+            }
+            next["roots"] = json!(roots);
         }
         if let Some(enabled) = value.get("onlineEnabled") {
             if !enabled.is_boolean() {
@@ -380,7 +535,7 @@ impl Store {
                 next["foobarBaseUrl"] = json!(u.origin().ascii_serialization());
             }
         }
-        write_json(&self.data_dir.join("config.json"), &next)?;
+        write_json_synced(&self.data_dir.join("config.json"), &next)?;
         self.config = next;
         Ok(self.config_snapshot())
     }
@@ -434,6 +589,9 @@ impl Store {
             .map(|main| playlists(main, &library))
             .unwrap_or_default();
         let mut public = json!({"version":1,"albums":albums,"genres":genres,"playlists":playlists,"roots":roots,"scan":self.scan,"onlineEnabled":self.config["onlineEnabled"] == true,"enrich":self.enrich,"introductions":self.introductions});
+        if !self.set_aside.is_empty() {
+            public["setAside"] = json!(self.set_aside);
+        }
         // TypeScript optional fields must be absent, not null. Apply this only
         // to the cloned public snapshot; config and private index retain their
         // existing representation (including foobarBaseUrl: null).
@@ -469,29 +627,45 @@ impl Store {
         None
     }
     pub fn begin_scan(shared: &SharedStore, roots: Option<&Value>) -> Result<()> {
+        // A new main folder is looked for on the disk before the store is locked.
+        let checked = match roots {
+            Some(roots) => Self::checked_main_folder(shared, roots)?,
+            None => None,
+        };
         let mut copy = {
             let mut store = shared.lock().unwrap();
+            // A new main folder is refused while a scan runs (update_config), not dropped.
+            if let Some(roots) = roots {
+                store.update_config_checked(&json!({"roots":roots}), checked.as_deref())?;
+            }
             if store.scan["running"] == true {
                 return Ok(());
-            }
-            if let Some(roots) = roots {
-                store.update_config(&json!({"roots":roots}))?;
             }
             store.scan = json!({"running":true,"startedAt":now()});
             store.clone()
         };
         let shared = shared.clone();
         std::thread::spawn(move || {
-            let result = copy.scan_sync();
+            // A panic while reading (a damaged file a reader cannot take) ends this scan with an
+            // error: the index stays as it was, and the next scan can run.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| copy.scan_sync()))
+                .unwrap_or_else(|_| Err("扫描时读取出错，原索引已保留".into()));
             let online = {
                 let mut store = shared.lock().unwrap();
-                if result.is_ok() {
-                    for album in copy.index["albums"].as_array_mut().unwrap() {
-                        if let Some(current) = array(&store.index["albums"])
-                            .iter()
-                            .find(|a| a["id"] == album["id"])
-                        {
-                            merge_online(current, album);
+                // Without a main folder nothing was scanned (scan_sync): the index is not written.
+                if result.is_ok() && copy.main_folder().is_some() {
+                    {
+                        // The albums as they are now (an online lookup may have finished), by id.
+                        let mut current: HashMap<&str, &Value> = HashMap::new();
+                        for album in array(&store.index["albums"]) {
+                            if let Some(id) = album["id"].as_str() {
+                                current.entry(id).or_insert(album);
+                            }
+                        }
+                        for album in copy.index["albums"].as_array_mut().unwrap() {
+                            if let Some(current) = album["id"].as_str().and_then(|id| current.get(id)) {
+                                merge_online(current, album);
+                            }
                         }
                     }
                     store.index = copy.index;
@@ -521,35 +695,68 @@ impl Store {
                 .iter()
                 .filter(|a| a["_root"] == *root)
                 .collect();
-            let mut encrypted = 0;
+            // By id, once: looked up for each album the walk finds.
+            let mut previous_by_id: HashMap<&str, &Value> = HashMap::new();
+            for album in &previous {
+                if let Some(id) = album["id"].as_str() {
+                    previous_by_id.entry(id).or_insert(album);
+                }
+            }
+            let mut skipped = Skipped::default();
             let scanned = (|| {
-                let (entries, skipped) = walk(Path::new(text(root)))?;
-                encrypted = skipped;
-                entries
-                    .into_iter()
-                    .map(|entry| {
-                        let id = format!(
-                            "album-{}",
-                            hash(
-                                entry
-                                    .single
-                                    .as_ref()
-                                    .unwrap_or(&entry.folder)
-                                    .to_string_lossy()
-                                    .as_bytes()
-                            )
-                        );
-                        let old = previous.iter().find(|a| a["id"] == id).copied();
-                        self.read_album(Path::new(text(root)), entry, &id, old)
-                    })
-                    .collect::<Result<Vec<_>>>()
+                let entries = walk(Path::new(text(root)), &mut skipped)?;
+                let mut found = Vec::new();
+                for entry in entries {
+                    let id = format!(
+                        "album-{}",
+                        hash(
+                            entry
+                                .single
+                                .as_ref()
+                                .unwrap_or(&entry.folder)
+                                .to_string_lossy()
+                                .as_bytes()
+                        )
+                    );
+                    let old = previous_by_id.get(id.as_str()).copied();
+                    found.extend(self.read_album(
+                        Path::new(text(root)),
+                        entry,
+                        &id,
+                        old,
+                        &mut skipped.unreadable,
+                    )?);
+                }
+                Ok::<_, String>(found)
             })();
             match scanned {
-                Ok(found) => {
+                Ok(mut found) => {
+                    // The albums in a folder that could not be read this time stay as the last
+                    // scan found them, offline: an unreadable folder is not a deleted one.
+                    let ids: HashSet<&str> = found.iter().filter_map(|a| a["id"].as_str()).collect();
+                    let kept: Vec<_> = previous
+                        .iter()
+                        .filter(|a| {
+                            !a["id"].as_str().is_some_and(|id| ids.contains(id))
+                                && skipped
+                                    .folders
+                                    .iter()
+                                    .any(|folder| Path::new(text(&a["folder"])).starts_with(folder))
+                        })
+                        .map(|a| {
+                            let mut a = (*a).clone();
+                            a["offline"] = json!(true);
+                            a
+                        })
+                        .collect();
+                    found.extend(kept);
                     albums.extend(found);
                     let mut status = json!({"path":root,"status":"online"});
-                    if encrypted > 0 {
-                        status["encrypted"] = json!(encrypted);
+                    if skipped.encrypted > 0 {
+                        status["encrypted"] = json!(skipped.encrypted);
+                    }
+                    if skipped.unreadable > 0 {
+                        status["unreadable"] = json!(skipped.unreadable);
                     }
                     roots.push(status);
                 }
@@ -563,31 +770,69 @@ impl Store {
                 }
             }
         }
-        self.index = json!({"version":1,"albums":albums,"roots":roots,"scannedAt":now()});
+        // Without a main folder (none chosen yet, or config.json set aside at a start) the index
+        // stays as it is: shown and served to no one (in_library), and when the same folder is
+        // chosen again its albums are found (`previous`) with their tags, covers and online data.
+        // Another folder chosen leaves them out.
+        if self.main_folder().is_some() {
+            self.index = json!({"version":1,"albums":albums,"roots":roots,"scannedAt":now()});
+        }
         Ok(())
     }
+    /// An album record from what the walk found (None when none of its songs could be taken).
+    /// A song or cover that cannot be read now is counted in `unreadable` (`keep`).
     fn read_album(
         &self,
         root: &Path,
         entry: Entry,
         id: &str,
         previous: Option<&Value>,
-    ) -> Result<Value> {
-        let file_cover=entry.cover.as_ref().map(|p| -> Result<Value> {Ok(json!({"path":p,"mime":mime(p),"version":hash(fingerprint(p)?),"embedded":false}))}).transpose()?;
+        unreadable: &mut usize,
+    ) -> Result<Option<Value>> {
+        let file_cover = match &entry.cover {
+            None => None,
+            Some(p) => match fingerprint(p) {
+                Ok(fingerprint) => Some(
+                    json!({"path":path_text(p)?,"mime":mime(p),"version":hash(fingerprint),"embedded":false}),
+                ),
+                // An image that cannot be read now keeps the cover the last scan found in it.
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        *unreadable += 1;
+                    }
+                    previous
+                        .map(|a| &a["_cover"])
+                        .filter(|c| c["embedded"] == false && c["path"].as_str() == p.to_str())
+                        .cloned()
+                }
+            },
+        };
         let mut cover = if entry.single.is_none() {
             file_cover.clone()
         } else {
             None
         };
         let mut tracks = Vec::new();
-        let disc_prefix = Regex::new(r"^(\d{1,2})[-_](\d{1,3})(?:[\s._-]|$)").unwrap();
+        static DISC_PREFIX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        let disc_prefix = DISC_PREFIX
+            .get_or_init(|| Regex::new(r"^(\d{1,2})[-_](\d{1,3})(?:[\s._-]|$)").unwrap());
+        // The last scan's songs of this album, by path: one look-up per song.
+        let mut old_tracks: HashMap<&str, &Value> = HashMap::new();
+        for track in previous.map(|a| array(&a["tracks"])).unwrap_or_default() {
+            if let Some(path) = track["_path"].as_str() {
+                old_tracks.entry(path).or_insert(track);
+            }
+        }
         for file in entry.tracks {
-            let fingerprint = fingerprint(&file)?;
-            let old = previous.and_then(|a| {
-                array(&a["tracks"])
-                    .iter()
-                    .find(|t| t["_path"] == json!(file))
-            });
+            let path = path_text(&file)?;
+            let old = old_tracks.get(path).copied();
+            let fingerprint = match fingerprint(&file) {
+                Ok(fingerprint) => fingerprint,
+                Err(e) => {
+                    keep(e, old, &mut tracks, &mut cover, unreadable);
+                    continue;
+                }
+            };
             if let Some(old) = old.filter(|t| {
                 t["_fingerprint"] == fingerprint
                     && t["_metadataVersion"] == METADATA_VERSION
@@ -603,9 +848,11 @@ impl Store {
                 continue;
             }
             let had_cover = cover.is_some();
-            // A permission/sharing failure is not a missing tag. Keep the
-            // previous root snapshot instead of replacing its metadata.
-            fs::File::open(&file).map_err(|e| e.to_string())?;
+            // A permission/sharing failure is not a missing tag: the song keeps its record (`keep`).
+            if let Err(e) = fs::File::open(&file) {
+                keep(e, old, &mut tracks, &mut cover, unreadable);
+                continue;
+            }
             let mut parsed = match metadata::read(&file, !had_cover) {
                 Ok(m) => m,
                 Err(e) => {
@@ -633,7 +880,7 @@ impl Store {
                         fs::write(&target, bytes).map_err(|e| e.to_string())?;
                     }
                     embedded = Some(
-                        json!({"path":target,"mime":if mime=="image/jpg"{"image/jpeg"}else{&mime},"version":version,"embedded":true}),
+                        json!({"path":path_text(&target)?,"mime":if mime=="image/jpg"{"image/jpeg"}else{&mime},"version":version,"embedded":true}),
                     );
                     cover = embedded.clone();
                 }
@@ -719,9 +966,9 @@ impl Store {
                 ("audioUrl", json!(format!("/api/audio/{track_id}"))),
                 (
                     "relativePath",
-                    json!(file.strip_prefix(root).unwrap_or(&file)),
+                    json!(path_text(file.strip_prefix(root).unwrap_or(&file))?),
                 ),
-                ("_path", json!(file)),
+                ("_path", json!(path)),
                 ("_fingerprint", json!(fingerprint)),
                 ("_metadataVersion", json!(METADATA_VERSION)),
                 ("_common", parsed.common),
@@ -753,7 +1000,9 @@ impl Store {
                 )
                 .then_with(|| natural_cmp(text(&a["relativePath"]), text(&b["relativePath"])))
         });
-        let first = tracks.first().ok_or("空专辑")?;
+        let Some(first) = tracks.first() else {
+            return Ok(None);
+        };
         let title = if entry.single.is_some() {
             text(&first["title"]).to_owned()
         } else if !text(&first["_common"]["album"]).is_empty() {
@@ -786,7 +1035,10 @@ impl Store {
         .map(text)
         .collect::<Vec<_>>()
         .join("\n");
-        let mbid = Regex::new(r"(?i)^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$").unwrap();
+        static MBID: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        let mbid = MBID.get_or_init(|| {
+            Regex::new(r"(?i)^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$").unwrap()
+        });
         let release = |key: &str| {
             tracks
                 .iter()
@@ -797,9 +1049,9 @@ impl Store {
         };
         let mut album = json!({"id":id,"title":title,"artist":artist,"year":first["_common"]["year"],
             "discCount":tracks.iter().map(|t|t["_common"]["discTotal"].as_u64().or(t["discNumber"].as_u64()).unwrap_or(1)).max().unwrap_or(1),
-            "localNote":comments,"genreId":"unclassified","rawGenres":genres,"folder":entry.folder,"tracks":tracks,"offline":false,
+            "localNote":comments,"genreId":"unclassified","rawGenres":genres,"folder":path_text(&entry.folder)?,"tracks":tracks,"offline":false,
             "producers":[],"online":{"status":"unqueried","releaseId":release("releaseId"),"releaseGroupId":release("releaseGroupId")},
-            "_root":root,"_cover":cover,"_localGenres":genres,"_onlineGenres":[]});
+            "_root":path_text(root)?,"_cover":cover,"_localGenres":genres,"_onlineGenres":[]});
         if let Some(old) = previous.filter(|old| {
             same_identity(old, &album)
                 && (release("releaseId").is_null()
@@ -833,8 +1085,35 @@ impl Store {
             }
         }
         album["producers"] = json!(unique(producers));
-        Ok(album)
+        Ok(Some(album))
     }
+}
+/// A song that cannot be read now (`error`): in use by another program or not permitted, it keeps
+/// the record the last scan made (`old`, read again at the next scan) and a new one waits for the
+/// next scan; either way it is counted in `unreadable`. One that is gone was deleted.
+fn keep(
+    error: std::io::Error,
+    old: Option<&Value>,
+    tracks: &mut Vec<Value>,
+    cover: &mut Option<Value>,
+    unreadable: &mut usize,
+) {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return;
+    }
+    *unreadable += 1;
+    if let Some(old) = old {
+        tracks.push(old.clone());
+        if cover.is_none() && old["_embeddedCover"].is_object() {
+            *cover = Some(old["_embeddedCover"].clone());
+        }
+    }
+}
+/// A path as the index keeps it. The walk only finds paths that are valid Unicode; one that is
+/// not (the data folder's, say) is an error here rather than a panic of `json!` on the path.
+fn path_text(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| format!("路径含有无法识别的字符：{}", path.to_string_lossy()))
 }
 pub fn same_identity(a: &Value, b: &Value) -> bool {
     same_album(a, b) && array(&a["tracks"]).len() == array(&b["tracks"]).len()
@@ -878,13 +1157,12 @@ fn merge_online(current: &Value, album: &mut Value) {
         album["descriptionSource"] = current["descriptionSource"].clone();
     }
 }
-fn fingerprint(file: &Path) -> Result<String> {
-    let s = fs::metadata(file).map_err(|e| e.to_string())?;
+fn fingerprint(file: &Path) -> std::io::Result<String> {
+    let s = fs::metadata(file)?;
     Ok(format!(
         "{}:{}",
         s.len(),
-        s.modified()
-            .map_err(|e| e.to_string())?
+        s.modified()?
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
@@ -929,60 +1207,98 @@ fn hidden(entry: &fs::DirEntry, folder: bool) -> Result<bool> {
     let _ = folder;
     Ok(false)
 }
+/// What a scan of the main folder left out: QQ Music's encrypted downloads (only counted), and the
+/// files and folders it could not read this time (`unreadable`: in use, not permitted, or a name
+/// that is not valid Unicode), with the folders among them (`folders`), whose albums the last scan
+/// found are kept (scan_sync).
+#[derive(Default)]
+struct Skipped {
+    encrypted: usize,
+    unreadable: usize,
+    folders: Vec<PathBuf>,
+}
+fn is_audio(path: &Path) -> bool {
+    matches!(
+        extension(path).as_str(),
+        "flac"
+            | "wav"
+            | "m4a"
+            | "mp4"
+            | "alac"
+            | "dsf"
+            | "dff"
+            | "mp3"
+            | "aac"
+            | "aiff"
+            | "aif"
+            | "ogg"
+            | "opus"
+    )
+}
 /// The folders that hold audio, under the main folder: each folder with audio is an album
 /// record (its songs, cover and introduction); audio directly in the main folder is one record
-/// per file. The playlists are made from these records' paths (`playlists`). Also returns how
-/// many of QQ Music's encrypted downloads were seen.
-fn walk(root: &Path) -> Result<(Vec<Entry>, usize)> {
-    fn visit(root: &Path, folder: &Path, output: &mut Vec<Entry>, encrypted: &mut usize) -> Result<()> {
-        let mut entries = fs::read_dir(folder)
-            .map_err(|e| e.to_string())?
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
+/// per file. The playlists are made from these records' paths (`playlists`). Only the main folder
+/// itself failing fails the walk; what else it leaves out is in `skipped`.
+fn walk(root: &Path, skipped: &mut Skipped) -> Result<Vec<Entry>> {
+    fn visit(root: &Path, folder: &Path, output: &mut Vec<Entry>, skipped: &mut Skipped) -> Result<()> {
+        let listed = fs::read_dir(folder).and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>());
+        let mut entries = match listed {
+            Ok(entries) => entries,
+            // The main folder itself: the library is offline, its index kept (scan_sync).
+            Err(e) if folder == root => return Err(e.to_string()),
+            // Gone since its parent was listed: deleted.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // A folder inside it that cannot be listed now is not an empty one.
+            Err(_) => {
+                skipped.unreadable += 1;
+                skipped.folders.push(folder.into());
+                return Ok(());
+            }
+        };
         entries.sort_by(|a, b| {
             natural_cmp(
                 &a.file_name().to_string_lossy(),
                 &b.file_name().to_string_lossy(),
             )
         });
-        // Resolve every type once and propagate failures. Silently dropping an
-        // unreadable entry would turn an incomplete scan into apparent deletion.
+        // Resolve every type once. An entry that cannot be read now is counted and left out, never
+        // taken for a deletion (a known song keeps its record, a folder its albums); so is a song
+        // or folder whose name is not valid Unicode (a lone UTF-16 surrogate, left by a tool that
+        // cut a name in two), which no path in the index can hold.
         let mut files = Vec::new();
         let mut directories = Vec::new();
         for entry in &entries {
-            let kind = entry.file_type().map_err(|e| e.to_string())?;
-            if kind.is_file() && !hidden(entry, false)? {
-                if is_encrypted_download(&entry.path()) {
-                    *encrypted += 1;
-                } else {
-                    files.push(entry.path());
+            let Ok(kind) = entry.file_type() else {
+                skipped.unreadable += 1;
+                continue;
+            };
+            let directory = kind.is_dir() && !kind.is_symlink();
+            if !kind.is_file() && !directory {
+                continue;
+            }
+            match hidden(entry, directory) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(_) => {
+                    skipped.unreadable += 1;
+                    continue;
                 }
-            } else if kind.is_dir() && !kind.is_symlink() && !hidden(entry, true)? {
+            }
+            if entry.file_name().to_str().is_none() {
+                if directory || is_audio(&entry.path()) {
+                    skipped.unreadable += 1;
+                }
+                continue;
+            }
+            if directory {
                 directories.push(entry.path());
+            } else if is_encrypted_download(&entry.path()) {
+                skipped.encrypted += 1;
+            } else {
+                files.push(entry.path());
             }
         }
-        let tracks: Vec<_> = files
-            .iter()
-            .filter(|p| {
-                matches!(
-                    extension(p).as_str(),
-                    "flac"
-                        | "wav"
-                        | "m4a"
-                        | "mp4"
-                        | "alac"
-                        | "dsf"
-                        | "dff"
-                        | "mp3"
-                        | "aac"
-                        | "aiff"
-                        | "aif"
-                        | "ogg"
-                        | "opus"
-                )
-            })
-            .cloned()
-            .collect();
+        let tracks: Vec<_> = files.iter().filter(|p| is_audio(p)).cloned().collect();
         let mut images: Vec<_> = files
             .iter()
             .filter(|p| matches!(extension(p).as_str(), "png" | "jpg" | "jpeg" | "webp"))
@@ -1006,26 +1322,21 @@ fn walk(root: &Path) -> Result<(Vec<Entry>, usize)> {
                 .then_with(|| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()))
         });
         if folder == root {
-            for track in tracks {
-                let name = track
-                    .file_stem()
+            let stem = |p: &PathBuf| {
+                p.file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .nfc()
                     .collect::<String>()
-                    .to_lowercase();
-                let cover = images
-                    .iter()
-                    .find(|p| {
-                        p.file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .nfc()
-                            .collect::<String>()
-                            .to_lowercase()
-                            == name
-                    })
-                    .cloned();
+                    .to_lowercase()
+            };
+            // Each song's own image by name: one look-up per song, the first in the order above.
+            let mut covers: HashMap<String, &PathBuf> = HashMap::new();
+            for image in &images {
+                covers.entry(stem(image)).or_insert(image);
+            }
+            for track in tracks {
+                let cover = covers.get(&stem(&track)).map(|p| (*p).clone());
                 output.push(Entry {
                     folder: folder.into(),
                     tracks: vec![track.clone()],
@@ -1042,14 +1353,13 @@ fn walk(root: &Path) -> Result<(Vec<Entry>, usize)> {
             });
         }
         for directory in directories {
-            visit(root, &directory, output, encrypted)?;
+            visit(root, &directory, output, skipped)?;
         }
         Ok(())
     }
     let mut output = Vec::new();
-    let mut encrypted = 0;
-    visit(root, root, &mut output, &mut encrypted)?;
-    Ok((output, encrypted))
+    visit(root, root, &mut output, skipped)?;
+    Ok(output)
 }
 
 /// A song's public record: its stored fields without the private ones, plus its own album and
@@ -1237,5 +1547,23 @@ mod tests {
         current["descriptionSource"]["checkedAt"] = json!("2026-09-07T00:00:00Z");
         merge_online(&current, &mut album);
         assert_eq!(album["description"], "latest introduction");
+    }
+
+    #[test]
+    fn a_song_or_cover_gone_since_the_folder_was_listed_was_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("data")).unwrap();
+        let folder = dir.path().join("music").join("歌单");
+        fs::create_dir_all(&folder).unwrap();
+        let entry = Entry {
+            folder: folder.clone(),
+            tracks: vec![folder.join("gone.wav")],
+            single: None,
+            cover: Some(folder.join("gone.png")),
+        };
+        let mut unreadable = 0;
+        let album = store.read_album(&dir.path().join("music"), entry, "album-x", None, &mut unreadable);
+        assert_eq!(album, Ok(None));
+        assert_eq!(unreadable, 0, "gone is not unreadable");
     }
 }

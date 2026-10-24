@@ -26,13 +26,28 @@ pub fn get_header(request: &Request, name: &str) -> Option<String> {
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
         .map(|h| h.value.to_string())
 }
-pub fn json_response(request: Request, status: u16, value: Value) {
-    let response = Response::from_data(serde_json::to_vec(&value).unwrap())
+fn json_reply(status: u16, value: &Value) -> Response<Cursor<Vec<u8>>> {
+    Response::from_data(serde_json::to_vec(value).unwrap())
         .with_status_code(status)
         .with_header(header("Content-Type", "application/json; charset=utf-8"))
         .with_header(header("Cache-Control", "no-store"))
-        .with_header(header("X-Content-Type-Options", "nosniff"));
-    let _ = request.respond(response);
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+}
+pub fn json_response(request: Request, status: u16, value: Value) {
+    let _ = request.respond(json_reply(status, &value));
+}
+/// A 200 JSON reply with its tag (ETag), which a later request may send back (If-None-Match).
+pub fn tagged_json_response(request: Request, value: Value, tag: &str) {
+    let _ = request.respond(json_reply(200, &value).with_header(header("ETag", tag)));
+}
+/// The answer to a request that sent the tag of what it has: unchanged, no body.
+pub fn not_modified(request: Request, tag: &str) {
+    let _ = request.respond(
+        Response::empty(304)
+            .with_header(header("ETag", tag))
+            .with_header(header("Cache-Control", "no-store"))
+            .with_header(header("X-Content-Type-Options", "nosniff")),
+    );
 }
 /// A POST's JSON object (at most 128 KiB).
 pub fn body(request: &mut Request) -> Result<Value, (u16, String)> {
@@ -129,6 +144,10 @@ pub fn parse_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>
     Ok(Some((start, end.min(size - 1))))
 }
 pub fn serve_file(request: Request, file: AllowedFile, cache: &str) {
+    serve_file_with(request, file, cache, Vec::new())
+}
+/// serve_file, with `extra` headers after its own (not on an error, which is JSON).
+pub fn serve_file_with(request: Request, file: AllowedFile, cache: &str, extra: Vec<Header>) {
     let resolved = (|| -> Result<_, (u16, String)> {
         let failure = |e: std::io::Error| {
             (
@@ -143,8 +162,10 @@ pub fn serve_file(request: Request, file: AllowedFile, cache: &str) {
                 e.to_string(),
             )
         };
-        let root = dunce::canonicalize(&file.root).map_err(failure)?;
-        let path = dunce::canonicalize(&file.path).map_err(failure)?;
+        // Both in the one form the system gives (`\\?\C:\...`): dunce would shorten the folder but
+        // not a path over 260 characters inside it, which then never starts with the folder.
+        let root = std::fs::canonicalize(&file.root).map_err(failure)?;
+        let path = std::fs::canonicalize(&file.path).map_err(failure)?;
         if !path.starts_with(&root) {
             return Err((403, "文件已移出允许的目录".into()));
         }
@@ -161,6 +182,7 @@ pub fn serve_file(request: Request, file: AllowedFile, cache: &str) {
             header("X-Content-Type-Options", "nosniff"),
             header("Referrer-Policy", "same-origin"),
         ];
+        headers.extend(extra);
         if let Ok(modified) = metadata.modified() {
             let date: chrono::DateTime<chrono::Utc> = modified.into();
             headers.push(header(
