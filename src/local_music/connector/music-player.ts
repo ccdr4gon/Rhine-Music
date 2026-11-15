@@ -1,3 +1,4 @@
+import { playbackMode, type PlaybackMode } from "../../playback-mode";
 import type { MusicTrack } from "../../music-types";
 
 export interface MusicPlayerState {
@@ -5,6 +6,7 @@ export interface MusicPlayerState {
   currentTrack: MusicTrack | null;
   queue: readonly MusicTrack[];
   currentIndex: number;
+  playbackMode: PlaybackMode;
   playing: boolean;
   loading: boolean;
   duration: number;
@@ -59,10 +61,14 @@ export class MusicPlayer {
   private continued?: string;
   /** Songs skipped in a row because they could not be read (failSong). */
   private skips = 0;
+  private shuffleRemaining: string[] = [];
+  private shuffleHistory: string[] = [];
+  private shuffleCursor = -1;
 
   constructor(
     options: {
       volume?: number;
+      playbackMode?: PlaybackMode;
       songFadeEnabled?: boolean;
       bgmVolume?: number;
       bgmEnabled?: boolean;
@@ -72,6 +78,7 @@ export class MusicPlayer {
       currentTrack: null,
       queue: [],
       currentIndex: -1,
+      playbackMode: playbackMode(options.playbackMode) ?? "playOrder",
       playing: false,
       loading: false,
       duration: 0,
@@ -125,6 +132,7 @@ export class MusicPlayer {
     const queue = uniqueTracks(tracks);
     const id = this.value.currentTrack?.id;
     const index = queue.findIndex((track) => track.id === id);
+    this.prepareQueue(queue);
     this.value.queue = queue;
     if (id && index === -1) {
       this.stop();
@@ -152,6 +160,17 @@ export class MusicPlayer {
       return;
     }
     const track = queue[index];
+    this.prepareQueue(queue);
+    if (this.value.playbackMode === "playRandom" && this.shuffleHistory[this.shuffleCursor] !== id) {
+      if (this.shuffleHistory[this.shuffleCursor + 1] === id) this.shuffleCursor++;
+      else {
+        this.shuffleHistory.splice(this.shuffleCursor + 1);
+        this.shuffleHistory.push(id);
+        if (this.shuffleHistory.length > 1000) this.shuffleHistory.shift();
+        this.shuffleCursor = this.shuffleHistory.length - 1;
+      }
+      this.shuffleRemaining = this.shuffleRemaining.filter((key) => key !== id);
+    }
     // Updating the queue in a play request keeps cross-album switches in the same fade.
     this.value.queue = queue;
     const request = ++this.operation;
@@ -250,11 +269,44 @@ export class MusicPlayer {
     if (track) await this.play(track.id);
   }
 
+  setPlaybackMode(mode: PlaybackMode): void {
+    if (this.disposed || !playbackMode(mode) || mode === this.value.playbackMode) return;
+    this.value.playbackMode = mode;
+    this.resetShuffle();
+    this.emit();
+  }
+  private resetShuffle(): void {
+    this.shuffleRemaining = [];
+    this.shuffleHistory = this.value.currentTrack ? [this.value.currentTrack.id] : [];
+    this.shuffleCursor = this.shuffleHistory.length - 1;
+  }
+  private prepareQueue(queue: readonly MusicTrack[]): void {
+    if (queue.length !== this.value.queue.length || queue.some((song, i) => song.id !== this.value.queue[i].id)) this.resetShuffle();
+    const ids = new Set(queue.map((song) => song.id));
+    this.shuffleHistory = this.shuffleHistory.filter((id) => ids.has(id));
+    this.shuffleCursor = Math.min(this.shuffleCursor, this.shuffleHistory.length - 1);
+  }
+  private nextSong(ended: boolean): MusicTrack | undefined {
+    const { queue, currentIndex, playbackMode: mode, currentTrack } = this.value;
+    if (!queue.length) return;
+    if (ended && mode === "playOneCycle") return currentTrack ?? undefined;
+    if (mode === "playRandom") {
+      const ahead = this.shuffleHistory[this.shuffleCursor + 1];
+      if (ahead) return queue.find((song) => song.id === ahead);
+      if (!this.shuffleRemaining.length) this.shuffleRemaining = queue.filter((song) => song.id !== currentTrack?.id).map((song) => song.id);
+      const [id] = this.shuffleRemaining.splice(Math.floor(Math.random() * this.shuffleRemaining.length), 1);
+      return queue.find((song) => song.id === id) ?? queue[0];
+    }
+    return queue[currentIndex + 1] ?? (mode !== "playOrder" ? queue[0] : undefined);
+  }
+
   async next(): Promise<void> {
     if (this.disposed) return;
-    const track = this.value.queue[this.value.currentIndex + 1];
-    if (track) await this.play(track.id);
-    else this.stop();
+    const track = this.nextSong(false);
+    if (track) {
+      if (track.id === this.value.currentTrack?.id) this.seek(0);
+      await this.play(track.id);
+    } else this.stop();
   }
 
   async previous(): Promise<void> {
@@ -266,7 +318,11 @@ export class MusicPlayer {
       this.seek(0);
       return;
     }
-    const track = this.value.queue[Math.max(0, this.value.currentIndex - 1)];
+    const { queue, currentIndex, playbackMode: mode } = this.value;
+    const history = mode === "playRandom" && this.shuffleCursor > 0
+      ? this.shuffleHistory[--this.shuffleCursor] : undefined;
+    const index = currentIndex <= 0 && mode !== "playOrder" && mode !== "playRandom" ? queue.length - 1 : Math.max(0, currentIndex - 1);
+    const track = mode === "playRandom" ? queue.find((song) => song.id === history) ?? this.value.currentTrack : queue[index];
     if (track) {
       if (track.id === this.value.currentTrack?.id) this.seek(0);
       await this.play(track.id);
@@ -559,7 +615,7 @@ export class MusicPlayer {
     this.value.playing = false;
     this.value.loading = false;
     this.value.currentTime = this.value.duration;
-    const next = this.value.queue[this.value.currentIndex + 1];
+    const next = this.nextSong(true);
     if (next) {
       // No idle intermediate state, so BGM never appears between songs.
       void this.start(next.id, undefined, true);
@@ -601,7 +657,7 @@ export class MusicPlayer {
         }
       }
       if (request !== this.operation || this.disposed) return;
-      const next = skip ? this.value.queue[this.value.currentIndex + 1] : undefined;
+      const next = skip ? this.nextSong(false) : undefined;
       if (!next) {
         this.fail(missing ? "找不到这首歌的文件：它可能已被移动或删除，请重新扫描音乐库。" : message);
         return;

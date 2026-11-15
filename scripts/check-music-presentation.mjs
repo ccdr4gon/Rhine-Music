@@ -33,6 +33,11 @@ function fixture({ reduced = false } = {}) {
       events.push({ select: structuredClone(selection) });
       ready.archive = reduced;
     },
+    travel(selection) {
+      events.push({ travel: structuredClone(selection) });
+      ready.archive = reduced;
+      ready.presentation = false;
+    },
     switchDetail(selection) {
       events.push({ switchDetail: structuredClone(selection) });
       ready.archive = false;
@@ -711,4 +716,40 @@ test('search during a parallel switch retains the archive route; reset invalidat
   f.motion.update();
   assert.equal(f.motion.phase, 'archive');
   assert.equal(f.motion.switchingTogether, false);
+});
+
+
+test('search overlaps text exit and travel, then opens on target arrival without an idle archive stop', () => {
+  const f = fixture(); f.openDetail(); f.events.length = 0;
+  let arrived = false; f.ports.travelReady = () => arrived;
+  f.motion.search({index:7});
+  assert.equal(f.motion.phase, 'returning');
+  assert.deepEqual(f.events.filter(e=>typeof e==='object'), [{travel:{index:7,route:'search'}}]);
+  assert.equal(f.menuExits.length,1,'old text is still exiting when travel has already begun');
+  assert.equal(f.events.includes('mode:archive'),false,'search retains the opened camera view');
+  assert.equal(f.events.includes('camera:return'),false);
+  f.motion.update(); assert.equal(f.motion.phase,'returning');
+  f.finishMenu(); arrived=true;
+  f.motion.update(); assert.equal(f.motion.phase,'opening','do not wait for the final resting camera tail');
+  assert.equal(f.events.includes('browse:show'),false);
+  while(f.browseExits.length)f.finishBrowse();
+  f.ready.presentation=true; f.motion.update();assert.equal(f.motion.phase,'detail');
+});
+
+test('a newer search wins and Escape cancels reopening without an old exit callback reviving it', () => {
+  const f = fixture();f.openDetail();f.events.length=0;
+  f.motion.search({index:2});f.motion.search({index:9});
+  assert.deepEqual(f.events.filter(e=>typeof e==='object').map(e=>e.travel.index),[2,9]);
+  f.finishMenu();assert.equal(f.motion.phase,'returning');
+  f.motion.back();f.finishMenu();f.ready.archive=true;f.motion.update();
+  assert.equal(f.motion.phase,'archive');
+  assert.equal(f.events.includes('camera:enter'),false);
+  assert.equal(f.events.at(-1),'browse:show');
+});
+
+test('reduced-motion search still selects the target and completes one opening', () => {
+  const f=fixture({reduced:true});f.openDetail();f.events.length=0;
+  f.motion.search({index:3});f.motion.update();f.motion.update();
+  assert.equal(f.motion.phase,'detail');
+  assert.equal(f.events.filter(e=>e==='camera:enter').length,1);
 });

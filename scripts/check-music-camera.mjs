@@ -1,3 +1,4 @@
+import { searchCaseRate, searchCaseVisible } from "../src/search-motion.ts";
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor,
@@ -409,5 +410,36 @@ const radians = Math.PI / 180;
     assert.ok(Math.abs(measured - Math.hypot(rows * ROW_SPACING, lanes * COLUMN_SPACING * MUSIC_LENS.shelf.lane)) < 1e-9, `rows ${rows}, lanes ${lanes}: the height above the shelf does not count`);
   }
 }
+// The search prelude folds the playlist chain before the delayed camera starts.
+const searchFold = new MusicPlacementMotion();
+searchFold.update(1, 2, false);
+searchFold.update(0, 0, false, .5);
+assert.equal(searchFold.value, 1, 'retiming preserves the initial pose');
+searchFold.update(0, .25, false, .5);
+assert.ok(searchFold.value > 0 && searchFold.value < 1);
+searchFold.update(0, .25, false, .5);
+assert.equal(searchFold.value, 0);
+assert.equal(searchFold.velocity, 0);
+assert.equal(searchFold.settled, true, 'chain is folded before travel begins');
+searchFold.update(1, .5, false);
+assert.equal(searchFold.settled, false, 'normal opening keeps the original duration');
+searchFold.update(1, 2, false);
+assert.equal(searchFold.value, 1);
+
+
+const referenceCase = {left:100,top:100,right:500,bottom:500};
+assert.equal(searchCaseVisible(undefined,referenceCase,800,600),false);
+assert.equal(searchCaseVisible({left:-390,top:200,right:10,bottom:600},referenceCase,800,600),false,'a sliver cannot start extraction');
+assert.equal(searchCaseVisible({left:200,top:200,right:240,bottom:240},referenceCase,800,600),false,'a tiny distant case is not a readable entrance');
+assert.equal(searchCaseVisible({left:200,top:500,right:600,bottom:900},referenceCase,800,600),true,'a readable preview enters before rising');
+const slowCase = {...referenceCase,left:102,right:502};
+const fastCase = {...referenceCase,left:140,right:540};
+assert.ok(searchCaseRate(referenceCase,fastCase,1/60,400)>searchCaseRate(referenceCase,slowCase,1/60,400));
+assert.ok(searchCaseRate(referenceCase,fastCase,1/60,400)<=12);
+assert.ok(searchCaseRate(referenceCase,referenceCase,1/60,400)>=8);
+const retimed = new MusicPlacementMotion();retimed.update(1,2,false);retimed.update(0,.1,false,.5);
+const poseBefore=retimed.value, velocityBefore=retimed.velocity;
+retimed.update(0,0,false,.32);assert.equal(retimed.value,poseBefore);assert.equal(retimed.velocity,velocityBefore);
+retimed.update(0,.32,false,.32);assert.equal(retimed.value,0);assert.equal(retimed.settled,true);
 console.log('Music camera passed: continuous motion, frame-rate independence, original-film oblique pause/frontal ending, shared entry/return gates, elevated detail, interruption, replay and reduced motion.');
 console.log(`Presentation pan: ${(pan240.early * 100).toFixed(3)}% at 0.2 s; 95% at ${pan240.t95.toFixed(3)} s (rendered camera, 240 Hz).`);

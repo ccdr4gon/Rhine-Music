@@ -222,21 +222,6 @@
   color: var(--muted);
   white-space: nowrap;
 }
-.music-app .drum-steps {
-  display: flex;
-  gap: 2px;
-  color: var(--ink);
-}
-.music-app .drum-step {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  color: var(--ink);
-}
-.music-app .drum-step:not(:disabled):hover {
-  opacity: 0.65;
-}
 .music-app .chevron {
   display: block;
   /* 7 px plus the 1.5 px border, as the design's content-box chevrons. */
@@ -399,13 +384,6 @@
   align-items: center;
   gap: 16px;
   height: 44px;
-}
-.music-app .album-stepper > button {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  color: var(--ink);
 }
 .music-app .album-stepper > button:not(:disabled):hover {
   opacity: 0.65;
@@ -678,10 +656,6 @@
     height: 28px;
     font-size: 11px;
   }
-  .music-app[data-layout="desktop"] .drum-step {
-    width: 28px;
-    height: 28px;
-  }
   .music-app[data-layout="desktop"] .drum-row {
     grid-template-columns: 26px minmax(0, 1fr) 7px 33px;
     gap: 9px;
@@ -717,10 +691,6 @@
   .music-app[data-layout="desktop"] .album-stepper {
     gap: 19px;
     height: 52px;
-  }
-  .music-app[data-layout="desktop"] .album-stepper > button {
-    width: 30px;
-    height: 30px;
   }
   .music-app[data-layout="desktop"] #album-ticks.music-ruler {
     --tick-height: 35px;

@@ -223,7 +223,6 @@ export function songSceneMarkup(): string {
     <div class="song-selected">
       <h2 id="song-title" class="song-title"></h2>
       <p id="song-subtitle" class="song-subtitle"></p>
-      <div class="song-steps" role="group" aria-label="切换专辑"><button id="song-prev" data-action="prev" aria-label="上一张专辑"><i class="chevron chevron-up" aria-hidden="true"></i></button><button id="song-next" data-action="next" aria-label="下一张专辑"><i class="chevron chevron-down" aria-hidden="true"></i></button></div>
     </div>
     <div id="song-list" class="song-list" role="group" tabindex="-1"></div>
   </div>`;
@@ -626,7 +625,6 @@ export class SongListView {
   /** The tab's number, for the caller's reel (the module stays free of DOM libraries). */
   readonly tabNumber: HTMLElement;
   private readonly title: HTMLElement;
-  private readonly steps: HTMLElement;
   private readonly glass: HTMLElement;
   private readonly text: Record<"subtitle" | "tab" | "tabLabel" | "tabTotal" | "count" | "countNote" | "label", HTMLElement>;
   private rows: HTMLButtonElement[] = [];
@@ -669,7 +667,6 @@ export class SongListView {
     this.list = find(".song-list");
     this.tabNumber = find("#song-tab-number");
     this.title = find(".song-title");
-    this.steps = find(".song-steps");
     this.glass = find(".song-glass");
     this.text = {
       subtitle: find(".song-subtitle"),
@@ -739,7 +736,6 @@ export class SongListView {
     const { root, text } = this;
     if (root.dataset.kind !== model.kind) {
       root.dataset.kind = model.kind;
-      this.steps.setAttribute("aria-label", model.kind === "album" ? "切换专辑" : "切换歌曲");
     }
     const set = (element: HTMLElement, value: string) => {
       if (element.textContent !== value) element.textContent = value;

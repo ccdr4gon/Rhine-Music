@@ -68,13 +68,18 @@ export function takeSourceSwitch(storage: SwitchStorage | undefined, page: Sourc
  * still listed, as a source of its own. Each module keeps its data and its connector in its
  * own folder (docs/architecture/overview.md).
  */
+// QQ remains in the identity registry only to recognize old preferences and reject its sessions.
 export const PLAYER_MODULES = [NETEASE_PLAYER, QQ_MUSIC_PLAYER] as const;
+export function unsupportedPlayer(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const { player, app } = value as { player?: unknown; app?: unknown };
+  return player === "qqmusic" || (typeof app === "string" && app.toLowerCase() === "qqmusic.exe");
+}
 
 /**
  * The default link while no player was ever connected (AGENTS.md, 2026-10-04): NetEase Cloud Music
- * is connected when it is found, once the user opens 播放器 (the first start is 本地音乐). QQ Music
- * and every other player are connected by themselves only once the user has picked them
- * (playerLinks).
+ * is connected when it is found while a player is current. Other supported players reconnect
+ * only after the user picked them; QQ is excluded even when an old preference names it.
  */
 export const PREFERRED_PLAYER: PreferredPlayer = NETEASE_PLAYER;
 
@@ -87,7 +92,7 @@ export const PREFERRED_PLAYER: PreferredPlayer = NETEASE_PLAYER;
  * is what the preferences hold; `remember` saves a new one.
  */
 export function playerLinks(saved: unknown, remember: (link: SourceLink | null) => void): SourceLinks {
-  return { players: PLAYER_MODULES, fallback: PREFERRED_PLAYER, remembered: readSourceLink(saved, PLAYER_MODULES), remember };
+  return { players: PLAYER_MODULES, fallback: PREFERRED_PLAYER, remembered: unsupportedPlayer(saved) ? null : readSourceLink(saved, PLAYER_MODULES), remember };
 }
 
 /** The known player a source belongs to, if any. */
@@ -99,15 +104,15 @@ export const playerSource = (source: ExternalMediaSource): ExternalMediaSource =
   playerModule(source)?.show?.(source) ?? source;
 
 /**
- * The media port the app reads: each known player's sources as its module shows them, everything
- * else as the snapshot has it. The covers the connection holds, and controls, go to the port
+ * The media port the app reads: QQ is excluded; other known sources use their module names,
+ * and the remaining supported sources keep the snapshot fields. The covers the connection holds, and controls, go to the port
  * unchanged (the same source, action, position and global media-key consent).
  */
 export function playerMediaPort(port: MediaPort): MediaPort {
   return {
     async snapshot(knownCovers) {
       const snapshot = await port.snapshot(knownCovers);
-      return { ...snapshot, sources: snapshot.sources.map(playerSource) };
+      return { ...snapshot, sources: snapshot.sources.filter((source) => !unsupportedPlayer(source)).map(playerSource) };
     },
     control: (sourceId, action, position, allowGlobalMediaKeys) => port.control(sourceId, action, position, allowGlobalMediaKeys),
   };

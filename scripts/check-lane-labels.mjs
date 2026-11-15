@@ -694,9 +694,9 @@ test('the scene places the names from their slots and the sideways track alone',
   assert.match(keep, /const steps = \(way: 1 \| -1\) => laneStepPoses\(way, MUSIC_PREVIEW_LIFT\)\.map\(\(\{ z, y \}\) => at\(z, y\)\);/);
   // The steps' springs are update()'s on the shelf, and the wheel's commits come at least 90 ms apart.
   assert.deepEqual([LANE_STEP.rail, LANE_STEP.shoulder, LANE_STEP.lift, LANE_STEP.apart], [3.7, 5, 4.2, 0.09]);
-  assert.match(scene, /damp\(this\.shoulder, selectedRow, this\.reduced \? 35 : detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 5, dt\);/);
-  assert.match(scene, /damp\(\s*this\.rail,\s*cinematic \? 0 : -2\.17 - chosen\.z,\s*this\.reduced \? 35 : detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 3\.7,\s*dt,\s*\);/);
-  assert.match(scene, /else damp\(this\.lift, liftTarget, detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 4\.2, dt\);/);
+  assert.match(scene, /damp\(this\.shoulder, selectedRow, this\.reduced \? 35 : fastTracks \? MUSIC_ALBUM_SWITCH_RATE : 5, dt\);/);
+  assert.match(scene, /damp\(\s*this\.rail,\s*cinematic \? 0 : -2\.17 - chosen\.z,\s*this\.reduced \? 35 : fastTracks \? MUSIC_ALBUM_SWITCH_RATE : 3\.7,\s*dt,\s*\);/);
+  assert.match(scene, /else damp\(this\.lift, liftTarget, this\.searchIncoming\?\.entered \? this\.searchIncoming\.rate : detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 4\.2, dt\);/);
   assert.match(scene, /this\.lift\.value = 0;\s*this\.lift\.velocity = 0;\s*\}\s*this\.selectedSlot = next;/, 'each new selection lifts from 0');
   assert.match(read('src/wheel-navigation.ts'), /export const WHEEL_COMMIT_INTERVAL_MS = 90;/);
   assert.match(keep, /const hop = \[at\(0, PLAY_GESTURE\.height \+ idle\)\];\s*const keep = \[convexHull\(rest\.flatMap\(\(b\) => b\.corners\)\)\];/);

@@ -155,11 +155,6 @@
 .music-app .detail-tag-of {
   font-variant-numeric: tabular-nums;
 }
-.music-app .detail-steps {
-  display: flex;
-  flex: none;
-  gap: 4px;
-}
 .music-app .detail-step {
   display: grid;
   place-items: center;
@@ -167,9 +162,6 @@
   height: 26px;
   color: var(--ink);
   transition: opacity 120ms ease;
-}
-.music-app .detail-step:not(:disabled):hover {
-  opacity: 0.65;
 }
 /* A lone live track: the player it comes from (opens the player panel). */
 .music-app .detail-source {
@@ -985,10 +977,6 @@
     gap: 12px;
     font-size: 12px;
   }
-  .music-app[data-layout="desktop"] .detail-step {
-    width: 30px;
-    height: 30px;
-  }
   .music-app[data-layout="desktop"] .detail-title,
   .music-app[data-layout="desktop"] .detail-title-probe {
     font-size: 44px;
@@ -1228,3 +1216,33 @@
 .music-app .detail-tag-of { display: inline-flex; align-items: baseline; gap: 4px; }
 .music-app .detail-tag .music-rolling-number,
 .music-app .detail-tag-of .music-rolling-number { vertical-align: baseline; }
+
+/* Detail transport and timeline share one line. The range retains its keyboard/drag target. */
+.music-app .detail-player-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 22px;
+  border-top: 0;
+  padding-top: 1px;
+}
+.music-app .detail-player-row .detail-transport { flex: none; margin: 0; border: 0; }
+.music-app .detail-player-row .detail-timeline-wrap { flex: 1; min-width: 0; height: auto; margin: 0; }
+.music-app .detail-player-row .detail-timeline-wrap::before { display: none; }
+.music-app .detail-player-row .detail-timeline { display: flex; align-items: center; gap: 14px; margin: 0; }
+.music-app .detail-player-row .detail-timeline output { position: static; order: 1; flex: none; }
+.music-app .detail-player-row input.detail-seek { flex: 1; min-width: 0; width: 0; height: 24px; margin: 0; }
+.music-app input.detail-seek::-webkit-slider-thumb { opacity: 0; }
+.music-app input.detail-seek::-moz-range-thumb { opacity: 0; }
+.music-app .detail-player-row .detail-timeline-wrap[data-timeline="hidden"] input { visibility: visible; opacity: 1; pointer-events: none; }
+.music-app .detail-player-row .detail-timeline-wrap[data-timeline="hidden"] input::-webkit-slider-runnable-track {
+  background: linear-gradient(var(--line), var(--line)) 4.5px 4px / calc(100% - 9px) 1px no-repeat;
+}
+.music-app .detail-player-row .detail-timeline-wrap[data-timeline="hidden"] input::-moz-range-progress { background: transparent; }
+@media (max-width: 600px) {
+  .music-app .detail-player-row { gap: 6px; }
+  .music-app .detail-player-row .detail-control { padding-inline: 12px; }
+  .music-app .detail-player-row .detail-control:first-child { padding-left: 3px; }
+  .music-app .detail-player-row .detail-timeline { gap: 8px; }
+}

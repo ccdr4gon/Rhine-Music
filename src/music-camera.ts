@@ -77,20 +77,25 @@ export class MusicPlacementMotion {
   velocity = 0;
   acceleration = 0;
   private target = 0;
-  private readonly duration = 1.45 / 1.05;
+  private duration = 1.45 / 1.05;
   private elapsed = this.duration;
   private coefficients = [0, 0, 0, 0, 0, 0];
 
   get settled() { return this.elapsed >= this.duration; }
 
-  update(target: number, dt: number, reduced: boolean) {
+  update(target: number, dt: number, reduced: boolean, duration = 1.45 / 1.05) {
     if (reduced) {
+      this.duration = duration;
       this.target = this.value = target;
       this.velocity = this.acceleration = 0;
       this.elapsed = this.duration;
       return this.value;
     }
-    if (target !== this.target) {
+    if (target === this.target && duration !== this.duration && this.settled) {
+      this.duration = this.elapsed = duration;
+    }
+    if (target !== this.target || duration !== this.duration) {
+      this.duration = duration;
       this.target = target;
       this.elapsed = 0;
       const t = this.duration;

@@ -209,8 +209,8 @@ test('rows come in blocks of exactly known size', () => {
 
 test('the scene markup carries the hooks the app relies on', () => {
   const markup = songSceneMarkup();
-  assert.match(markup, /<button id="song-prev" data-action="prev" aria-label="[^"]+">/);
-  assert.match(markup, /<button id="song-next" data-action="next" aria-label="[^"]+">/);
+  assert.doesNotMatch(markup, /id="song-prev"/);
+  assert.doesNotMatch(markup, /id="song-next"/);
   assert.match(markup, /<div id="song-glass" class="song-glass">/);
   assert.match(markup, /<div id="song-list" class="song-list"/);
   const ids = [...markup.matchAll(/ id="([^"]+)"/g)].map(match => match[1]);
@@ -228,7 +228,7 @@ test('the scene markup carries the hooks the app relies on', () => {
   // number reel, the count with the way back to the playing song, the selected song with its
   // steps and the list; no note any more (the owner, 2026-10-07: no descriptive text).
   const glass = markup.slice(markup.indexOf('<div id="song-glass"'));
-  for (const id of ['song-tab-number', 'song-tab-total', 'song-go-playing', 'song-count', 'song-count-note', 'song-title', 'song-subtitle', 'song-prev', 'song-next', 'song-list'])
+  for (const id of ['song-tab-number', 'song-tab-total', 'song-go-playing', 'song-count', 'song-count-note', 'song-title', 'song-subtitle', 'song-list'])
     assert.ok(glass.includes(` id="${id}"`), `${id} is on the pane`);
   assert.doesNotMatch(markup, /song-note/);
   assert.ok(glass.indexOf('id="song-go-playing"') < glass.indexOf('id="song-count"'), '● 012 before 共 N 首');
@@ -313,8 +313,6 @@ test('the selected title: one size, at most three lines (two stacked), never cut
   assert.match(rule('.song-subtitle'), /font-size: max\(11px, calc\(var\(--songs-u\) \* 1\.2222\)\);\s*line-height: 1\.4;/);
   assert.match(rule('.song-selected'), /gap: calc\(var\(--songs-u\) \* 1\.1111\);/);
   assert.match(rule('.song-selected'), /padding: calc\(var\(--songs-u\) \* 0\.8889\) /);
-  assert.match(rule('.song-steps'), /margin-top: calc\(var\(--songs-u\) \* 1\.1111\);/);
-  assert.match(rule('.song-steps button'), /height: max\(24px, calc\(var\(--songs-u\) \* 2\.8889\)\);/);
   assert.match(rule('.song-title-line'), /-webkit-line-clamp: 3;/);
   assert.match(rule('.song-title-line'), /overflow-wrap: anywhere;/);
   assert.match(rule('.music-song[data-panel="stacked"] .song-title-line'), /-webkit-line-clamp: 2;/);

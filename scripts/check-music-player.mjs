@@ -405,3 +405,40 @@ test('resuming a paused song that is at its very end goes on with the playlist, 
   assert.equal(env.song('two').playCalls, 1)
   player.dispose()
 })
+
+
+test('ordinary modes preserve playback on change; loops and shuffle follow their own order', async (t) => {
+  const env = environment(t)
+  const player = new MusicPlayer({ bgmEnabled: false, songFadeEnabled: false })
+  const queue = ['a', 'b', 'c'].map(track)
+  await player.play('c', queue)
+  const audio = env.song('c'), calls = audio.playCalls
+  player.setPlaybackMode('playCycle')
+  assert.equal(env.song('c'), audio)
+  assert.equal(audio.playCalls, calls, 'changing mode does not replay the current song')
+  audio.finish(); await settle()
+  assert.equal(player.state.currentTrack.id, 'a', 'list loop wraps at the end')
+  player.setPlaybackMode('playOneCycle')
+  env.song('a').finish(); await settle()
+  assert.equal(player.state.currentTrack.id, 'a', 'single loop repeats on ended')
+  assert.equal(player.state.playing, true)
+  await player.next()
+  assert.equal(player.state.currentTrack.id, 'b', 'manual next still advances in single loop')
+  player.setPlaybackMode('playRandom')
+  const first = player.state.currentTrack.id
+  await player.next(); const second = player.state.currentTrack.id
+  await player.next(); const third = player.state.currentTrack.id
+  assert.equal(new Set([first, second, third]).size, 3, 'shuffle visits every other song before repeating')
+  await player.previous()
+  assert.equal(player.state.currentTrack.id, second, 'shuffle previous follows the actual history')
+  await player.next()
+  assert.equal(player.state.currentTrack.id, third, 'next returns forward through that history')
+  assert.deepEqual(player.state.queue.map(song => song.id), ['a','b','c'], 'visual playlist is not reordered')
+  await player.play('d', [track('d')])
+  await player.next()
+  assert.equal(player.state.currentTrack.id, 'd', 'a replacement queue never plays old shuffle entries')
+  player.setPlaybackMode('playOrder')
+  env.song('d').finish(); await settle()
+  assert.equal(player.state.transport, 'idle', 'sequence still ends after the last song')
+  player.dispose()
+})

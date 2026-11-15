@@ -9,7 +9,7 @@ import {
   ExternalMediaConnection, mediaSourcesMarkup, readSourceLink,
 } from '../src/external_player/external-media.ts';
 import {
-  PLAYER_MODULES, pageSource, sourceAddress, markSourceSwitch, takeSourceSwitch, playerLinks, playerMediaPort,
+  PLAYER_MODULES, pageSource, sourceAddress, unsupportedPlayer, markSourceSwitch, takeSourceSwitch, playerLinks, playerMediaPort,
 } from '../src/music-sources.ts';
 
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -46,7 +46,7 @@ function connection(saved, sources) {
   return { media, told, calls, set: (next) => { list = next; } };
 }
 // A start of the client, as main.rs decides it (opens_player; its Rust unit tests are the reference).
-const remembers = (link) => !!link && typeof link === 'object' && !Array.isArray(link) && (typeof link.player === 'string'
+const remembers = (link) => !unsupportedPlayer(link) && !!link && typeof link === 'object' && !Array.isArray(link) && (typeof link.player === 'string'
   ? PLAYER_MODULES.some((player) => player.id === link.player)
   : typeof link.app === 'string' && link.app.length > 0 && link.app.length <= 512);
 const opensPlayer = (prefs) => {
@@ -120,27 +120,28 @@ test('opening 播放器 while no player was ever chosen: NetEase is the default 
   assert.deepEqual(without.told, []);
   assert.doesNotMatch(mediaSourcesMarkup(without.media), /默认/);
   // The user picks QQ Music: it is remembered by its module.
-  assert.equal(without.media.select('q1'), true);
-  assert.deepEqual(without.told, [{ player: 'qqmusic' }]);
+  assert.equal(without.media.select('q1'), false);
+  assert.equal(without.media.select('x1'), true);
+  assert.deepEqual(without.told, [{ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }]);
   assert.deepEqual([...both.calls, ...without.calls], [], 'choosing a source sends nothing to any player');
 });
 
 test('opening 播放器 with a player remembered: that player, and no other; after a disconnect, none', async () => {
-  const remembered = connection({ player: 'qqmusic' }, [netease('n1'), third('x1')]);
+  const remembered = connection({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, [netease('n1'), session('other')]);
   await remembered.media.refresh();
   assert.equal(remembered.media.selected, undefined, 'NetEase is not taken in its place');
   assert.equal(remembered.media.remembers, true);
-  assert.equal(remembered.media.preferred?.name, 'QQ音乐');
-  remembered.set([netease('n1'), qq('q2'), third('x1')]);
+  assert.equal(remembered.media.preferred?.name, 'Fictional Player');
+  remembered.set([netease('n1'), third('q2'), session('other')]);
   await remembered.media.refresh();
   assert.equal(remembered.media.selected?.id, 'q2');
   assert.deepEqual(remembered.told, [], 'the same player: nothing new to save');
   // 断开连接 forgets it (also with 本地音乐 current, before it was found): nothing connects by itself.
-  const forgotten = connection({ player: 'qqmusic' }, [netease('n1')]);
+  const forgotten = connection({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, [netease('n1')]);
   await forgotten.media.refresh();
   forgotten.media.disconnect();
   assert.deepEqual(forgotten.told, [null]);
-  forgotten.set([netease('n2'), qq('q3')]);
+  forgotten.set([netease('n2'), third('q3')]);
   await forgotten.media.refresh();
   assert.equal(forgotten.media.selected, undefined);
   const after = connection(null, [netease('n1'), qq('q1')]);
@@ -209,7 +210,7 @@ test('the next start opens what was chosen last: 本地音乐 first of all, a pl
   const first = undefined;
   assert.equal(opensPlayer(first), false, 'the first start ever: 本地音乐');
   assert.equal(opensPlayer({ source: 'local' }), false);
-  for (const link of [{ player: 'netease' }, { player: 'qqmusic' }, { app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }]) {
+  for (const link of [{ player: 'netease' }, { app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }]) {
     assert.equal(opensPlayer({ source: 'player', playerLink: link }), true, JSON.stringify(link));
     assert.equal(opensPlayer({ source: 'local', playerLink: link }), false, '本地音乐 chosen last keeps the player for 播放器 only');
     assert.deepEqual(readSourceLink(link, PLAYER_MODULES)?.player ?? readSourceLink(link, PLAYER_MODULES)?.app, link.player ?? link.app);
@@ -228,7 +229,7 @@ test('the next start opens what was chosen last: 本地音乐 first of all, a pl
 
 test('the app: one page per source, local playback and BGM only for 本地音乐, a switch reloads without the opening', () => {
   // The page's source is its address; nothing else decides it.
-  assert.match(app, /const currentSource: SourceKind = pageSource\(location\.search\);\nconst playerCurrent = currentSource === "player";/);
+  assert.match(app, /const currentSource: SourceKind = retiredPlayer \? "local" : pageSource\(location\.search\);\nconst playerCurrent = currentSource === "player";/);
   assert.equal(app.match(/pageSource\(/g).length, 1);
   assert.doesNotMatch(app, /searchParams\.set\("mode"|mode=external|"external-mode"|"local-mode"|changePlayerMode/);
   // The local player (its audio and the BGM) and the interface sounds exist only for 本地音乐.
@@ -362,4 +363,16 @@ test('a new main folder is looked for on the disk with the local music store unl
   const config = body(api, '"/api/config" | "/api/library/config" if post => {', '"/api/genre-rules" if get');
   assert.ok(config.indexOf('Store::checked_main_folder(store, roots)') >= 0 && config.indexOf('Store::checked_main_folder(store, roots)') < config.indexOf('store.lock()'), '/api/config: before the lock');
   assert.match(config, /update_config_checked\(input, checked\.as_deref\(\)\)/);
+});
+
+
+test('retired QQ preferences stay disconnected and native startup returns to local music', async () => {
+  for(const link of [{player:'qqmusic'}, {app:'QQMusic.exe',name:'QQ音乐'}, {app:'qqmusic.exe'}]) {
+    assert.equal(opensPlayer({source:'player',playerLink:link}),false);
+    const old=connection(link,[qq('q'),netease('n')]);await old.media.refresh();
+    assert.equal(old.media.selected,undefined);
+    assert.equal(old.media.remembers,false);
+    assert.deepEqual(old.calls,[]);
+  }
+  assert.match(app,/if \(retiredPlayer\) \{\s*preferences.playerLink = null;/);
 });

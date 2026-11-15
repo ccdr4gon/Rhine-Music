@@ -711,3 +711,21 @@
 .music-app[data-layout="portrait"][data-mode="detail"][data-menu="detail"] #music-toast {
   top: calc(var(--chrome-bottom, 46px) + 52px);
 }
+
+/* Same fine strokes and colour-only feedback as the header's other controls. */
+.music-app .music-topnav .playback-mode {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 30px;
+  padding: 3px;
+  color: var(--muted);
+  background: transparent;
+  transition: color .2s ease;
+}
+.music-app .music-topnav .playback-mode svg { width: 22px; height: 22px; }
+.music-app .music-topnav .playback-mode::after { display: none; }
+.music-app .music-topnav .playback-mode:not(:disabled):hover { color: var(--ink); }
+.music-app .music-topnav .playback-mode:disabled { opacity: .45; cursor: default; }

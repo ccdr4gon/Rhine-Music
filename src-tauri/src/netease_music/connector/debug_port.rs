@@ -6,12 +6,13 @@
 //! (play-session id, first-load flag, launch-restore record) and the queue entries' song
 //! ids, and the playback position from its progress slider; and, for the song it plays, the
 //! lyrics it has loaded (each line's time and text, their translation, and its word-timed
-//! lyrics when it has them; the owner, 2026-10-17). They dispatch only the four actions
+//! lyrics when it has them; the owner, 2026-10-17). They dispatch only the five actions
 //! NetEase's own interface dispatches: play a queue entry (its queue panel), seek in the
 //! current song (its progress slider), play one of the user's playlists from one of its songs
 //! (its 播放全部, which replaces the queue with the playlist; the owner, 2026-10-10), and load
 //! the lyrics of the song it plays (what its playing page does when it opens, from its cache
-//! or its server; the owner, 2026-10-17). Cookies, storage and account state are never read,
+//! or its server; the owner, 2026-10-17), and switch between the four ordinary playback modes
+//! (the owner, 2026-11-15). Cookies, storage and account state are never read,
 //! and nothing is stored in the page.
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -360,6 +361,23 @@ pub fn state() -> Result<DebugState, String> {
     state_at(PORT)
 }
 
+/// The ordinary modes only: leaving FM or AI can replace the queue, so those stay in NetEase.
+pub fn set_mode(mode: &str) -> Result<(), String> {
+    set_mode_at(PORT, mode)
+}
+fn set_mode_at(port: u16, mode: &str) -> Result<(), String> {
+    if !matches!(mode, "playOrder" | "playCycle" | "playRandom" | "playOneCycle") {
+        return Err("不支持的播放模式".into());
+    }
+    let value = run(port, &mode_script(mode), Instant::now() + PLAY_BUDGET).map_err(play_failure)?;
+    match value.as_str() {
+        Some("sent" | "current") => Ok(()),
+        Some("special") => Err("请在网易云中退出私人 FM 或心动模式后再切换".into()),
+        Some("store") => Err(ERR_STORE.into()),
+        _ => Err(ERR_PROTOCOL.into()),
+    }
+}
+
 pub fn play(track_id: &str) -> Result<(), String> {
     play_at(PORT, track_id)
 }
@@ -467,6 +485,21 @@ fn valid_page_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+const MODE_BODY: &str = r#"
+  const store = findStore();
+  if (!store) return 'store';
+  const playing = store.getState().playing;
+  if (!playing) return 'store';
+  if (!['playOrder', 'playCycle', 'playRandom', 'playOneCycle'].includes(playing.playingMode)) return 'special';
+  if (playing.playingMode === mode) return 'current';
+  store.dispatch({ type: 'playing/switchPlayingMode', payload: { playingMode: mode } });
+  return 'sent';
+"#;
+fn mode_script(mode: &str) -> String {
+    let mode = serde_json::to_string(mode).unwrap();
+    format!("(() => {{ const mode = {mode};{FIND_STORE}{MODE_BODY}}})()")
 }
 
 fn state_script() -> String {
@@ -1315,6 +1348,22 @@ mod tests {
         assert_eq!(play_at(port, "42").unwrap_err(), ERR_MISSING);
         let (port, _) = fake_devtools(targets(), json!("fm"));
         assert_eq!(play_at(port, "42").unwrap_err(), ERR_FM);
+    }
+
+    #[test]
+    fn ordinary_playback_modes_are_validated_and_dispatched() {
+        for mode in ["", "playFm", "playAi", "random", "playOrder';alert(1)//"] {
+            assert_eq!(set_mode_at(closed_port(), mode).unwrap_err(), "不支持的播放模式");
+        }
+        for mode in ["playOrder", "playCycle", "playRandom", "playOneCycle"] {
+            let (port, expressions) = fake_devtools(targets(), json!("sent"));
+            set_mode_at(port, mode).unwrap();
+            let scripts = expressions.lock().unwrap();
+            assert_eq!(scripts.len(), 1);
+            assert_eq!(scripts[0], mode_script(mode));
+        }
+        let (port, _) = fake_devtools(targets(), json!("special"));
+        assert!(set_mode_at(port, "playCycle").unwrap_err().contains("私人 FM"));
     }
 
     #[test]

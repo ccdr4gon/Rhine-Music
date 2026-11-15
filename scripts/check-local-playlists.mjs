@@ -121,7 +121,7 @@ test('a scan changes the shelf in place: the page is not loaded again, and only 
   assert.match(body('async function scan('), /const next = await scanLibrary\(roots\);\s*\+\+libraryStateVersion;[^\n]*\n(\s*\/\/[^\n]*\n)*\s*scanAsked = next\.scan\.startedAt;[\s\S]*await receiveLibrary\(next\);/);
   // 本地音乐's shelf keeps the selection's song, the camera and an open scene (scene.relayout; the
   // rest of that path is checked with NetEase's queue in check-external-media.mjs).
-  assert.match(body('async function applyLibrary('), /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
+  assert.match(body('async function applyLibrary('), /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| liveCard\) \? moved\(previousIndex\) : -1;/);
   // An idle poll sends the tag of the library the page has; an unchanged one is not read again.
   assert.match(body('async function loadLibrary('), /const next = await readLibraryChange\(force \? undefined : libraryTag\);\s*const available = apiAvailable;\s*apiAvailable = true;\s*if \(next && stateVersion === libraryStateVersion && !boot\?\.active\) await receiveLibrary\(next\.library, force, next\.tag\);\s*else if \(!next && !available\) \{/);
   assert.match(receive, /^async function receiveLibrary\(next: MusicLibrary, force = false, tag\?: string\) \{\s*libraryTag = tag;/, 'a library from a POST has no tag: the next poll reads it whole');

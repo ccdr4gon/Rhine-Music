@@ -266,7 +266,7 @@ test('the player modules: NetEase is the only default link while nothing was con
   assert.match(app, /new ExternalMediaConnection\(playerMediaPort\(nativeMediaPort\), playerLinks\(preferences\.playerLink, /);
 });
 
-test('the registry\'s port only renames QQ Music\'s and NetEase\'s media sessions: the window fallback, controls and errors pass through unchanged', async () => {
+test('the registry port excludes QQ Music and keeps supported sources, controls and errors unchanged', async () => {
   const { playerMediaPort } = await import('../src/music-sources.ts');
   const calls = [];
   let fail;
@@ -276,115 +276,30 @@ test('the registry\'s port only renames QQ Music\'s and NetEase\'s media session
   });
   const snapshot = await port.snapshot();
   // NetEase's session is listed as 网易云音乐 (the owner, 2026-10-06), not as Windows names it.
-  assert.deepEqual(snapshot.sources.map(item => item.name), ['QQ音乐', '网易云音乐', '网易云音乐（窗口标题）', 'Player a']);
-  const listed = snapshot.sources[1];
+  assert.deepEqual(snapshot.sources.map(item => item.name), ['网易云音乐', '网易云音乐（窗口标题）', 'Player a']);
+  const listed = snapshot.sources[0];
   assert.deepEqual([listed.id, listed.player, listed.kind, listed.app, listed.title], ['n1', 'netease', 'smtc', 'cloudmusic.exe', '当前曲目']);
   assert.equal(snapshot.warning, 'one warning');
-  assert.equal(await port.control('q1', 'seek', 12, false), 'sent');
+  assert.equal(await port.control('a', 'seek', 12, false), 'sent');
   await port.control('n1', 'toggle', undefined, true);
-  assert.deepEqual(calls, [['q1', 'seek', 12, false], ['n1', 'toggle', undefined, true]]);
+  assert.deepEqual(calls, [['a', 'seek', 12, false], ['n1', 'toggle', undefined, true]]);
   fail = new Error('unreadable');
   await assert.rejects(port.snapshot(), /unreadable/, 'an unreadable snapshot stays an error, never an empty list');
 });
 
-test('QQ Music is listed like any player: connected by itself only once the user picked it, never in place of another, no global keys, no NetEase features', async () => {
-  const { queueSettingMarkup } = await import('../src/netease_music/connector/settings.ts');
-  // As the app builds its connection: through the registry's port.
-  const app = (initial) => fixture(initial, NETEASE, playerMediaPort);
-  // Found alone or beside NetEase: listed under its own name, only NetEase is connected by itself.
-  const alone = app([qq('q1')]);
-  await alone.connection.refresh();
-  assert.equal(alone.connection.selected, undefined);
-  assert.equal(alone.connection.awaitsPreferred, true);
-  const listed = mediaSourcesMarkup(alone.connection);
-  assert.match(listed, /data-media-source="q1" aria-pressed="false"><span><strong>QQ音乐<\/strong><small>Fictional Song · Fictional Artist<\/small><\/span><em>连接<\/em>/);
-  assert.doesNotMatch(listed, /默认|QQMusic\.exe/);
-  assert.match(mediaConnectionLabel(alone.connection), /未发现网易云音乐/, 'the status names only the default link');
-  const both = app([qq('q1'), netease('n1')]);
-  await both.connection.refresh();
-  assert.equal(both.connection.selected.id, 'n1');
-  assert.match(mediaSourcesMarkup(both.connection), /<strong>QQ音乐<\/strong>.*<em>连接<\/em>.*<strong>网易云音乐<\/strong>.*已连接 · 默认/);
-  // Picked by the user: connected under its name, and NetEase appearing does not replace it.
-  // From now on it is the remembered source, the default link instead of NetEase (2026-10-06).
-  const { connection, calls, set } = app([qq('q1')]);
+test('QQ Music is excluded by both its legacy module and application ID, and cannot be selected', async () => {
+  const { connection, calls } = fixture([
+    qq('q1'), source('q2', {app:'QQMusic.exe'}), source('q3', {app:'qqmusic.exe'}), netease('n1'), source('other')
+  ], NETEASE, playerMediaPort);
   await connection.refresh();
-  assert.equal(connection.select('q1'), true);
-  assert.equal(connection.followsPreferred, true);
-  assert.deepEqual(connection.remembered, { player: 'qqmusic' });
-  assert.equal(connection.selected.name, 'QQ音乐');
-  assert.match(mediaConnectionLabel(connection), /^QQ音乐 · 正在播放$/);
-  set({ sources: [qq('q1'), netease('n1')] });
-  await connection.refresh();
-  assert.equal(connection.selected.id, 'q1');
-  // The shelf: one card for the song it shows, under its name; never an album, a queue or columns.
-  const shelf = mediaLibrary(connection.selected);
-  assert.deepEqual(shelf.genres, [{ id: 'external', name: 'QQ音乐' }]);
-  assert.deepEqual(shelf.albums.map(album => [album.id, album.title, album.artist, album.tracks.length]), [['external:q1', 'Fictional Song', 'Fictional Artist', 0]]);
-  // Its own session's controls, never the global media keys.
-  connection.setGlobalMediaKeys(true);
-  assert.equal(connection.allowGlobalMediaKeys, false);
-  assert.equal(mediaPermissionMarkup(connection), '');
-  assert.equal(await connection.control('next'), true);
-  assert.deepEqual(calls, [['q1', 'next', undefined, false]]);
-  // None of NetEase's own features: no queue, no playing the selection, no playlist columns.
-  assert.equal(queueSettingMarkup(connection.selected, true, '', { enabled: true, available: true, status: '', restart: false, state: 'on' }), '');
-  // Lost: nothing else is taken, NetEase included.
-  set({ sources: [netease('n1')] });
-  await connection.refresh();
-  assert.equal(connection.disconnected, true);
-  assert.equal(connection.selected, undefined);
-  assert.equal(connection.awaitsPreferred, true);
-  assert.match(mediaConnectionLabel(connection), /QQ音乐已断开，再次出现时会自动重新连接/);
-  set({ sources: [netease('n2')] });
-  await connection.refresh();
-  assert.equal(connection.selected, undefined, 'NetEase does not replace a lost QQ Music');
-  // ... and QQ Music coming back as a new session is connected again: it is the remembered player.
-  set({ sources: [qq('q2'), netease('n2')] });
-  await connection.refresh();
-  assert.equal(connection.selected.id, 'q2');
-  assert.equal(connection.allowGlobalMediaKeys, false);
-  // And a lost NetEase is not replaced by QQ Music.
-  const lost = app([qq('q1'), netease('n1')]);
-  await lost.connection.refresh();
-  lost.set({ sources: [qq('q1')] });
-  await lost.connection.refresh();
-  assert.equal(lost.connection.selected, undefined);
-  assert.equal(lost.connection.selectedId, 'n1');
-  assert.match(mediaConnectionLabel(lost.connection), /网易云音乐已断开，再次出现时会自动重新连接/);
-  assert.equal(calls.length + alone.calls.length + both.calls.length + lost.calls.length, 1, 'only the one control the user sent');
+  assert.deepEqual(connection.sources.map(s=>s.id), ['n1','other']);
+  assert.equal(connection.select('q1'),false);
+  assert.equal(connection.select('q2'),false);
+  assert.equal(connection.selected.id,'n1');
+  assert.deepEqual(calls,[]);
 });
 
-test('QQ Music\'s controls are exactly the ones its session enables', async () => {
-  const { connection, calls, set } = fixture([qq('q1')], NETEASE, playerMediaPort);
-  await connection.refresh();
-  connection.select('q1');
-  // As surveyed: play / pause, previous, next; no stop, no seeking, no timeline.
-  for (const action of ['toggle', 'previous', 'next']) assert.equal(connection.offers(action), true, action);
-  for (const action of ['stop', 'seek']) assert.equal(connection.offers(action), false, action);
-  assert.equal(await connection.control('stop'), false);
-  assert.equal(await connection.control('seek', 30), false);
-  assert.deepEqual(calls, [], 'an action the session does not enable is never sent');
-  // Seeking needs both the session's permission and a length to seek in.
-  set({ sources: [qq('q1', { capabilities: { toggle: true, previous: true, next: true, stop: false, seek: true } })] });
-  await connection.refresh();
-  assert.equal(connection.offers('seek'), false, 'no length, no seeking');
-  set({ sources: [qq('q1', { position: 30, duration: 200, capabilities: { toggle: true, previous: true, next: true, stop: true, seek: true } })] });
-  await connection.refresh();
-  assert.equal(connection.offers('seek'), true);
-  assert.equal(connection.offers('stop'), true, 'stop as soon as the session offers it');
-  assert.equal(await connection.control('seek', 999), true);
-  assert.deepEqual(calls, [['q1', 'seek', 200, false]], 'within the length, without global keys');
-  // A session that enables nothing (QQ Music idle, between songs): no control at all.
-  set({ sources: [qq('q1', { title: '', artist: '', playback: 'stopped', capabilities: { toggle: false, previous: false, next: false, stop: false, seek: false } })] });
-  await connection.refresh();
-  for (const action of ['toggle', 'previous', 'next', 'stop', 'seek']) assert.equal(connection.can(action), false, action);
-  assert.equal(await connection.control('toggle'), false);
-  assert.equal(calls.length, 1);
-  // ... and its card says the song is missing rather than making one up.
-  assert.deepEqual(mediaLibrary(connection.selected).albums.map(album => [album.title, album.artist]), [['曲名未提供', '歌手未提供']]);
-});
-
-test('with QQ Music connected, the NetEase session reads nothing, whatever NetEase\'s switches say', async () => {
+test('with a generic player connected, the NetEase session reads nothing, whatever NetEase\'s switches say', async () => {
   const { NeteaseSession } = await import('../src/netease_music/connector/session.ts');
   const reads = [];
   const refuse = name => async () => { reads.push(name); throw new Error(`${name} is never asked`); };
@@ -392,7 +307,7 @@ test('with QQ Music connected, the NetEase session reads nothing, whatever NetEa
     queue: { read: refuse('queue') }, playlists: { read: refuse('playlists') },
     debug: { state: refuse('state'), play: refuse('play'), seek: refuse('seek'), restart: refuse('restart') },
   };
-  const { connection, calls } = fixture([qq('q1'), netease('n1')], NETEASE, playerMediaPort);
+  const { connection, calls } = fixture([source('q1'), netease('n1')], NETEASE, playerMediaPort);
   await connection.refresh();
   connection.select('q1');
   const session = new NeteaseSession({
@@ -476,42 +391,42 @@ test('the connected source is remembered by what lasts: its player\'s module, el
 });
 
 test('after a restart the remembered player is connected as soon as it appears, and no other player instead', async () => {
-  // QQ Music was connected last time; this time NetEase and another player are there first.
-  const { connection, calls, saved, set } = restart({ player: 'qqmusic' }, [netease('n1'), fictionalApp('s1')], playerMediaPort);
+  // the generic player was connected last time; this time NetEase and another player are there first.
+  const { connection, calls, saved, set } = restart({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, [netease('n1'), source('s1', { app: 'Other.Player!App' })], playerMediaPort);
   await connection.refresh();
   assert.equal(connection.selected, undefined, 'NetEase is not the default link any more');
   assert.equal(connection.selectedId, null);
   assert.equal(connection.awaitsPreferred, true);
   assert.equal(connection.remembers, true);
   // It is awaited by name; nothing asks to choose.
-  assert.equal(mediaConnectionLabel(connection), '等待 QQ音乐…');
+  assert.equal(mediaConnectionLabel(connection), '等待 Fictional Player…');
   const listed = mediaSourcesMarkup(connection);
   assert.doesNotMatch(listed, /默认/, 'neither present player is the default link');
   // A failed reading in between neither connects nor forgets.
   set(new Error('temporary read failure'));
   await connection.refresh();
   assert.equal(connection.awaitsPreferred, true);
-  // QQ Music appears behind them: connected by itself, under its name, without global keys.
-  set({ sources: [netease('n1'), fictionalApp('s1'), qq('q7')] });
+  // the generic player appears behind them: connected by itself, under its name, without global keys.
+  set({ sources: [netease('n1'), source('s1', { app: 'Other.Player!App' }), fictionalApp('q7')] });
   await connection.refresh();
   assert.equal(connection.selected.id, 'q7');
-  assert.equal(connection.selected.name, 'QQ音乐');
+  assert.equal(connection.selected.name, 'Fictional Player');
   assert.equal(connection.allowGlobalMediaKeys, false);
-  assert.match(mediaConnectionLabel(connection), /^QQ音乐 · 正在播放$/);
+  assert.match(mediaConnectionLabel(connection), /^Fictional Player · 正在播放$/);
   assert.match(mediaSourcesMarkup(connection), /data-media-source="q7" aria-pressed="true">.*已连接 · 默认/);
   // It goes: nothing is taken instead, and it is connected again when it comes back.
-  set({ sources: [netease('n1'), fictionalApp('s1')] });
+  set({ sources: [netease('n1'), source('s1', { app: 'Other.Player!App' })] });
   await connection.refresh();
   assert.equal(connection.selected, undefined);
   assert.equal(connection.disconnected, true);
-  assert.match(mediaConnectionLabel(connection), /^QQ音乐已断开，再次出现时会自动重新连接$/);
-  set({ sources: [netease('n1'), qq('q8'), fictionalApp('s1')] });
+  assert.match(mediaConnectionLabel(connection), /^Fictional Player已断开，再次出现时会自动重新连接$/);
+  set({ sources: [netease('n1'), fictionalApp('q8'), source('s1', { app: 'Other.Player!App' })] });
   await connection.refresh();
   assert.equal(connection.selected.id, 'q8');
   assert.deepEqual(saved, [], 'the same player: nothing new to save');
   assert.deepEqual(calls, [], 'connecting sends nothing to any player');
   // Present at the first reading: connected at once, before anything is shown.
-  const ready = restart({ player: 'qqmusic' }, [netease('n1'), qq('q1')], playerMediaPort);
+  const ready = restart({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, [netease('n1'), fictionalApp('q1')], playerMediaPort);
   await ready.connection.refresh();
   assert.equal(ready.connection.selected.id, 'q1');
 });
@@ -521,7 +436,7 @@ test('a remembered NetEase comes back after a restart, without the global media-
   await connection.refresh();
   assert.equal(mediaConnectionLabel(connection), '等待网易云音乐…');
   // Through its window title (no media session): connected, and the keys are asked for again.
-  set({ sources: [qq('q1'), neteaseWindow('w1')] });
+  set({ sources: [fictionalApp('q1'), neteaseWindow('w1')] });
   await connection.refresh();
   assert.equal(connection.selected.id, 'w1');
   assert.equal(connection.allowGlobalMediaKeys, false, 'a reconnection is a new connection');
@@ -550,10 +465,10 @@ test('a remembered player Rhine does not know is found again by its app id only,
   assert.equal(connection.selected.id, 's2');
   assert.deepEqual(saved, [{ app: link.app, name: 'Fictional Player 2' }]);
   // A known player is remembered by its module even when an older link named its app id.
-  const known = restart({ app: 'QQMusic.exe', name: 'QQMusic.exe' }, [qq('q1', { app: 'QQMusic.exe' })], playerMediaPort);
+  const known = restart({ app: 'cloudmusic.exe', name: 'cloudmusic.exe' }, [netease('q1', { app: 'cloudmusic.exe' })], playerMediaPort);
   await known.connection.refresh();
   assert.equal(known.connection.selected.id, 'q1');
-  assert.deepEqual(known.saved, [{ player: 'qqmusic' }]);
+  assert.deepEqual(known.saved, [{ player: 'netease' }]);
 });
 
 test('a disconnect is remembered: after a restart nothing is connected by itself, not even NetEase', async () => {
@@ -561,20 +476,20 @@ test('a disconnect is remembered: after a restart nothing is connected by itself
   await before.connection.refresh();
   before.connection.disconnect();
   assert.deepEqual(before.saved, [{ player: 'netease' }, null]);
-  const { connection, saved, set } = restart(before.saved.at(-1), [netease('n1'), qq('q1')], playerMediaPort);
+  const { connection, saved, set } = restart(before.saved.at(-1), [netease('n1'), fictionalApp('q1')], playerMediaPort);
   await connection.refresh();
   assert.equal(connection.selectedId, null);
   assert.equal(connection.followsPreferred, false);
   assert.equal(mediaConnectionLabel(connection), '选择播放器后显示当前曲目');
   assert.doesNotMatch(mediaSourcesMarkup(connection), /默认/);
-  set({ sources: [netease('n2'), qq('q1')] });
+  set({ sources: [netease('n2'), fictionalApp('q1')] });
   await connection.refresh();
   assert.equal(connection.selected, undefined);
   // The user selects a source: it is remembered again.
   connection.select('q1');
-  assert.deepEqual(saved, [{ player: 'qqmusic' }]);
+  assert.deepEqual(saved, [{ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }]);
   // Nothing remembered yet (an older version's preferences): NetEase is the default link, as before.
-  const fresh = restart(undefined, [qq('q1'), netease('n1')], playerMediaPort);
+  const fresh = restart(undefined, [fictionalApp('q1'), netease('n1')], playerMediaPort);
   await fresh.connection.refresh();
   assert.equal(fresh.connection.selected.id, 'n1');
   const unread = restart({ player: 'unknown-player' }, [netease('n1')]);
@@ -583,8 +498,8 @@ test('a disconnect is remembered: after a restart nothing is connected by itself
 });
 
 test('断开连接 also forgets a remembered source that has not appeared: no other player is picked first', async () => {
-  // QQ Music was connected last time and is not running now; NetEase is.
-  const { connection, calls, saved, set } = restart({ player: 'qqmusic' }, [netease('n1')], playerMediaPort);
+  // the generic player was connected last time and is not running now; NetEase is.
+  const { connection, calls, saved, set } = restart({ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, [netease('n1')], playerMediaPort);
   await connection.refresh();
   assert.equal(connection.awaitsPreferred, true);
   assert.equal(connection.remembers, true);
@@ -595,7 +510,7 @@ test('断开连接 also forgets a remembered source that has not appeared: no ot
   assert.equal(connection.followsPreferred, false);
   assert.equal(mediaConnectionLabel(connection), '选择播放器后显示当前曲目');
   // Neither it nor NetEase is connected by itself afterwards; nothing was sent to any player.
-  set({ sources: [netease('n1'), qq('q1')] });
+  set({ sources: [netease('n1'), fictionalApp('q1')] });
   await connection.refresh();
   assert.equal(connection.selectedId, null);
   assert.doesNotMatch(mediaSourcesMarkup(connection), /默认/);
@@ -609,7 +524,7 @@ test('断开连接 also forgets a remembered source that has not appeared: no ot
 test('selecting a source again, the remembered one included, asks for the global media keys again', async () => {
   // NetEase through its window title, remembered; the consent is given, then the user picks QQ
   // Music and NetEase again (no session disappeared in between).
-  const { connection, calls, saved } = restart({ player: 'netease' }, [neteaseWindow('w1'), qq('q1')], playerMediaPort);
+  const { connection, calls, saved } = restart({ player: 'netease' }, [neteaseWindow('w1'), fictionalApp('q1')], playerMediaPort);
   await connection.refresh();
   assert.equal(connection.selected.id, 'w1');
   connection.setGlobalMediaKeys(true);
@@ -622,7 +537,7 @@ test('selecting a source again, the remembered one included, asks for the global
   assert.equal(connection.allowGlobalMediaKeys, false, 'a new connection: the consent is asked for again');
   assert.equal(connection.can('toggle'), false);
   assert.match(mediaPermissionMarkup(connection), /id="external-global-keys" aria-describedby="external-global-keys-note">/);
-  assert.deepEqual(saved, [{ player: 'qqmusic' }, { player: 'netease' }], 'only the identity, each time it changed');
+  assert.deepEqual(saved, [{ app: 'Fictional.Player_0abc!App', name: 'Fictional Player' }, { player: 'netease' }], 'only the identity, each time it changed');
   assert.deepEqual(calls, []);
 });
 
@@ -670,7 +585,7 @@ test('a saved link is read as main.rs reads it, and the app saves the source and
   const links = playerLinks({ player: 'qqmusic' }, link => told.push(link));
   assert.equal(links.players, PLAYER_MODULES);
   assert.equal(links.fallback, PREFERRED_PLAYER);
-  assert.deepEqual(links.remembered, { player: 'qqmusic' });
+  assert.equal(links.remembered, null, 'retired QQ link never falls back to NetEase');
   links.remember(null);
   assert.deepEqual(told, [null]);
   assert.equal(playerLinks('garbage', () => {}).remembered, undefined);
@@ -679,7 +594,7 @@ test('a saved link is read as main.rs reads it, and the app saves the source and
   // remembered player; the page it opens is the one pageSource reads as a player. No argument decides.
   const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(main, /let player = match preferences\.get\("source"\) \{\n\s*Some\(source\) => source\.as_str\(\) == Some\("player"\),\n\s*None => preferences\.get\("playerMode"\)\.and_then\(serde_json::Value::as_str\) == Some\("external"\),\n\s*\};\n\s*player && preferences\.get\("playerLink"\)\.is_some_and\(remembers_source\)/);
-  assert.match(main, /player == rhine_music::netease_music::PLAYER \|\| player == rhine_music::qq_music::PLAYER/);
+  assert.match(main, /player == rhine_music::netease_music::PLAYER/);
   assert.match(main, /app\.encode_utf16\(\)\.count\(\) <= 512/);
   assert.match(main, /let entry = entry_url\(&origin, &preferences\);/);
   const entry = main.match(/format!\("\{origin\}\/(\?[^"]+)"\)/);
@@ -691,7 +606,7 @@ test('a saved link is read as main.rs reads it, and the app saves the source and
   // The page saves both under those keys: its source on every load where it changed (dropping an
   // earlier build's mode) and on a switch, the link when it changes.
   const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(app, /const earlierMode = Object\.hasOwn\(preferences, "playerMode"\);\ndelete \(preferences as Record<string, unknown>\)\.playerMode;\nif \(preferences\.source !== currentSource \|\| earlierMode\) \{\n  preferences\.source = currentSource;\n  save\("rhine-music-preferences", preferences\);\n\}/);
+  assert.match(app, /const earlierMode = Object\.hasOwn\(preferences, "playerMode"\);[\s\S]*if \(preferences\.source !== currentSource \|\| earlierMode \|\| retiredPlayer\) \{\n  preferences\.source = currentSource;\n  save\("rhine-music-preferences", preferences\);\n\}/);
   assert.match(app, /preferences\.source = next;\n  savePrefs\(\);/);
   assert.match(app, /function rememberPlayer\(link: SourceLink \| null\) \{\n  preferences\.playerLink = link;\n  save\("rhine-music-preferences", preferences\);\n\}/);
   assert.equal(app.match(/playerLinks\(preferences\.playerLink, rememberPlayer\)/g)?.length, 2, 'the connection and the chooser remember alike');
@@ -912,19 +827,19 @@ test('a cover crosses once: the snapshot leaves out the ones the connection hold
     async snapshot(known) { asked.push(known); if (snapshot instanceof Error) throw snapshot; return snapshot; },
     async control() {},
   }));
-  snapshot = { sources: [source('a', { coverUrl: cover(4), coverRev: 1 }), source('b'), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverUrl: cover(8), coverRev: 2 })] };
+  snapshot = { sources: [source('a', { coverUrl: cover(4), coverRev: 1 }), source('b'), source('q', { app: 'cloudmusic.exe', player: 'netease', coverUrl: cover(8), coverRev: 2 })] };
   await connection.refresh();
   assert.deepEqual(asked.at(-1), {});
   // The native side leaves out what is held at the same revision; the connection keeps it (QQ Music's renamed source too).
-  snapshot = { sources: [source('a', { coverRev: 1 }), source('b'), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverRev: 2 })] };
+  snapshot = { sources: [source('a', { coverRev: 1 }), source('b'), source('q', { app: 'cloudmusic.exe', player: 'netease', coverRev: 2 })] };
   await connection.refresh();
   assert.deepEqual(asked.at(-1), { a: 1, q: 2 });
   assert.equal(connection.sources[0].coverUrl, cover(4));
   assert.equal(connection.sources[2].coverUrl, cover(8));
-  assert.equal(connection.sources[2].name, 'QQ音乐');
+  assert.equal(connection.sources[2].name, '网易云音乐');
   assert.equal(connection.sources[1].coverUrl, undefined);
   // A new revision without a picture: the cover is gone; with one: it is the new one.
-  snapshot = { sources: [source('a', { coverRev: 2 }), source('b', { coverUrl: cover(6), coverRev: 1 }), source('q', { app: 'QQMusic.exe', player: 'qqmusic', coverRev: 2 })] };
+  snapshot = { sources: [source('a', { coverRev: 2 }), source('b', { coverUrl: cover(6), coverRev: 1 }), source('q', { app: 'cloudmusic.exe', player: 'netease', coverRev: 2 })] };
   await connection.refresh();
   assert.equal(connection.sources[0].coverUrl, undefined);
   assert.equal(connection.sources[1].coverUrl, cover(6));
@@ -1007,7 +922,7 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   assert.match(app, /handedSession = undefined;\n\s*externalMedia\?\.disconnect\(\);/);
   // A lone live card whose picture alone changed is painted again in place (no rebuild of the shelf).
   assert.match(app, /const coverOnly = playerCurrent && !netease\.shownQueue\(\) && oldBare === bareKey\(albums, genres\);/);
-  assert.match(app, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
+  assert.match(app, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| liveCard\) \? moved\(previousIndex\) : -1;/);
   // The panel has no opening paragraph since its redesign (the owner, 2026-10-24: "it has tooo much
   // words now"): 关于 says it in short lines, and no 切歌 switch is promised (gone 2026-10-09).
   assert.doesNotMatch(app, /切歌在下方另行开关|sources-intro-port|panel-intro/);
@@ -1546,7 +1461,7 @@ test('a NetEase picture is one picture on any of its image servers, and the shel
   // NetEase's queue shelf and 本地音乐's (a scan); a source with one card is built again for each song,
   // as before, and kept only while the same song merely shows another picture (coverOnly: the same id,
   // title, artist and column).
-  assert.match(apply, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| coverOnly\) \? moved\(previousIndex\) : -1;/);
+  assert.match(apply, /const anchor = hadAlbums && \(!playerCurrent \|\| !!netease\.shownQueue\(\) \|\| liveCard\) \? moved\(previousIndex\) : -1;/);
   assert.match(apply, /const bareKey = \(items: MusicAlbum\[\], groups: MusicGenre\[\]\) =>\s*JSON\.stringify\(\[items\.map\(\(a\) => \[a\.id, a\.title, a\.artist, a\.genreId\]\), groups\.map\(\(g\) => \[g\.id, g\.name\]\)\]\);/);
   assert.match(apply, /if \(scene && ready && oldVisual !== visualKey\(albums, genres\) && anchor >= 0\) \{/);
   assert.match(apply, /const target = selected;\s*selected = anchor;\s*scene\.relayout\(anchor\);\s*if \(target !== anchor\) select\(target\);\s*\} else if \(scene && ready && oldVisual !== visualKey\(albums, genres\)\) \{/);
@@ -2589,4 +2504,52 @@ test('an in-flight playlist switch retains a temporarily missing or empty queue,
   reply={status:'queue',stamp:'final',tracks:[laneTrack(1)],source:{id:'1',name:'Alpha'},truncated:false};await session.refresh();
   session.forgetQueueJumps();await session.playQueueSong(request);preferences.neteaseQueue=false;await session.refresh();assert.equal(session.externalQueue,undefined,'turning the queue off takes effect immediately');
   assert.equal(plays.length,3,'no extra playback command was introduced');
+});
+
+
+test('NetEase mode changes use its own action, guard special modes and never play a song', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../src-tauri/src/netease_music/connector/debug_port.rs', import.meta.url), 'utf8');
+  const body = /const MODE_BODY: &str = r#"([\s\S]*?)"#;/.exec(source)[1];
+  const change = new Function('findStore', 'mode', body);
+  const sent = [];
+  let current = 'playOrder';
+  const store = { getState: () => ({ playing: { playingMode: current } }), dispatch: action => sent.push(action) };
+  for (const next of ['playCycle', 'playRandom', 'playOneCycle', 'playOrder']) {
+    assert.equal(change(() => store, next), 'sent');
+    assert.deepEqual(sent.pop(), { type: 'playing/switchPlayingMode', payload: { playingMode: next } });
+    current = next;
+    assert.equal(change(() => store, next), 'current');
+  }
+  for (current of ['playFm','playAi','unknown',undefined]) assert.equal(change(() => store, 'playCycle'), 'special');
+  assert.equal(change(() => null, 'playCycle'), 'store');
+  assert.deepEqual(sent, []);
+});
+
+test('mode button follows NetEase readings, serializes clicks, and stays unavailable without capability', async () => {
+  const { NeteaseSession } = await import('../src/netease_music/connector/session.ts');
+  const { connection } = fixture([netease('n1')], NETEASE);
+  await connection.refresh();
+  let mode = 'playOrder', release;
+  const calls = [], notices = [];
+  const host = { media: connection, preferences: { neteaseQueue: true, playlistColumns: false },
+    confirmSoon() {}, async refresh() { session.debugState = { available: true, mode }; }, notify: text => notices.push(text) };
+  const session = new NeteaseSession(host, { debug: { async setMode(next) {
+    calls.push(next); await new Promise(resolve => { release = resolve; }); mode = next;
+  } } });
+  session.debugState = { available: true, mode };
+  const pending = session.setPlaybackMode('playCycle');
+  assert.equal(session.playbackModeControl().mode, 'playOrder', 'no invented optimistic state');
+  assert.match(session.playbackModeControl().reason, /正在切换/);
+  await session.setPlaybackMode('playRandom');
+  assert.deepEqual(calls, ['playCycle']);
+  release(); await pending;
+  assert.deepEqual(session.playbackModeControl(), {mode:'playCycle', reason:''});
+  for (const state of [{available:false}, {available:true,mode:'playFm'}, {available:true,mode:'playAi'}]) {
+    session.debugState = state;
+    await session.setPlaybackMode('playOrder');
+    assert.ok(session.playbackModeControl().reason);
+  }
+  assert.deepEqual(calls, ['playCycle']);
+  assert.deepEqual(notices, []);
 });

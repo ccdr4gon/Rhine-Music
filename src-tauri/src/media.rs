@@ -80,6 +80,10 @@ pub(crate) mod windows_media;
 
 /// The player a media session belongs to, by the app id it reports: the source list of the
 /// native side. Any other player is still listed, as a source of its own.
+pub fn supported_app(app: &str) -> bool {
+    !crate::qq_music::connector::is_app(app)
+}
+
 pub fn player_of(app: &str) -> Option<&'static str> {
     if crate::netease_music::connector::is_app(app) {
         Some(crate::netease_music::PLAYER)
@@ -158,6 +162,16 @@ pub fn control(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qq_is_not_a_supported_source() {
+        for app in ["QQMusic.exe", "qqmusic.exe", "QQMUSIC.EXE"] {
+            assert!(!super::supported_app(app));
+        }
+        for app in ["cloudmusic.exe", "Fictional.Player!App"] {
+            assert!(super::supported_app(app));
+        }
+    }
+
     use super::*;
     #[test]
     fn sessions_belong_to_the_player_their_app_id_names() {

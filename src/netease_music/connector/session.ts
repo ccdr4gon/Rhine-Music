@@ -1,3 +1,4 @@
+import { playbackMode, type PlaybackMode } from "../../playback-mode";
 import type { ExternalMediaConnection, ExternalMediaSource } from "../../external_player/external-media";
 import {
   laneGenre, laneLibrary, laneTrackKey, playingQueueTrack, queueLanes, queueLibrary, queueTrackKey,
@@ -133,6 +134,32 @@ export class NeteaseSession {
   queueFollowPaused = false;
   // NetEase's debugging port: the exact playing song, and the way to make it play another.
   debugState: DebugState = { available: false };
+  private modeBusy = false;
+  get modeChanging() { return this.modeBusy; }
+  playbackModeControl(): { mode?: PlaybackMode; reason: string } {
+    const mode = playbackMode(this.debugState.mode);
+    const reason = !this.current() ? "当前播放器未提供播放模式控制"
+      : !this.host.preferences.neteaseQueue ? "请先在设置中开启显示网易云播放队列"
+      : !this.debugState.available ? "需要连接网易云调试端口"
+      : this.debugState.mode === "playFm" ? "私人 FM 的播放模式请在网易云中调整"
+      : this.debugState.mode === "playAi" ? "心动模式请在网易云中调整"
+      : !mode || !this.ports.debug.setMode ? "当前播放模式不支持切换"
+      : this.modeBusy ? "正在切换…" : "";
+    return { mode, reason };
+  }
+  async setPlaybackMode(mode: PlaybackMode): Promise<void> {
+    if (!playbackMode(mode) || this.playbackModeControl().reason) return;
+    this.modeBusy = true;
+    this.host.confirmSoon();
+    try {
+      await this.ports.debug.setMode!(mode);
+      await this.host.refresh();
+    } catch (error) {
+      this.host.notify(`播放模式未确认：${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      this.modeBusy = false;
+    }
+  }
   // NetEase's position, kept running between the once-a-second readings.
   readonly playbackClock = new PlaybackClock();
   // The lyrics of the songs NetEase plays, read for their details (the owner, 2026-10-17).

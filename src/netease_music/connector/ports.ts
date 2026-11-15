@@ -1,3 +1,4 @@
+import type { PlaybackMode } from "../../playback-mode";
 import type { DebugLyrics } from "../data/lyrics";
 import type { DebugState, PlaylistsReply, QueueReply } from "../data/queue";
 
@@ -35,6 +36,7 @@ export const PLAY_UNANSWERED = "网易云还没有回应这次请求";
 
 export interface DebugPort {
   state(): Promise<DebugState>;
+  setMode?(mode: PlaybackMode): Promise<void>;
   /** Ask NetEase to play a song that is already in its queue; the queue order is untouched. */
   play(trackId: string): Promise<void>;
   /**
@@ -61,6 +63,10 @@ export const nativeDebugPort: DebugPort = {
   async state() {
     if (!window.__TAURI__) return { available: false };
     return window.__TAURI__.core.invoke<DebugState>("netease_debug_state");
+  },
+  async setMode(mode) {
+    if (!window.__TAURI__) throw new Error("切换网易云播放模式需要 Windows 客户端。");
+    await window.__TAURI__.core.invoke("netease_debug_set_mode", { mode });
   },
   async play(trackId) {
     if (!window.__TAURI__) throw new Error("让网易云切歌需要 Windows 客户端。");

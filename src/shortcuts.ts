@@ -37,7 +37,7 @@ export const SHORTCUTS: readonly ShortcutInfo[] = [
   { id: "open", group: "打开与返回", name: "查看这首歌", note: "打开详情并播放这首歌", key: "Enter", repeat: false },
   { id: "songs", group: "打开与返回", name: "播放列表", note: "在专辑架和详情里打开播放列表；在播放列表里打开这首歌", key: "KeyS", repeat: false },
   { id: "back", group: "打开与返回", name: "返回专辑架", key: "Escape", repeat: false },
-  { id: "search", group: "打开与返回", name: "搜索", note: "本地音乐：搜索歌曲；播放器：打开“播放器”面板", key: "Slash", repeat: false },
+  { id: "search", group: "打开与返回", name: "搜索", note: "搜索当前来源已载入的歌曲与歌单", key: "Slash", repeat: false },
 ];
 
 const BY_ID = new Map(SHORTCUTS.map((info) => [info.id, info]));

@@ -1,6 +1,6 @@
 [package]
 name = "rhine-music"
-version = "0.3.0"
+version = "1.0.0"
 description = "Rhine Music desktop player"
 edition = "2021"
 license = "MIT"

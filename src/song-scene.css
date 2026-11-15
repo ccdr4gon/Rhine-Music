@@ -348,37 +348,7 @@
   line-height: 1.4;
   color: var(--muted);
 }
-.song-steps {
-  display: flex;
-  gap: calc(var(--songs-u) * 0.4444);
-  margin-top: calc(var(--songs-u) * 1.1111);
-}
-.song-steps button {
-  display: grid;
-  place-items: center;
-  width: max(24px, calc(var(--songs-u) * 2.8889));
-  height: max(24px, calc(var(--songs-u) * 2.8889));
-  color: var(--ink);
-  transition: opacity 120ms ease;
-}
-.song-steps button:not(:disabled):hover {
-  opacity: 0.65;
-}
 /* The shelf's chevrons (music-shelf.css), at the pane's scale. */
-.song-steps .chevron {
-  width: max(8.5px, calc(var(--songs-u) * 0.9444));
-  height: max(8.5px, calc(var(--songs-u) * 0.9444));
-}
-.song-steps .chevron-up {
-  transform: translateY(max(2px, calc(var(--songs-u) * 0.2222))) rotate(45deg);
-}
-.song-steps .chevron-down {
-  transform: translateY(min(-2px, calc(var(--songs-u) * -0.2222))) rotate(45deg);
-}
-.music-app .song-steps button:focus-visible {
-  outline: 1px solid var(--ink);
-  outline-offset: -2px;
-}
 
 /* The list: a rule over it and nothing else, so the pane's dots show through its rows. */
 .song-list {
@@ -663,11 +633,6 @@
 }
 .music-song[data-panel="stacked"] .song-title-line {
   -webkit-line-clamp: 2;
-}
-.music-song[data-panel="stacked"] .song-steps {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  margin: 0;
 }
 .music-app[data-layout="portrait"] .song-caption {
   display: none;

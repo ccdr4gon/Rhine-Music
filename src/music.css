@@ -8,8 +8,8 @@
   --rule: rgba(30, 32, 28, 0.62);
   --accent: #e5701d;
   --signal: #bae534;
-  --playing: #4f8a0c;
-  --paused: #c85a10;
+  --playing: #bae534;
+  --paused: #f08a2c;
   --hl: rgba(255, 255, 255, 0.74);
   --tag-bg: #171814;
   --tag-ink: #f2f0eb;
@@ -143,10 +143,7 @@
 }
 /* The shelf (the right column, the counter and ruler, the playlist list, the key hints and the
    selection bracket) is styled in music-shelf.css, the details in music-detail.css. */
-/* A lone live track has no playlist to show. */
-.music-app[data-external="true"]:not([data-queue="true"]) [data-action="songs"] {
-  display: none;
-}
+/* Scene navigation stays visible; unavailable lists explain their capability in the button tooltip. */
 /* The earlier navigation (?nav=previous, music-ticks.ts) keeps these base tick rules. */
 #album-ticks {
   --tick-height: 30px;
@@ -2281,3 +2278,6 @@
     scrollbar-width: thin;
   }
 }
+
+/* Startup rests on the scene surface, without framing a navigation button. */
+.music-app #three-scene:focus { outline: none; }

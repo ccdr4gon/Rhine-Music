@@ -1,6 +1,6 @@
 # 当前客户端结构
 
-v0.3.0 的 Windows 正式入口是 `src-tauri/src/main.rs`，目前只交付 Portable Edition。Tauri 创建独立窗口、提供系统文件夹选择、管理单实例和偏好保存。窗口关闭时 Rust 内部服务结束；没有 Node 后台子程序。客户端从 exe 旁的 `web/` 读取界面，默认将数据写入旁边的 `data/`，可由绝对路径 `MUSIC_DATA_DIR` 覆盖。WebView 的数据目录也明确设在其中的 `webview/`，不依赖启动工作目录。
+v1.0.0 的 Windows 正式入口是 `src-tauri/src/main.rs`，目前只交付 Portable Edition。Tauri 创建独立窗口、提供系统文件夹选择、管理单实例和偏好保存。窗口关闭时 Rust 内部服务结束；没有 Node 后台子程序。客户端从 exe 旁的 `web/` 读取界面，默认将数据写入旁边的 `data/`，可由绝对路径 `MUSIC_DATA_DIR` 覆盖。WebView 的数据目录也明确设在其中的 `webview/`，不依赖启动工作目录。
 
 `src-tauri/src/app_server.rs` 在同一进程中绑定 `127.0.0.1`，为每个来源提供页面与安装目录下的 `web/` 资源，先检查 Host、Origin、路径并读取 POST 的 JSON 正文，再把所有 `/api/` 路由交给本地音乐的 `src-tauri/src/local_music/connector/api.rs`（曲库、扫描、设置、流派规则、在线资料、foobar2000 桥接、音频与封面）。两边共用 `src-tauri/src/http.rs` 的响应、正文读取、媒体类型与单段 Range 文件流。音频以文件流和单段 Range 返回，不通过 JSON 搬运整首歌曲。目录读取检查实际文件位置，并保留 Host、Origin 和 JSON 写入约束。2026-10-06 拆分时逐字节对照过拆分前后的响应（见 [Windows 记录](../WINDOWS.md)）。
 
@@ -104,3 +104,15 @@ QQ 音乐只用它发布的系统媒体会话（用户 2026-10-06 的要求）�
 
 
 最终 B 方案：`#scene-nav` 放回页眉下方左侧，当前场景按钮通过 aria-current 对应的 CSS 隐藏，保留另外两个入口和键位提示；`#go-current` 同组排列并用 visibility 按需隐藏。`lane-names.ts` 避开整组导航。顶部横排仅为比较方案，未用于最终发布。
+
+
+## v1.0.0 支持范围与搜索过渡
+
+QQ 已停止支持。保留 QQ 模块作为旧身份识别，应用来源端口与原生枚举均过滤 QQ；旧连接回到本地音乐，`playerLink` 清空，不自动改连网易云。原生另保留包括 QQ 在内的会话存在标记，仅用于阻止冲突的全局媒体键。
+
+搜索结果复用 `requestPlay` 立即播放；`MusicPresentation.search` 和 `ArchiveScene.travelMusicAlbum` 保持当前页镜头角度，按屏幕位移联动旧盒子回落与目标盒子抽出；目标进入可见区域后才开始抽出，播放列表排列先收拢再展开，同列表直接使用当前页切歌。普通上一首／下一首和 Esc 路线保留。
+
+
+## 2026-11-16 · v1.0.0
+
+`search-motion.ts` 只对进出场盒子的屏幕投影判断可见性和速度；`scene.ts` 保持原页面镜头，并在目标可见后开始抽出，避免离屏提前抬起。运动速度有上下限，未增加整库遍历或原生图形依赖。`music-app.ts` 的详情播放控制与时间线共享一行，设置页合并动效与画质；DLSS／帧生成按用户决定不实现，继续使用 Three.js WebGLRenderer。

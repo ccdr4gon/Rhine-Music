@@ -86,7 +86,7 @@ function songAlbum(key: string, track: QueueTrack, position: number, genreId: st
     genreId, rawGenres: [], folder: "", coverUrl, coverKey: queueCoverKey(coverUrl),
     tracks: [{
       id: key, albumId: key, title: track.title, artist: track.artist,
-      trackNumber: position + 1, duration: track.duration ?? 0, format: "网易云音乐",
+      album: track.album, trackNumber: position + 1, duration: track.duration ?? 0, format: "网易云音乐",
       browserPlayable: false, audioUrl: "", relativePath: "",
     } satisfies MusicTrack],
     producers: [], offline: false,

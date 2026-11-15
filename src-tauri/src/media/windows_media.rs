@@ -199,6 +199,8 @@ impl Entry {
 struct State {
     manager: Option<Manager>,
     entries: Vec<Entry>,
+    /// Includes unsupported sessions: global media keys could still reach them.
+    has_sessions: bool,
     /// NetEase without a media session of its own (netease_music/connector/window.rs).
     netease: WindowFallback,
 }
@@ -248,7 +250,8 @@ impl State {
         // and SourceAppUserModelId. Do not discard unrelated identity/cache
         // entries unless the complete new list was successfully observed.
         let mut observed = Vec::new();
-        for index in 0..found.Size().map_err(win_error)? {
+        let count = found.Size().map_err(win_error)?;
+        for index in 0..count {
             let session = found.GetAt(index).map_err(win_error)?;
             let app =
                 if let Some(entry) = self.entries.iter().find(|entry| entry.session == session) {
@@ -259,6 +262,8 @@ impl State {
                         .map_err(win_error)?
                         .to_string_lossy()
                 };
+            // QQ support was withdrawn in v1.0.0. Do not read its song/cover or retain a control ID.
+            if !super::supported_app(&app) { continue; }
             observed.push((session, app));
         }
         // Windows may rebuild the COM session when the same player changes or
@@ -310,6 +315,7 @@ impl State {
             }
         }
         self.entries = next;
+        self.has_sessions = count > 0;
         Ok(())
     }
     fn snapshot(&mut self, known: &HashMap<String, u64>) -> Outcome<Snapshot> {
@@ -335,7 +341,7 @@ impl State {
         }
         let netease_smtc = self.entries.iter().any(|entry| netease::is_app(&entry.app));
         if !netease_smtc {
-            let no_competitor = discovery.is_ok() && self.entries.is_empty();
+            let no_competitor = discovery.is_ok() && !self.has_sessions;
             if let Some(source) = self.netease.source(no_competitor) {
                 sources.push(source);
             }
@@ -358,7 +364,7 @@ impl State {
         // An observed disappearance removes the old ID before any later return.
         self.refresh_sessions()?;
         if WindowFallback::owns(id) {
-            let other_sessions = !self.entries.is_empty();
+            let other_sessions = self.has_sessions;
             return self.netease.control(id, action, global_keys, other_sessions, deadline);
         }
         let entry = self

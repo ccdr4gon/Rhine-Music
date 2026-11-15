@@ -112,6 +112,12 @@ async fn netease_debug_state() -> Result<rhine_music::netease_music::connector::
 }
 
 #[tauri::command]
+async fn netease_debug_set_mode(mode: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || rhine_music::netease_music::connector::debug_port::set_mode(&mode))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn netease_debug_play(track_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         rhine_music::netease_music::connector::debug_port::play(&track_id)
@@ -234,12 +240,12 @@ fn entry_url(origin: &str, preferences: &serde_json::Value) -> String {
 fn remembers_source(link: &serde_json::Value) -> bool {
     match link.get("player") {
         Some(serde_json::Value::String(player)) => {
-            player == rhine_music::netease_music::PLAYER || player == rhine_music::qq_music::PLAYER
+            player == rhine_music::netease_music::PLAYER
         }
         _ => link
             .get("app")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|app| !app.is_empty() && app.encode_utf16().count() <= 512),
+            .is_some_and(|app| !app.is_empty() && app.encode_utf16().count() <= 512 && rhine_music::media::supported_app(app)),
     }
 }
 
@@ -557,6 +563,7 @@ fn main() {
             netease_queue,
             netease_playlists,
             netease_debug_state,
+            netease_debug_set_mode,
             netease_debug_play,
             netease_debug_play_playlist,
             netease_debug_seek,
@@ -624,7 +631,6 @@ mod tests {
         let player = |link: Value| json!({ "theme": "night", "source": "player", "playerLink": link });
         for link in [
             json!({ "player": "netease" }),
-            json!({ "player": "qqmusic" }),
             json!({ "app": "Fictional.Player_0abc!App", "name": "Fictional Player" }),
             json!({ "app": "fictional.exe" }),
             json!({ "app": "x".repeat(512) }),
@@ -633,6 +639,9 @@ mod tests {
         }
         // Nothing remembered: the user disconnected (null), or a link this version cannot read.
         for link in [
+            json!({ "player": "qqmusic" }),
+            json!({ "app": "QQMusic.exe", "name": "QQ音乐" }),
+            json!({ "app": "qqmusic.exe" }),
             Value::Null,
             json!({}),
             json!({ "player": "spotify" }),
@@ -677,7 +686,7 @@ mod tests {
     #[test]
     fn an_earlier_builds_mode_is_read_until_the_page_saves_the_source() {
         // Saved by a build with modes: the player skin with a remembered player opens that player.
-        let skin = json!({ "playerMode": "external", "playerLink": { "player": "qqmusic" } });
+        let skin = json!({ "playerMode": "external", "playerLink": { "player": "netease" } });
         assert!(opens_player(&skin));
         assert_eq!(entry_url("http://127.0.0.1:5177", &skin), "http://127.0.0.1:5177/?source=player");
         for preferences in [

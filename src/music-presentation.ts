@@ -4,7 +4,8 @@ export interface AlbumSelection {
   index: number;
   navigation?: ArchiveNavigation;
   /** Search navigation returns to the archive before selecting and reopening. */
-  route?: "archive";
+  route?: "archive" | "search";
+  searchInPlace?: boolean;
 }
 
 export type MusicPresentationPhase =
@@ -14,11 +15,14 @@ export type MusicPresentationPhase =
 export interface MusicPresentationPorts {
   presentationReady(): boolean;
   archiveReady(): boolean;
+  travelReady?(): boolean;
   archiveInteractive?(): boolean;
   enterCamera(): void;
   returnCamera(): void;
   select(selection: AlbumSelection): void;
   switchDetail(selection: AlbumSelection): void;
+  /** Return the old case and move toward the new one in the same shot. */
+  travel(selection: AlbumSelection): void;
   /** Detail-to-detail navigation can crossfade its document alongside the moving cases. */
   switchTogether?(): boolean;
   prepareMenu(): void;
@@ -37,6 +41,7 @@ export class MusicPresentation {
   private revision = 0;
   private browseHidden = false;
   private together = false;
+  private searching = false;
 
   constructor(private readonly ports: MusicPresentationPorts) {}
 
@@ -56,9 +61,30 @@ export class MusicPresentation {
     }
   }
 
-  back() {
-    this.wantsDetail = false;
+  /** Search from either opened view: text exits, case returns and rail travels together. */
+  search(selection: AlbumSelection) {
+    const revision = ++this.revision;
+    this.pendingSelection = { ...selection, route: "search" };
+    this.wantsDetail = true;
+    this.together = false;
+    this.phase = "returning";
+    this.searching = true;
+    this.ports.hideMenu(() => { if (revision === this.revision) this.browseHidden = true; });
+    this.ports.hideBrowse(() => {});
+    this.ports.travel(this.pendingSelection);
     this.pendingSelection = undefined;
+  }
+
+  back() {
+    const travelling = this.searching;
+    this.wantsDetail = false;
+    this.searching = false;
+    this.pendingSelection = undefined;
+    if (travelling) {
+      ++this.revision;
+      this.returnToArchive();
+      return;
+    }
     if (this.phase === "archive") return;
     if (this.phase === "selecting") {
       // A rail movement already committed may settle, but no new detail opens.
@@ -141,7 +167,7 @@ export class MusicPresentation {
       this.ports.showBrowse();
       return;
     }
-    if (!this.ports.archiveReady()) return;
+    if (!(this.searching && this.wantsDetail && this.ports.travelReady ? this.ports.travelReady() : this.ports.archiveReady())) return;
     if (this.pendingSelection) {
       this.commitSelection();
       this.phase = "selecting";
@@ -158,6 +184,7 @@ export class MusicPresentation {
   /** Replay/library replacement invalidate callbacks from the previous album. */
   reset() {
     this.revision++;
+    this.searching = false;
     this.pendingSelection = undefined;
     this.wantsDetail = false;
     this.browseHidden = false;
@@ -167,6 +194,7 @@ export class MusicPresentation {
   }
 
   private beginOpen() {
+    this.searching = false;
     const revision = ++this.revision;
     this.phase = "opening";
     this.browseHidden = false;

@@ -237,7 +237,7 @@ test('the play mode: browsing never switches the song; ▶ and P play the select
   assert.match(button, /: disabled \? \(consent \? "需先在“设置”的当前来源中允许发送全局媒体键" : `\$\{source\.name\}没有提供\$\{playback === "playing" \? "暂停" : "播放 \/ 暂停"\}`\)/);
   assert.match(button, /title: loaded \? `\$\{label\}：\$\{loaded\.title\}` : "没有正在播放的歌"/);
   // P, L, ● and the key hints follow a selection still pending (a detail switch), which they already act on.
-  assert.match(app, /presentation\.select\(\{ index: wrap\(index, records\.length\), navigation, route \}, openAfter\);\s*\/\/[^\n]*\n\s*syncPlayButton\(\);/);
+  assert.match(app, /presentation\.select\(\{ index: wrap\(index, records\.length\), navigation, route,[^\n]*\}, openAfter\);\s*\/\/[^\n]*\n\s*syncPlayButton\(\);/);
   // NetEase changing song by itself leaves a user browsing elsewhere where they are; the shelf
   // goes with it only while the selection was on the playing song.
   const follow = method('followQueue() {');
@@ -281,7 +281,7 @@ test('NetEase\'s answer to a play / pause is read again within a few hundred mil
   assert.match(app, /function confirmSoon\(skip = false\) \{\s*if \(!confirmUntil\) \{\s*confirmSkip = skip;\s*confirmFrom = playbackKey\(\);\s*confirmLeft = 0;\s*\} else if \(skip && !confirmSkip\) \{\s*confirmSkip = true;\s*confirmFrom = playbackKey\(\);\s*\}\s*confirmLeft\+\+;\s*confirmUntil = performance\.now\(\) \+ CONFIRM_MS;\s*\}/);
   // 上一曲 / 下一曲 are answered by the song, not by the stopped / changing a player passes through
   // first (QQ Music, 2026-10-24: the new title waited for the next second's read).
-  assert.match(app, /return JSON\.stringify\(\[confirmSkip \? "" : mediaPlayback\(source\) \?\? "", source\?\.title \?\? "", netease\.debugState\.trackId \?\? ""\]\);/);
+  assert.match(app, /return JSON\.stringify\(\[confirmSkip \? "" : mediaPlayback\(source\) \?\? "", source\?\.title \?\? "", netease\.debugState\.trackId \?\? "", netease\.debugState\.mode \?\? ""\]\);/);
   const control = body(app, 'async function controlExternal(', '\nfunction ');
   assert.match(control, /if \(action !== "seek"\) confirmSoon\(action === "previous" \|\| action === "next"\);\s*const pending = externalMedia\.control\(action, position\);/);
   // Still no invented state: the button changes when NetEase says so.
@@ -394,7 +394,7 @@ test('clicking the selected case opens its details and plays it as ▶ does, nev
   assert.match(select, /if \(!songScene && presentation\.phase !== "archive"\) return;/);
   const presentationSource = readFileSync(new URL('../src/music-presentation.ts', import.meta.url), 'utf8');
   assert.match(presentationSource, /open\(\) \{\s*this\.wantsDetail = true;\s*if \(this\.phase === "archive"\) \{\s*if \(this\.ports\.archiveReady\(\)\) this\.beginOpen\(\);\s*else \{[^}]*this\.phase = "selecting";/);
-  assert.match(presentationSource, /private beginOpen\(\) \{\s*const revision = \+\+this\.revision;\s*this\.phase = "opening";/);
+  assert.match(presentationSource, /private beginOpen\(\) \{\s*this\.searching = false;\s*const revision = \+\+this\.revision;\s*this\.phase = "opening";/);
   // (Until 2026-10-10 the second press of a double press on the lifted case's own ▶ was kept from
   // opening the case; that ▶ is gone: "delete the marked button, we already have a play button on
   // the right".) Every press on the page reads, before the scene's canvas sees it (capture), whether
@@ -537,7 +537,7 @@ test('the focus is never left on the page: reduced motion, a panel closing, a sc
   // (A single card's new song rebuilds the shelf: focus outside the scenes, the header's, stays: 2026-10-24.)
   assert.match(body(app, '  showMenu: () => {', '\n  hideMenu:'), /pendingDetailFocus = !detailKeepFocus;\s*detailKeepFocus = false;\s*detailFocusTries = 0;/);
   assert.match(body(app, 'function showBrowseSurface(focus = true) {', '\n}'), /if \(!panel && !sourceMenuOpen && focus\) \$\("\[data-action=open\]"\)\.focus\(\{ preventScroll: true \}\);\s*(\/\/[^\n]*\n\s*)?if \(!panel && focus && document\.activeElement === document\.body\) requestAnimationFrame\(\(\) => \{\s*if \(document\.activeElement === document\.body\) focusScene\(\);\s*\}\);/);
-  assert.match(app, /const inScene = !!focused\?\.closest\("#music-browse, #music-detail, #music-song"\);\s*const sceneFocus = !focused \|\| focused === document\.body \|\| inScene \|\| !!focused\.closest\("#music-empty"\);/);
+  assert.match(app, /const inScene = !!focused\?\.closest\("#three-scene, #music-browse, #music-detail, #music-song"\);\s*const sceneFocus = !focused \|\| focused === document\.body \|\| inScene \|\| !!focused\.closest\("#music-empty"\);/);
   assert.match(app, /\} else showBrowseSurface\(sceneFocus\);/);
   // A panel whose opener cannot have the focus back (none: the panel a source switch kept open over the
   // new page; a notice's button, gone with the notice) leaves it on the scene's selection.
@@ -623,7 +623,7 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(app, /new SurfaceTransition\(\s*\$\("#music-detail"\),\s*\$\("#music-detail"\),\s*420,\s*200,\s*DETAIL_SCENE,\s*\)/);
   assert.match(app, /new SurfaceTransition\(\s*\$\("#detail-copy"\),\s*\$\("#detail-copy"\),\s*250,\s*170,\s*DETAIL_SWAP,\s*\)/);
   const hide = body(app, '  hideMenu: (done, together = false) => {', '\n  hideBrowse:');
-  assert.match(hide, /detailStay = presentation\.openingOrDetail && !menuSwapping && presentation\.pendingSelection\?\.route !== "archive"/);
+  assert.match(hide, /detailStay = presentation\.openingOrDetail && !menuSwapping && !presentation\.pendingSelection\?\.route/);
   // The old song's title and body are out of reach at once; the tag row with its ‹ › only once the
   // document has faded, so a second press while it fades (a double click) adds up as ↓ does (the
   // review of 2026-10-23: it fell through the inert document to the canvas, which ignores it there).
@@ -631,10 +631,10 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(body(app, '  showMenu: () => {', '\n  hideMenu:'), /content\.inert = \$\("#detail-title"\)\.inert = \$\("#detail-body"\)\.inert = false;/);
   // ‹ › pressed from the keyboard keep the focus: the new document's same button has it (a pointer's
   // press leaves it to the document, as before).
-  assert.match(app, /case "prev":\s*case "next":\s*(\/\/[^\n]*\n\s*)*detailStepFocus = target\.classList\.contains\("detail-step"\) && e\.detail === 0 \? action : undefined;\s*stepAlbum\(action === "prev" \? -1 : 1\);\s*break;/);
+  assert.match(app, /case "prev":\s*case "next":\s*(\/\/[^\n]*\n\s*)*stepAlbum\(action === "prev" \? -1 : 1\);\s*break;/);
   // (The details' player control that had the focus first: a single card's 下一曲 pressed from the keyboard.)
-  assert.match(app, /const target = \(detailMediaFocus && document\.querySelector<HTMLElement>\(`#detail-body \[data-media-action="\$\{detailMediaFocus\}"\]:not\(:disabled\)`\)\) \|\|\s*\(detailStepFocus && document\.querySelector<HTMLElement>\(`#detail-head \[data-action="\$\{detailStepFocus\}"\]`\)\) \|\|\s*\$\("#album-detail-content"\);\s*target\.focus\(\{ preventScroll: true \}\);/);
-  assert.match(hide, /detailStepFocus = detailMediaFocus = undefined;\s*detailKeepFocus = false;\s*\$\("#music-detail"\)\.inert = true;/, 'leaving the details forgets it');
+  assert.match(app, /const target = \(detailMediaFocus && document\.querySelector<HTMLElement>\(`#detail-body \[data-media-action="\$\{detailMediaFocus\}"\]:not\(:disabled\)`\)\) \|\|\s*\$\("#album-detail-content"\);\s*target\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(hide, /detailMediaFocus = undefined;\s*detailKeepFocus = false;\s*\$\("#music-detail"\)\.inert = true;/, 'leaving the details forgets it');
   // A scan applied in place (or NetEase's queue growing) under the same song's open details: its tag
   // row says where the song now stands, of how many; only the row is written again, a focused ‹ › kept.
   assert.equal((app.match(/writeSongDetailHead\(\);/g) || []).length, 3, 'local, NetEase and in-place refresh');
@@ -642,7 +642,7 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(body(app, 'async function applyLibrary(', '\n}\n'), /menu === "song" \? renderSongs\(\) : renderDetail\(\);\s*(\/\/[^\n]*\n\s*)*else if \(mode === "detail" && menu === "detail"\) refreshDetailHead\(\);/);
   const head = body(app, 'function refreshDetailHead() {', '\n}\n');
   assert.match(body(app, 'function writeDetailHead(', '\n}'), /if \(detailHeadShown === markup\) return;/);
-  assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /detailStay = false;\s*detailStepFocus = detailMediaFocus = undefined;\s*detailKeepFocus = false;/, 'also with Esc during the swap');
+  assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /detailStay = false;\s*detailMediaFocus = undefined;\s*detailKeepFocus = false;/, 'also with Esc during the swap');
   // Esc or a search while the document is away: the page leaves with the camera.
   assert.match(body(app, '  mode: (next) => {', '\n  prepareMenu:'), /detailStay = false;[\s\S]*detailTransition\.hide\(preferences\.reduced\);/);
   // The title has the shelf's reel (no per-character stagger), rolled in only when the document returns.
@@ -657,7 +657,7 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(app, /\? `<button data-action="detail-play" id="detail-toggle" class="detail-control detail-toggle"[^`]*`\s*: `<button data-media-action="toggle" id="detail-toggle" class="detail-control detail-toggle"/);
   assert.match(app, /\$\{externalControls\(true\)\}\$\{detailNote\}/, 'the queue\'s details: the song\'s ring');
   assert.match(app, /\$\{externalControls\(false\)\}\$\{detailNote\}/, 'a lone live track: its player\'s own');
-  assert.match(app, /<button data-media-action="stop" class="detail-control detail-stop"/);
+  assert.doesNotMatch(app, /<button data-media-action="stop"/);
   assert.doesNotMatch(body(app, 'function updateExternalControls() {', '\nfunction '), /textContent = toggleLabel/);
   // The redesign for the lyrics (the owner, 2026-10-17: "Redesign scene 2. It shouldn't show 曲目数
   // anymore"): no facts in any document. The artist and the album on one line, the album muted after
@@ -668,9 +668,9 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   assert.match(app, /const detailArtist = \(artist: string, album: string \| undefined, after = "", albumData = ""\) =>\s*`<p class="detail-artist"><span class="detail-artist-name">\$\{esc\(artist\)\}<\/span><span class="detail-album"\$\{albumData\}\$\{album \? "" : " hidden"\}>\$\{esc\(album \?\? ""\)\}<\/span>\$\{after\}<\/p>`;/);
   assert.match(app, /ensureDetailBody\("queue", `\$\{externalControls\(true\)\}\$\{detailNote\}\$\{lyricsBox\}`\);/, 'NetEase\'s queue: the lyrics after the warning');
   assert.match(app, /ensureDetailBody\("live", `\$\{externalControls\(false\)\}\$\{detailNote\}`\);/, 'a lone live track: no lyrics');
-  assert.match(app, /\$\{detailTimeline\("local-seek", "播放位置", "local"\)\}\$\{lyricsBox\}<div id="detail-about"><\/div>`\);/, 'a local song: the lyrics before its album\'s introduction');
+  assert.match(app, /\$\{detailTimeline\("local-seek", "播放位置", "local"\)\}<\/div>\$\{lyricsBox\}<div id="detail-about"><\/div>`\);/, 'a local song: the lyrics before its album\'s introduction');
   assert.match(css, /\.music-app \.detail-album::before \{\s*content: "·";\s*margin-right: 12px;\s*\}/);
-  assert.match(css, /\.music-app \.detail-transport \{[^}]*border-top: 1px solid var\(--rule\);[^}]*\}/, 'the transport carries the rule the facts had');
+  assert.match(css, /\.music-app \.detail-player-row \{[^}]*border-top: 0;[^}]*padding-top: 1px;[^}]*\}/, 'the removed separator preserves its layout space');
   // No descriptive line under the timeline any more (the owner, 2026-10-07; this replaces the
   // limit line of 2026-10-05): only the player's warning, when there is one.
   assert.doesNotMatch(app, /data-detail-limit|detail-limit|LONE_TRACK_NOTE|queueControlLimit|只显示当前曲目/);
@@ -705,7 +705,7 @@ test('the details (2026-10-05 design): the page stays while its document swaps; 
   // Placement follows data-layout; width queries only size (large windows, narrow portrait); short
   // windows (desktop and compact, 700 px or less) put the two ways out on one line above the case.
   // (Forced colours only keep the transport's marks drawn.)
-  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(forced-colors: active)', '(min-width: 1700px)', '(max-height: 700px)', '(max-width: 700px)']);
+  assert.deepEqual([...css.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1].trim()), ['(forced-colors: active)', '(min-width: 1700px)', '(max-height: 700px)', '(max-width: 700px)', '(max-width: 600px)']);
   assert.match(css, /\.music-app #album-detail-content \{[^}]*left: 52%;[^}]*right: max\(60px, calc\(48% - 632px\)\);/);
 });
 
@@ -841,7 +841,7 @@ test('the song scene (2026-10-05 design, direction B): one pane, its tab and ree
   // The pane stays under the header's row (fitChrome writes where it ends).
   assert.match(body(app, 'function syncSongCard() {', '\n}'), /songView\.setCard\(songCardRect\([^\n]*\), chromeBottom\);/);
   // The steps say what they do in their tooltip as well as their name.
-  assert.match(render, /\$\(id\)\.setAttribute\("aria-label", words\);\s*\$\(id\)\.title = words;/);
+  assert.doesNotMatch(render, /song-prev|song-next/);
 });
 
 test('the titles\' measuring probes never transition: after a resize a title breaks as one laid out at that size', () => {
@@ -1108,7 +1108,7 @@ test('a click that plays and opens the lifted case: no hop, the waves and the ru
   // the large card and S) leaves the hop out: the case drawn out is the motion. Every way of playing
   // goes through requestPlay, which hands its `hop` to playSelection.
   assert.equal((app.match(/playSelection\([^;\n]*\bfalse\)/g) || []).length, 0);
-  assert.equal((app.match(/requestPlay\([^;\n]*\bfalse\)/g) || []).length, 2);
+  assert.equal((app.match(/requestPlay\([^;\n]*\bfalse\)/g) || []).length, 3);
   assert.equal((body(app, 'function openCase(', '\n}').match(/requestPlay\(index, false\);/g) || []).length, 2);
   assert.match(body(app, 'function requestPlay(', '\n}'), /^function requestPlay\(index: number, hop = true\) \{\s*if \(selectionPlay\(index\)\) \{\s*playSelection\(index, hop\);/);
   assert.match(app, /requestPlay\(Number\.isInteger\(index\) \? index : navigationSelection\(\)\);/);
@@ -1186,7 +1186,7 @@ test('the shelf\'s and the details\' ring are their song\'s play button; the hea
   assert.match(chrome, /\.music-app \.play-ring \.transport-play,\s*\.music-app \.play-ring\[aria-pressed="true"\] \.transport-pause \{\s*opacity: 1;/);
   assert.match(detailCss, /\.music-app \.detail-toggle\[data-ring="plain"\] \.detail-ring::before \{\s*background: var\(--ink\);/);
   // The details' previous, next and stop stay what plays (NetEase's own controls).
-  assert.match(app, /<button data-media-action="previous" class="detail-control"[^`]*\$\{ring\}\$\{detailDivider\}<button data-media-action="next" class="detail-control"[^`]*<button data-media-action="stop"/);
+  assert.match(app, /<button data-media-action="previous" class="detail-control"[^`]*\$\{ring\}\$\{detailDivider\}<button data-media-action="next" class="detail-control"/);
 });
 
 // The owner, 2026-10-09: "in the detail of a song isnt playing, dont show the timeline, when it starts
@@ -1322,9 +1322,9 @@ test('设置 is an index of sections, 快捷键 among them, whose keys take the 
   assert.match(body(app, 'function panelSections(kind: IndexedPanel): [string, string][] {', '\n}'), /return kind === "settings" \? settingsSections\(\) : LIBRARY_SECTIONS;/);
   assert.match(app, /const LIBRARY_SECTIONS: \[LibrarySection, string\]\[\] = \[\["folder", "主文件夹"\], \["lists", "歌单"\], \["online", "在线资料"\]\];/);
   // 搜索's index is a filter: radios, the chosen one the one Tab reaches, the arrows choose.
-  assert.match(body(app, 'function renderSearchPanel() {', '\n}'), /<button role="radio" data-filter="\$\{esc\(id\)\}" aria-checked="\$\{on\}" tabindex="\$\{on \? 0 : -1\}"/);
+  assert.match(body(app, 'function renderSearchPanel() {', '\n}'), /<button role="radio" data-filter="\$\{esc\(id\)\}" aria-checked="false" tabindex="-1"/);
   assert.match(body(app, 'function panelTabKey(e: KeyboardEvent) {', '\n}'), /if \(next\.dataset\.filter !== undefined\) setSearchFilter\(next\.dataset\.filter\);\s*else setPanelSection\(next\.dataset\.panelTab!\);\s*next\.focus\(\);/);
-  assert.match(app, /const SETTINGS_SECTIONS: \[SettingsSection, string\]\[\] = \[\s*\["look", "外观"\], \["motion", "动效与显示"\], \["sound", "声音"\], \["quality", "画质"\],\s*\["notes", "专辑介绍"\], \["keys", "快捷键"\], \["about", "关于"\],\s*\];/);
+  assert.match(app, /const SETTINGS_SECTIONS: \[SettingsSection, string\]\[\] = \[\s*\["look", "外观"\], \["motion", "显示与性能"\], \["sound", "声音"\],\s*\["notes", "专辑介绍"\], \["keys", "快捷键"\], \["about", "关于"\],\s*\];/);
   assert.match(app, /<div class="settings-tabs" role="\$\{search \? "radiogroup" : "tablist"\}" aria-orientation="vertical" aria-label="\$\{titles\[next\]\[2\]\}"><\/div>/);
   assert.match(app, /<div id="panel-body" class="settings-body">\$\{search \? '<div id="album-results" class="panel-rows"><\/div>' : '<div id="panel-tabpanel" class="panel-rows" role="tabpanel"><\/div>'\}<\/div>/);
   assert.match(app, /settings: \["SYSTEM SETTINGS", "设置", "设置分类"\],/);
@@ -1419,4 +1419,42 @@ test('song detail controls stay mounted while the song identity changes', () => 
   assert.match(leaving, /const content = \$\("#detail-copy"\)/);
   assert.doesNotMatch(leaving, /#album-detail-content/);
   assert.match(body(app, 'function writeSongDetailHead()', '\n}'), /setupRollingNumber\(\$\("#detail-code-number"\), 3\)/);
+});
+
+
+test('search offers matching playlists and defaults to the current list without overriding a manual choice', () => {
+  const extract = (name) => {
+    const from = app.indexOf(`function ${name}(`);
+    return app.slice(from, app.indexOf('\n}', from) + 2);
+  };
+  const code = `
+    const albums=data, genres=groups, localShelf={songs:new Map()}, externalMedia=undefined;
+    const genreName=id=>groups.find(g=>g.id===id)?.name??'';
+    const esc=value=>String(value), index={innerHTML:''}, $=()=>index;
+    let query='', searchGenre='', searchPreferredGenre=preferred, searchIndexVisual='';
+    let searchFilterQuery, searchManualFilter=false;
+    const searchQuery=()=>query, syncSearchFilter=()=>{}, renderSearchResults=()=>{};
+    ${extract('searchAlbumName')}
+    ${extract('matchingSearchAlbums')}
+    ${extract('renderSearchPanel')}
+    return (next,manual)=>{
+      query=next.toLowerCase();
+      if(manual!==undefined){searchGenre=manual;searchManualFilter=true;}
+      renderSearchPanel();
+      return {filter:searchGenre,lists:JSON.parse(searchIndexVisual).map(g=>g.id)};
+    };
+  `;
+  const run = new Function('data','groups','preferred',ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText);
+  const album=(id,title,genreId)=>({id,title,genreId,artist:'Fixture artist',tracks:[{album:'Fixture album'}]});
+  const data=[album('1','Shared','a'),album('2','Shared','b'),album('3','Beta only','b'),album('4','Night','c')];
+  const groups=['a','b','c'].map(id=>({id,name:id.toUpperCase()}));
+  const search=run(data,groups,'a');
+  assert.deepEqual(search('shared'),{filter:'a',lists:['','a','b']});
+  assert.deepEqual(search('shared',''),{filter:'',lists:['','a','b']});
+  assert.deepEqual(search('shared'),{filter:'',lists:['','a','b']});
+  assert.deepEqual(search('beta'),{filter:'',lists:['','b']});
+  assert.deepEqual(search('shared'),{filter:'a',lists:['','a','b']});
+  assert.deepEqual(search('missing'),{filter:'',lists:['']});
+  assert.deepEqual(search(''),{filter:'',lists:['','a','b','c']});
+  assert.deepEqual(run(data,groups,'c')('shared'),{filter:'',lists:['','a','b']});
 });
