@@ -179,27 +179,6 @@
   border-radius: 50%;
   background: var(--state);
 }
-.music-app .shelf-links {
-  display: flex;
-  align-items: center;
-  gap: 32px;
-  margin-left: auto;
-  font-size: 13px;
-  line-height: 1;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.music-app .shelf-links button {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  height: 32px;
-  color: var(--ink);
-  transition: opacity 120ms ease;
-}
-.music-app .shelf-links button:hover {
-  opacity: 0.65;
-}
 .music-app .link-chevron {
   display: block;
   flex: none;
@@ -690,14 +669,6 @@
   .music-app[data-layout="desktop"] .shelf-play-status {
     font-size: 13px;
   }
-  .music-app[data-layout="desktop"] .shelf-links {
-    gap: 38px;
-    font-size: 15px;
-  }
-  .music-app[data-layout="desktop"] .shelf-links button {
-    gap: 10px;
-    height: 36px;
-  }
   .music-app[data-layout="desktop"] .album-callout > .playlist-drum {
     min-height: calc(28px + 9px + var(--drum-row));
     gap: 9px;
@@ -813,9 +784,6 @@
 .music-app[data-layout="compact"] .shelf-actions {
   margin-top: 20px;
 }
-.music-app[data-layout="compact"] .shelf-links {
-  gap: 24px;
-}
 .music-app[data-layout="compact"] .album-callout > .playlist-drum {
   margin-top: 24px;
 }
@@ -851,9 +819,6 @@
 .music-app[data-layout="portrait"] .shelf-actions {
   margin-top: 16px;
 }
-.music-app[data-layout="portrait"] .shelf-links {
-  gap: 24px;
-}
 .music-app[data-layout="portrait"] .album-callout > .playlist-drum {
   margin-top: 16px;
 }
@@ -874,9 +839,5 @@
 @media (max-width: 700px) {
   .music-app[data-layout="portrait"] .album-callout h1 {
     font-size: var(--album-title-size, 25px);
-  }
-  .music-app[data-layout="portrait"] .shelf-links {
-    gap: 18px;
-    font-size: 12px;
   }
 }

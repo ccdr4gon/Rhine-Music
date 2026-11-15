@@ -38,9 +38,11 @@ export function setupRollingNumber(element: HTMLElement, digits: number) {
     format: { minimumIntegerDigits: digits, useGrouping: false },
   });
   return {
-    update(value: number, animated: boolean) {
-      reel.update({ value, animated, direction: "auto" });
+    update(value: number, animated: boolean, direction: "auto" | "up" | "down" = "auto") {
+      reel.update({ value, animated, direction });
     },
+    setEnabled(animated: boolean) { reel.update({ animated }); },
+    destroy() { reel.destroy(); },
   };
 }
 

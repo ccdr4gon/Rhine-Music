@@ -209,7 +209,6 @@ test('rows come in blocks of exactly known size', () => {
 
 test('the scene markup carries the hooks the app relies on', () => {
   const markup = songSceneMarkup();
-  assert.match(markup, /<button class="music-back" data-action="back">.*<span id="song-back-label">返回专辑架<\/span>.*<kbd>ESC<\/kbd><\/button>/);
   assert.match(markup, /<button id="song-prev" data-action="prev" aria-label="[^"]+">/);
   assert.match(markup, /<button id="song-next" data-action="next" aria-label="[^"]+">/);
   assert.match(markup, /<div id="song-glass" class="song-glass">/);
@@ -409,37 +408,13 @@ test('the song scene has no note: no element, no layout for it, no grid area', (
 // The owner, 2026-10-10: "move the song detail button here" (over the large card's top right),
 // "parallel with this" (level with the selected song's title on the pane, which ends where the
 // card's top edge is drawn). 返回专辑架 stays where it was, alone.
-test('这首歌 stands over the large card\'s top right, level with the pane\'s title; 返回专辑架 alone at the top left', () => {
-  const markup = songSceneMarkup();
-  const exits = markup.slice(markup.indexOf('<div class="song-exits">'), markup.indexOf('</div>', markup.indexOf('<div class="song-exits">')));
-  assert.match(exits, /data-action="back"/);
-  assert.doesNotMatch(exits, /song-details/, 'no longer under 返回专辑架');
-  assert.match(markup, /<\/div>\s*<button class="music-back song-details" data-action="details"><span>↗ <span id="song-details-label">专辑详情<\/span><\/span> <kbd>S<\/kbd><\/button>\s*<p class="song-caption">/);
-  const rule = css.slice(css.indexOf('\n.song-chrome .song-details {'), css.indexOf('}', css.indexOf('\n.song-chrome .song-details {')));
-  // Its middle on the title's second line as alignDetails measures it; before that (and in portrait)
-  // just over the card's drawn top edge.
-  assert.match(rule, /position: absolute;\s*right: calc\(100% - var\(--songs-card-right\)\);\s*top: var\(--songs-details-y, calc\(var\(--songs-card-top\) - 16px\)\);\s*transform: translateY\(-50%\);/);
-  assert.doesNotMatch(css, /\.song-exits \.song-details/);
-  // alignDetails: the title's second line in the pane's own layout (offsets, untouched by the pane's
-  // turn and entrance), projected as the pane is turned, kept clear above the case; not in portrait.
-  const source = readFileSync(new URL('../src/song-list.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const align = source.slice(source.indexOf('  alignDetails() {'), source.indexOf('  private setDetailsY('));
-  assert.match(align, /if \(!placed \|\| placed\.portrait\) return this\.setDetailsY\(""\);/);
-  assert.match(align, /for \(let at: HTMLElement \| null = this\.title; at && at !== this\.glass; at = at\.offsetParent as HTMLElement \| null\) \{\s*x \+= at\.offsetLeft;\s*y \+= at\.offsetTop;\s*\}/);
-  assert.match(align, /const second = projectSheet\(glass, x - glass\.width \/ 2, y \+ 1\.5 \* line - glass\.height \/ 2\)\.y;/);
-  assert.match(align, /const centre = Math\.min\(second, card\.y - card\.height \/ 2 - 4 - this\.details\.offsetHeight \/ 2\);/);
-  assert.doesNotMatch(align, /getBoundingClientRect|getClientRects/, 'not the boxes on the screen, which the entrance moves');
+test('scene navigation is outside the song scene and does not need card-position measurements', () => {
+  assert.doesNotMatch(songSceneMarkup(), /song-details|song-exits|song-back-label/);
+  const source = readFileSync(new URL('../src/song-list.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /alignDetails|setDetailsY|--songs-card-right/);
   const app = readFileSync(new URL('../src/music-app.ts', import.meta.url), 'utf8');
-  assert.match(app, /songTransition\.show\(preferences\.reduced\);\s*\/\/[^\n]*\n\s*songView\.alignDetails\(\);/, 'measured once the pane has a box');
-  for (const [width, height] of [[1440, 900], [1920, 1080], [1280, 720], [1000, 700], [820, 1180]]) {
-    const { layout, card } = placed(width, height);
-    const style = songLayoutStyle(layout);
-    assert.equal(style['--songs-card-right'], `${Math.round(layout.card.right * 100) / 100}px`, `${width}x${height}`);
-    // The case's right edge as it is seen: its face's, not the reach of its glow (the rail and the pane keep clear of that).
-    assert.equal(layout.card.right, card.x + card.width / 2, `${width}x${height}: the face's right edge`);
-    assert.equal(layout.card.top, layout.rail.top, `${width}x${height}: the card's drawn top, where the rail stops`);
-    assert.ok(layout.card.right > layout.rail.x, `${width}x${height}: right of the rail`);
-  }
+  assert.match(app, /data-action="songs" data-scene="song"/);
+  assert.match(app, /data-action="open" data-scene="detail"/);
 });
 
 test('1440 x 900 is the design\'s pane; other sizes follow it', () => {

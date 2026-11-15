@@ -226,12 +226,12 @@ export class ExternalMediaConnection {
   setGlobalMediaKeys(allowed: boolean): void {
     this.allowGlobalMediaKeys = allowed && this.selected?.kind === "netease";
   }
-  refresh(): Promise<void> {
+  refresh(connectPreferred = true): Promise<void> {
     if (this.refreshTask) return this.refreshTask;
-    this.refreshTask = this.readSnapshot().finally(() => { this.refreshTask = undefined; });
+    this.refreshTask = this.readSnapshot(connectPreferred).finally(() => { this.refreshTask = undefined; });
     return this.refreshTask;
   }
-  private async readSnapshot(): Promise<void> {
+  private async readSnapshot(connectPreferred: boolean): Promise<void> {
     try {
       // The covers held are not sent again while they stay the same: each is kept from the last read.
       const held = new Map(this.sources.map(source => [source.id, source]));
@@ -251,7 +251,7 @@ export class ExternalMediaConnection {
         this.disconnected = true;
         this.allowGlobalMediaKeys = false;
       }
-      this.connectPreferred();
+      if (connectPreferred) this.connectPreferred();
     } catch (error) {
       this.unread = true;
       this.sources = [];

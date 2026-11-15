@@ -213,10 +213,6 @@ export function playlistSongModel(
 export function songSceneMarkup(): string {
   return `<div class="song-chrome">
     <i class="song-rail song-rail-top" aria-hidden="true"></i><i class="song-rail song-rail-bottom" aria-hidden="true"></i><i class="song-marker" aria-hidden="true"></i>
-    <div class="song-exits">
-      <button class="music-back" data-action="back"><span>← <span id="song-back-label">返回专辑架</span></span> <kbd>ESC</kbd></button>
-    </div>
-    <button class="music-back song-details" data-action="details"><span>↗ <span id="song-details-label">专辑详情</span></span> <kbd>S</kbd></button>
     <p class="song-caption"><i aria-hidden="true"></i><span id="song-label"></span></p>
   </div>
   <div id="song-glass" class="song-glass">
@@ -473,7 +469,6 @@ export function songLayoutStyle(layout: SongSceneLayout): Record<string, string>
     "--songs-rail-x": px(Math.round(rail.x)),
     "--songs-card-top": px(rail.top),
     "--songs-card-bottom": px(rail.bottom),
-    "--songs-card-right": px(layout.card.right),
     "--songs-marker-y": px(rail.marker),
     "--songs-glass-x": px(glass.x - glass.width / 2),
     "--songs-glass-y": px(glass.y - glass.height / 2),
@@ -633,10 +628,6 @@ export class SongListView {
   private readonly title: HTMLElement;
   private readonly steps: HTMLElement;
   private readonly glass: HTMLElement;
-  private readonly details: HTMLElement;
-  /** The pane's layout and the card as setCard last placed them, for alignDetails. */
-  private placed: { layout: SongSceneLayout; card: SongCard; portrait: boolean } | undefined;
-  private detailsY = "";
   private readonly text: Record<"subtitle" | "tab" | "tabLabel" | "tabTotal" | "count" | "countNote" | "label", HTMLElement>;
   private rows: HTMLButtonElement[] = [];
   private rowKeys: string[] = [];
@@ -680,9 +671,6 @@ export class SongListView {
     this.title = find(".song-title");
     this.steps = find(".song-steps");
     this.glass = find(".song-glass");
-    this.details = find(".song-details");
-    // The pane's type settles once its fonts arrive: 这首歌 follows the title's line.
-    document.fonts?.addEventListener?.("loadingdone", () => this.alignDetails());
     this.text = {
       subtitle: find(".song-subtitle"),
       tab: find("#song-tab-text"), tabLabel: find("#song-tab-label"), tabTotal: find("#song-tab-total"),
@@ -894,45 +882,12 @@ export class SongListView {
     const layout = songSceneLayout(width, height, rect, portrait, chromeBottom);
     const style = songLayoutStyle(layout);
     const key = JSON.stringify([layout.mode, layout.rail.shown, layout.rail.markerShown, style]);
-    this.placed = { layout, card: rect, portrait };
     if (key !== this.layoutKey) {
       this.layoutKey = key;
       for (const [name, value] of Object.entries(style)) this.root.style.setProperty(name, value);
       this.root.dataset.panel = layout.mode;
       this.root.dataset.rail = layout.rail.shown ? (layout.rail.markerShown ? "marker" : "line") : "none";
     }
-    this.alignDetails();
-  }
-
-  /**
-   * 这首歌 level with the second line of the selected song's title on the pane (the owner,
-   * 2026-10-10: "parallel with this", beside a two-line title's second line): where that line is,
-   * or would be, in the pane's own layout (its offsets, which the pane's turn and its entrance do
-   * not change), projected as the pane is turned (projectSheet). It keeps clear above the case, and
-   * its place does not move with the title's length. Not in portrait (the title is in the pane under
-   * the card) and not before the pane has a box: there the card's top edge places it (song-scene.css).
-   */
-  alignDetails() {
-    const placed = this.placed;
-    if (!placed || placed.portrait) return this.setDetailsY("");
-    if (this.root.hidden || !this.glass.offsetWidth) return;
-    let x = 0, y = 0;
-    for (let at: HTMLElement | null = this.title; at && at !== this.glass; at = at.offsetParent as HTMLElement | null) {
-      x += at.offsetLeft;
-      y += at.offsetTop;
-    }
-    const line = Number.parseFloat(getComputedStyle(this.title).lineHeight);
-    if (!Number.isFinite(line) || line <= 0) return;
-    const { layout: { glass }, card } = placed;
-    const second = projectSheet(glass, x - glass.width / 2, y + 1.5 * line - glass.height / 2).y;
-    const centre = Math.min(second, card.y - card.height / 2 - 4 - this.details.offsetHeight / 2);
-    if (Number.isFinite(centre)) this.setDetailsY(`${Math.round(centre * 4) / 4}px`);
-  }
-  private setDetailsY(value: string) {
-    if (value === this.detailsY) return;
-    this.detailsY = value;
-    if (value) this.root.style.setProperty("--songs-details-y", value);
-    else this.root.style.removeProperty("--songs-details-y");
   }
 
   private focusable(preferred?: HTMLButtonElement) {

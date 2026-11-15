@@ -41,6 +41,8 @@ const NAVIGATION = ".music-navigation", COUNTS = ["#selection-number", "#selecti
 const HINTS = ".music-keyhint";
 /** The window's own buttons. */
 const WINDOW = ".window-controls";
+/** Reserve the two scene links and the conditional return, including its hidden slot. */
+const SCENE_NAV = "#scene-nav";
 /** How many digits the counter's numbers are given room for. */
 const DIGITS = "0000";
 /** The selected name's kicker begins as the playlist list's head does (music-app.ts: PLAYLIST 04 / 11). */
@@ -360,6 +362,8 @@ export class LaneNameLayer {
       const tall = Math.max(row.bottom - row.top, Number.parseFloat(getComputedStyle(hints).fontSize) || 0);
       avoid.push({ left: 0, top: row.bottom - tall, right: origin.width, bottom: row.bottom });
     }
+    const sceneNav = box(find(SCENE_NAV));
+    if (sized(sceneNav)) avoid.push(sceneNav);
     const buttons = box(find(WINDOW));
     if (sized(buttons)) avoid.push(buttons);
     for (const element of found) {

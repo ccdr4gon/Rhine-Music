@@ -16,7 +16,7 @@ import { SidePrograms } from "./side-programs";
 import { archiveColumns, columnFiles, fileAtSlot, fileLocation, musicLibrary, records, slotStride } from "./data";
 import { CoverAtlas } from "./cover-atlas";
 import { MusicSelectionLighting } from "./music-lighting";
-import { LANE_LABEL, LANE_PLANE, convexHull, laneLabelRange, laneLabelShares, laneLabelSlots, laneStepPoses, quadMatrix, type LaneBox, type LaneLabelSlots, type LaneName, type LanePlace, type LanePoint, type LaneSide } from "./lane-labels";
+import { LANE_LABEL, LANE_PLANE, anchorLaneMatrix, convexHull, laneLabelRange, laneLabelShares, laneLabelSlots, laneStepPoses, quadMatrix, type LaneBox, type LaneLabelSlots, type LaneName, type LanePlace, type LanePoint, type LaneSide } from "./lane-labels";
 import { LaneNameLayer } from "./lane-names";
 import { MUSIC_LENS, MusicCameraMotion, MusicPlacementMotion, MusicPresentation, musicLens, musicArchiveTracksSettled, musicCinematicPose, musicExtractionAnchor } from "./music-camera";
 import { MUSIC_CASE_ASSET } from "./music-case-asset";
@@ -170,9 +170,6 @@ export class ArchiveScene {
   private coordinateOrigin: ArchiveCell = { lane: 0, row: 0 };
   private lift = { value: 0, velocity: 0 };
   private rail = { value: 0, velocity: 0 };
-  // Rows the lifted case still has to travel after relayout moved its song along its column: it
-  // goes with the rail, so it keeps its place on screen while the shelf moves under it.
-  private relayoutRows = { value: 0, velocity: 0 };
   private shoulder = { value: 12, velocity: 0 };
   private laneFocus = { value: 2, velocity: 0 };
   private columnCamera = { value: 0, velocity: 0 };
@@ -243,6 +240,8 @@ export class ArchiveScene {
   /** The shelf's camera at rest (shelfRestCamera), which the names' slots are seen with. */
   private readonly restCamera = new THREE.PerspectiveCamera();
   private readonly restProbe = new THREE.Vector3();
+  private readonly laneCameraProbe = new THREE.Vector3();
+  private laneNamesFollowCamera = false;
   /** The names' slots, the selection bracket at rest (and the case's front face), what else they keep clear of, and the view they were worked out for. */
   private laneSlots: { view: string; bracket: LaneBox; face: LanePoint[]; keep: LanePoint[][]; places: Record<LaneSide, LanePlace[]>; slots: LaneLabelSlots } | null = null;
   private laneSlotView = "";
@@ -768,7 +767,6 @@ export class ArchiveScene {
     this.shoulder = { value: location.row, velocity: 0 };
     this.laneFocus = { value: location.lane, velocity: 0 };
     this.columnCamera = { value: (location.lane - 2) * COLUMN_SPACING, velocity: 0 };
-    this.relayoutRows = { value: 0, velocity: 0 };
     await this.covers.select(records[index]);
   }
 
@@ -800,18 +798,20 @@ export class ArchiveScene {
       lane: nearestOccurrence(location.lane, before.lane, archiveColumns.length),
       row: nearestOccurrence(location.row, before.row, columnFiles(location.lane).length),
     };
-    const lanes = cell.lane - before.lane;
+    const lanes = cell.lane - before.lane, rows = cell.row - before.row;
     this.selectedCell = cell;
-    // Its song moved along the column (a song more or less before it): the lifted case keeps its
-    // place on screen and goes with the shelf, which follows its new row at the rail's pace.
-    this.relayoutRows.value += cell.row - before.row;
-    if (!lanes) return;
+    // A new queue may reorder this song. Rebase every row-dependent track together, including
+    // the wave's shoulder: preserving only its Z position made the lifted case fall off its crest.
+    // Values move to the new coordinates; velocities, extraction and camera progress are untouched.
+    this.coordinateOrigin.row -= rows;
+    this.shoulder.value += rows;
+    this.rail.value -= rows * ROW_SPACING;
     this.coordinateOrigin.lane -= lanes;
     this.laneFocus.value += lanes;
     this.columnCamera.value += lanes * COLUMN_SPACING;
-    for (const old of this.outgoing) old.cell.lane += lanes;
-    for (const pulse of this.pulses) pulse.lane += lanes;
-    if (this.pendingPulse) this.pendingPulse.lane += lanes;
+    for (const old of this.outgoing) { old.cell.lane += lanes; old.cell.row += rows; }
+    for (const pulse of this.pulses) { pulse.lane += lanes; pulse.row += rows; }
+    if (this.pendingPulse) { this.pendingPulse.lane += lanes; this.pendingPulse.row += rows; }
   }
 
   /**
@@ -1112,7 +1112,6 @@ export class ArchiveScene {
     this.lift = { value: MUSIC_PREVIEW_LIFT, velocity: 0 };
     const chosen = this.cellPosition(this.selectedCell);
     this.rail = { value: -2.17 - chosen.z, velocity: 0 };
-    this.relayoutRows = { value: 0, velocity: 0 };
     this.columnCamera = { value: chosen.x, velocity: 0 };
     this.shoulder = { value: this.selectedCell.row, velocity: 0 };
     this.laneFocus = { value: this.selectedCell.lane, velocity: 0 };
@@ -1702,19 +1701,15 @@ export class ArchiveScene {
       this.reduced ? 35 : detailNavigation ? MUSIC_ALBUM_SWITCH_RATE : 3.7,
       dt,
     );
-    // At the rail's own rate, from rest: the two cancel (relayout).
-    damp(this.relayoutRows, 0, this.reduced ? 35 : detailNavigation ? MUSIC_ALBUM_SWITCH_RATE : 3.7, dt);
     if (detailNavigation && this.reduced) {
       this.shoulder = { value: selectedRow, velocity: 0 };
       this.laneFocus = { value: selectedLane, velocity: 0 };
       this.columnCamera = { value: chosen.x, velocity: 0 };
       this.rail = { value: -2.17 - chosen.z, velocity: 0 };
-      this.relayoutRows = { value: 0, velocity: 0 };
     }
     if (cinematic) {
       this.rail.value = musicIntro ? -2.17 - chosen.z : 0;
       this.rail.velocity = 0;
-      this.relayoutRows = { value: 0, velocity: 0 };
       this.lift.value = musicIntro
         ? THREE.MathUtils.lerp(extraction(late), previewLift, introSettle)
         : extraction(shot);
@@ -2008,7 +2003,7 @@ export class ArchiveScene {
     this.model.position.set(
       chosen.x - trackX,
       chosen.y + field(selectedRow, selectedLane, false) + this.lift.value,
-      chosen.z + entryZ + this.rail.value - this.relayoutRows.value * ROW_SPACING,
+      chosen.z + entryZ + this.rail.value,
     );
     // Extraction only changes elevation. Reframing belongs to the camera.
     this.model.rotation.set(
@@ -2434,6 +2429,8 @@ export class ArchiveScene {
    * (laneLabelShares; a swap at half a column with reduced motion). The waves, the lifted case,
    * the play gesture, the idle drift, the wheel and a step along a column move none of them.
    * `shown` is how much of the browsing view is on screen; the names fade where they stand.
+   * While the camera enters or returns, only the neighbours' plane transforms follow it;
+   * their screen anchors and the cached text layout stay fixed.
    */
   private placeLaneLabels(centre: number, shown: number) {
     const names = this.laneNames;
@@ -2442,7 +2439,10 @@ export class ArchiveScene {
     if (!layer) return;
     layer.begin();
     const width = visible ? this.container.clientWidth : 0, height = visible ? this.container.clientHeight : 0;
-    const slots = visible ? this.laneLabelSlots(layer, width, height) : null;
+    const restingSlots = visible ? this.laneLabelSlots(layer, width, height) : null;
+    if (this.targetDetail || this.detail > 0.001 || this.songProgress > 0.001) this.laneNamesFollowCamera = true;
+    else if (this.musicArchiveReady) this.laneNamesFollowCamera = false;
+    const slots = restingSlots && this.laneNamesFollowCamera ? this.laneCameraSlots(restingSlots, width, height) : restingSlots;
     if (names && slots) {
       // The track's spring never quite stops: within a hundred-thousandth of a column of its
       // column (well under a hundredth of a pixel) the names stand exactly at their slots.
@@ -2467,6 +2467,25 @@ export class ArchiveScene {
       }
     }
     layer.end();
+  }
+  /** Only the two neighbouring names follow the moving camera. Slots and text measurements stay cached. */
+  private laneCameraSlots(slots: LaneLabelSlots, width: number, height: number): LaneLabelSlots {
+    const result = { ...slots };
+    for (const role of ["nearer", "further"] as const) {
+      const slot = slots[role], plane = slot.plane;
+      if (!slot.shown || !plane) continue;
+      // The near column slides back with the shelf while the details open.
+      const shiftX = role === "nearer" ? MUSIC_COLUMN_FORWARD * (1 - (1 - this.detail) * (1 - this.songProgress)) : 0;
+      const quad = plane.corners.map(([x, y, z]) => {
+        const p = this.laneCameraProbe.set(x + shiftX, y, z).project(this.camera);
+        return { x: (p.x + 1) * width / 2, y: (1 - p.y) * height / 2 };
+      });
+      const matrix = quadMatrix(plane.width, plane.height, quad);
+      if (!matrix.every(Number.isFinite)) continue;
+      // Keep the readable screen position; only the plane's orientation and perspective follow.
+      result[role] = { ...slot, matrix: anchorLaneMatrix(matrix, plane.baseline, slot) };
+    }
+    return result;
   }
   private createLaneNameLayer() {
     const layer = new LaneNameLayer(this.container);
@@ -2608,10 +2627,13 @@ export class ArchiveScene {
         const foot = project(origin), head = project(origin.clone().setY(origin.y + 1));
         // World units per px: one px of the name's height is one px of the picture.
         const scale = 1 / Math.hypot(head.x - foot.x, head.y - foot.y);
-        const point = (u: number, v: number) => project(origin.clone().addScaledVector(along, u * scale).setY(origin.y + (type.ascent - v) * scale));
+        const worldPoint = (u: number, v: number) => origin.clone().addScaledVector(along, u * scale).setY(origin.y + (type.ascent - v) * scale);
+        const point = (u: number, v: number) => project(worldPoint(u, v));
         const matrix = quadMatrix(size, line, [point(0, 0), point(size, 0), point(size, line), point(0, line)]);
         const reach = (MUSIC_MODEL.width * Math.abs(along.x) + 8 * ROW_SPACING * Math.abs(along.z) - start) / scale;
-        places.push({ matrix, reach, row, along: start });
+        const corners = [worldPoint(0, 0), worldPoint(size, 0), worldPoint(size, line), worldPoint(0, line)]
+          .map(point => point.toArray() as [number, number, number]);
+        places.push({ matrix, reach, row, along: start, plane: { corners, width: size, height: line, baseline: type.ascent } });
       }
     }
     return places;

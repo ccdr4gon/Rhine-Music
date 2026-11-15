@@ -1,6 +1,6 @@
-/* The desktop window's own title bar (window-frame.ts): no title, a strip along the top edge
-   that drags the window, and three buttons at the right in the size of Windows' own. It lies
-   above everything on the page, the intro's overlay (z-index 900) included. */
+/* Keep the top edge draggable. Controls are independent of scene/panel inertness and align with
+   the reserved header slot, so they remain usable during the intro and over an open panel. */
+.music-app { --window-button: 30px; --window-gap: 4px; }
 .window-bar {
   position: fixed;
   z-index: 1000;
@@ -8,22 +8,32 @@
   left: 0;
   right: 0;
   height: 32px;
-  display: flex;
-  justify-content: flex-end;
   -webkit-user-select: none;
   user-select: none;
 }
-.window-bar[hidden] {
-  display: none;
+.window-controls-slot {
+  display: block;
+  flex: none;
+  order: 4;
+  width: calc(4 * var(--window-button) + 3 * var(--window-gap));
+  height: var(--window-button);
+  pointer-events: none;
 }
 .window-controls {
+  position: fixed;
+  left: var(--window-controls-left, auto);
+  right: var(--window-controls-fallback-right, 40px);
+  top: var(--window-controls-top, 41px);
   display: flex;
-  height: 100%;
+  gap: var(--window-gap);
+  width: var(--window-controls-width, 132px);
+  height: var(--window-button);
 }
 .window-controls button {
-  width: 46px;
-  height: 100%;
+  width: var(--window-button);
+  height: var(--window-button);
   display: grid;
+  flex: none;
   place-items: center;
   padding: 0;
   border: 0;
@@ -31,74 +41,41 @@
   background: transparent;
   color: var(--ink, #232722);
   cursor: default;
-  transition: background-color 120ms, color 120ms;
+  transition: opacity 120ms ease, color 120ms ease;
 }
 .window-controls svg {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1;
-  shape-rendering: crispEdges;
-}
-.window-controls svg .fill {
-  fill: currentColor;
-  stroke: none;
-}
-.window-controls [data-window="close"] svg {
-  width: 12px;
-  height: 12px;
-}
-.window-controls svg .diagonal {
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   shape-rendering: geometricPrecision;
 }
-.window-controls button:hover {
-  background: color-mix(in srgb, var(--ink, #232722) 10%, transparent);
+.window-controls [data-window="maximize"] svg { stroke-linejoin: miter; }
+.window-controls button:hover { opacity: 0.65; }
+.window-controls button:active { opacity: 0.45; }
+.window-controls button:focus-visible { outline: 1px solid var(--ink); outline-offset: -2px; }
+.music-app[data-layout="compact"], .music-app[data-layout="portrait"] {
+  --window-button: 24px;
+  --window-gap: 0px;
 }
-.window-controls button:active {
-  background: color-mix(in srgb, var(--ink, #232722) 17%, transparent);
+.music-app[data-window-frame="custom"][data-chrome="menu"] .music-topnav { gap: 8px; }
+/* Keep panels and Skip clear of the controls, including when the header needs its own second row. */
+.music-app[data-window-frame="custom"] .music-panel-scrim {
+  padding-block: max(28px, calc(var(--window-controls-bottom, 71px) + 16px));
 }
-.window-controls button[data-window="close"]:hover {
-  background: #c42b1c;
-  color: #fff;
+.music-app[data-window-frame="custom"] .viewer-header { top: calc(var(--window-controls-bottom, 71px) + 16px); }
+.music-app[data-window-frame="custom"] .music-boot-skip {
+  right: calc(var(--window-controls-right, 40px) + var(--window-controls-width, 132px) + 22px);
+  top: var(--window-controls-top, 41px);
+  height: var(--window-button);
+  margin-top: 0;
 }
-.window-controls button[data-window="close"]:active {
-  background: #b0271a;
-  color: #fff;
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] { --window-button: 32px; --window-gap: 6px; }
 }
-.window-controls button:focus-visible {
-  outline: 1px solid var(--accent, #b56834);
-  outline-offset: -1px;
-}
-/* Where the header, a panel, the intro's skip button or the model viewer's header would
-   reach into the strip, they start below it. */
-@media (max-width: 1100px) {
-  .music-app[data-window-frame="custom"] .music-header,
-  .music-app[data-window-frame="custom"] .music-boot-skip {
-    margin-top: 10px;
-  }
-}
-@media (max-width: 700px) {
-  .music-app[data-window-frame="custom"] .music-header,
-  .music-app[data-window-frame="custom"] .music-boot-skip {
-    margin-top: 13px;
-  }
-  .music-app[data-window-frame="custom"] .music-panel-scrim {
-    padding-top: 40px;
-  }
-  .music-app[data-window-frame="custom"] .viewer-header {
-    top: 40px;
-  }
-}
-/* 设置 fills a short window's height, and its stacked form fills any height in a window just over
-   700 px: there it keeps below the strip, as the other panels do with their max-height (700 px and
-   narrower, the scrim itself starts below it). */
-@media (width > 700px) {
-  .music-app[data-window-frame="custom"] .music-panel.settings-panel {
-    max-height: calc(100% - 24px);
-  }
-}
-.music-app[data-window-frame="custom"][data-layout="portrait"] .music-header,
-.music-app[data-window-frame="custom"][data-layout="portrait"] .music-boot-skip {
-  margin-top: 14px;
-}
+/* The remaining draggable strip stays above the compact header. */
+.music-app[data-window-frame="custom"][data-layout="compact"] .music-header { margin-top: 10px; }
+.music-app[data-window-frame="custom"][data-layout="portrait"] .music-header { margin-top: 14px; }

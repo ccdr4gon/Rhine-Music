@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import {
-  LANE_LABEL, LANE_PLANE, LANE_ROLES, LANE_STEP, convexHull, cssMatrix, laneLabelIndex, laneLabelRange, laneLabelShares, laneLabelSlots, laneStepPoses, mapPoint, polygonsMeet, quadMatrix,
+  LANE_LABEL, LANE_PLANE, LANE_ROLES, LANE_STEP, anchorLaneMatrix, convexHull, cssMatrix, laneLabelIndex, laneLabelRange, laneLabelShares, laneLabelSlots, laneStepPoses, mapPoint, polygonsMeet, quadMatrix,
 } from '../src/lane-labels.ts';
 import { twoLines } from '../src/lane-names.ts';
 import { PLAY_GESTURE, columnStrength, damp, settlingWave } from '../src/motion.ts';
@@ -636,7 +636,7 @@ test('a switch, a quick double press and steps along a column, as the shelf\'s t
 
 test('the scene places the names from their slots and the sideways track alone', () => {
   const scene = read('src/scene.ts');
-  const place = body(scene, 'private placeLaneLabels(', 'private createLaneNameLayer(');
+  const place = body(scene, 'private placeLaneLabels(', 'private laneCameraSlots(');
   assert.match(place, /private placeLaneLabels\(centre: number, shown: number\)/);
   assert.match(scene, /this\.placeLaneLabels\(center\.lane,\s*musicLibrary && !cinematic \|\| musicIntro \? \(musicIntro \? introSettle : 1\) \* \(1 - detail\) \* \(1 - songProgress\) : 0\);/,
     'the shelf\'s track, and the browsing view\'s share (opening an album or the song scene fades them where they stand)');
@@ -664,7 +664,7 @@ test('the scene places the names from their slots and the sideways track alone',
   assert.match(place, /const key = lane \+ this\.coordinateOrigin\.lane;/);
   // The slots: worked out again only when the window, its layout or what the layer measures (the
   // fonts, the overlay's boxes) change; from the shelf at rest, seen with the camera at rest.
-  assert.match(place, /const slots = visible \? this\.laneLabelSlots\(layer, width, height\) : null;/);
+  assert.match(place, /const restingSlots = visible \? this\.laneLabelSlots\(layer, width, height\) : null;/);
   const slots = body(scene, '  private laneLabelSlots(', '  /**');
   assert.match(slots, /const view = `\$\{width\}x\$\{height\}:\$\{layout\}:\$\{layer\.version\}`;\s*if \(this\.laneSlots\?\.view === view\) return this\.laneSlots\.slots;\s*const page = layer\.measure\(view\);/);
   assert.match(read('src/lane-names.ts'), /measure\(view: string\): LaneNamePage \| undefined \{\s*if \(this\.page\?\.view === view\) return this\.page\.page;/);
@@ -862,4 +862,24 @@ test('the app names columns from the playlists shown, in one way only', () => {
   assert.doesNotMatch(app, /lane-tags|placeLaneTags|preferences\.laneNameStyle|LANE_LABEL_STYLES/);
   const css = read('src/external-media.css');
   assert.doesNotMatch(css, /\.lane-tag/);
+});
+
+
+test('a moving label plane keeps its readable anchor and its projected box-edge direction', () => {
+  const width=100,height=20,baseline=15,anchor={x:900,y:240};
+  for (const quad of [
+    [{x:20,y:80},{x:130,y:15},{x:128,y:39},{x:20,y:102}],
+    [{x:80,y:30},{x:230,y:12},{x:230,y:43},{x:80,y:62}],
+    [{x:100,y:15},{x:250,y:15},{x:250,y:45},{x:100,y:45}],
+  ]) {
+    const live=quadMatrix(width,height,quad),shifted=anchorLaneMatrix(live,baseline,anchor);
+    const a=mapPoint(live,0,baseline),b=mapPoint(live,width,baseline);
+    const c=mapPoint(shifted,0,baseline),d=mapPoint(shifted,width,baseline);
+    near(c.x,anchor.x,'anchor x');near(c.y,anchor.y,'anchor y');
+    near(Math.atan2(d.y-c.y,d.x-c.x),Math.atan2(b.y-a.y,b.x-a.x),'same horizontal direction');
+    near(Math.hypot(d.x-c.x,d.y-c.y),Math.hypot(b.x-a.x,b.y-a.y),'same perspective scale');
+  }
+  const scene=read('src/scene.ts'),moving=body(scene,'private laneCameraSlots(', 'private createLaneNameLayer(');
+  assert.doesNotMatch(moving,/getBoundingClientRect|measureText|layer\.measure|renderer\.render/);
+  assert.match(moving,/\["nearer", "further"\] as const/);
 });

@@ -26,10 +26,10 @@ const directions: Record<"up" | "right", SurfaceMotion> = {
 /**
  * The details (Claude Design, 2026-10-05). The page as a whole rises 6 px as it fades in
  * (420 ms) and sinks 6 px as it fades out (200 ms); previous / next inside it swaps only its
- * document: out 170 ms rising 6 px, back in 250 ms from there after 70 ms.
+ * document: out 170 ms rising 6 px, back in 250 ms from there alongside the cases.
  */
 export const DETAIL_SCENE: SurfaceMotion = { from: "translateY(6px)", to: "translateY(6px)" };
-export const DETAIL_SWAP: SurfaceMotion = { from: "translateY(-6px)", to: "translateY(-6px)", enterDelay: 70, hold: true };
+export const DETAIL_SWAP: SurfaceMotion = { from: "translateY(-6px)", to: "translateY(-6px)", hold: true };
 /**
  * The song scene: its chrome and its pane rise 6 px as they fade in (420 ms) and sink 6 px as
  * they fade out (200 ms). The section itself never moves or fades (song-scene.css).

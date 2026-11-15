@@ -52,6 +52,10 @@
   display: flex;
   align-items: center;
   min-width: 0;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  max-width: 100%;
 }
 .music-app .music-brand {
   display: block;
@@ -66,45 +70,52 @@
   white-space: nowrap;
 }
 
-/* 回到当前 (the owner, 2026-10-17: "add 回到当前 button to top left", "add this button to every
-   scene, but show it only when a different song is selected"): beside the wordmark, in the row's
-   type, the playback dot before it and its key after it like the ways out (music-detail.css). It
-   always takes its room, hidden or not (fitChrome): only its visibility changes, never the header. */
-.music-app .go-current {
-  display: inline-flex;
-  flex: none;
+/* Minimal left navigation: only the two other scenes, with their current shortcuts. */
+.music-app .scene-nav {
+  position: absolute;
+  left: 0;
+  top: calc(var(--chrome-bottom, 70px) - var(--chrome-top, 40px) + 18px);
+  width: 144px;
+  font-size: 13px;
+  line-height: 1;
+  pointer-events: none;
+}
+.music-app .scene-nav-pages { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.music-app .scene-nav-pages > button,
+.music-app .scene-nav .go-current {
+  display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 10px;
+  width: max-content;
+  max-width: 100%;
   height: 24px;
-  margin-left: 28px;
-  font-size: 12px;
-  line-height: 1;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
-  transition: opacity 120ms ease;
-}
-.music-app .go-current[data-shown="false"] {
-  visibility: hidden;
-}
-.music-app .go-current:hover {
-  opacity: 0.65;
-}
-.music-app .go-current > i {
-  display: block;
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--state);
-}
-.music-app .go-current > kbd {
-  font-family: inherit;
-  font-size: 9px;
-  line-height: 1;
-  font-weight: 700;
-  letter-spacing: 0.12em;
   color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+  pointer-events: auto;
+  transition: color 120ms ease, opacity 120ms ease;
+}
+.music-app .scene-nav-pages > button[aria-current="page"] { display: none; }
+.music-app .scene-nav-pages > button:not(:disabled, [aria-disabled="true"]):hover,
+.music-app .scene-nav .go-current:hover { color: var(--ink); }
+.music-app .scene-nav-pages > button:is(:disabled, [aria-disabled="true"]) { opacity: 0.4; }
+.music-app .scene-nav kbd { font-family: inherit; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); }
+.music-app .scene-nav .go-current { margin-top: 10px; font-size: 12px; }
+.music-app .go-current[data-shown="false"] { visibility: hidden; }
+.music-app[data-layout="compact"] .scene-nav { width: clamp(100px, calc(20vw - 28px), 144px); font-size: 12px; }
+.music-app[data-layout="compact"] .scene-nav .go-current { font-size: 11px; }
+.music-app[data-layout="portrait"] .scene-nav { top: calc(var(--chrome-bottom, 70px) - var(--chrome-top, 40px) + 4px); width: 126px; font-size: 11px; }
+.music-app[data-layout="portrait"] .scene-nav-pages { gap: 2px; }
+.music-app[data-layout="portrait"] .scene-nav-pages > button,
+.music-app[data-layout="portrait"] .scene-nav .go-current { height: 20px; }
+.music-app[data-layout="portrait"] .scene-nav .go-current { margin-top: 6px; font-size: 11px; }
+@media (max-height: 600px) {
+  .music-app[data-layout="compact"] .scene-nav .go-current { font-size: 10px; gap: 6px; }
+}
+@media (min-width: 1700px) {
+  .music-app[data-layout="desktop"] .scene-nav { width: 160px; font-size: 14px; }
+  .music-app[data-layout="desktop"] .scene-nav .go-current { font-size: 13px; }
 }
 
 /* The row: right 40, top 44, 24 high, 22 apart, 12 px. Text only; every item a button. */
@@ -139,16 +150,80 @@
 .music-app .music-topnav button:not(:disabled, [aria-disabled="true"]):hover {
   opacity: 0.65;
 }
-/* The two sources, 播放器 and 本地音乐 (2026-10-06: one app, one current source): the current one
-   in ink and demibold like the chosen theme word, the other muted (music-theme-switch.css). */
+/* The current source opens a small list, using the existing header menu's materials. */
 .music-app .music-topnav .topnav-source {
-  color: var(--muted);
-  font-weight: 400;
-}
-.music-app .music-topnav .topnav-source[aria-pressed="true"] {
+  gap: 8px;
   color: var(--ink);
   font-weight: 600;
 }
+.music-app .source-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--paused);
+}
+.music-app .topnav-source[data-connected="true"] .source-dot {
+  background: var(--playing);
+}
+.music-app .source-chevron {
+  width: 5px;
+  height: 5px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.music-app .source-menu {
+  position: absolute;
+  z-index: 12;
+  left: 0;
+  top: calc(100% + 10px);
+  width: 212px;
+  max-width: calc(100vw - 40px);
+  max-height: min(360px, 65vh);
+  overflow: auto;
+  background: var(--page-bg);
+  border-top: 1px solid var(--ink);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.14);
+  animation: source-menu-in 200ms ease both;
+}
+.music-app .music-topnav .source-menu > button {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  height: auto;
+  min-height: 40px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  line-height: 1.4;
+  white-space: normal;
+}
+.music-app .source-menu button span { overflow-wrap: anywhere; }
+.music-app .source-menu button[aria-checked="true"] { font-weight: 600; }
+.music-app .source-menu button[aria-checked="true"] i {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  background: var(--ink);
+}
+.music-app .source-menu button:focus-visible { outline-offset: -3px; }
+.music-app .source-menu p {
+  padding: 12px 14px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: normal;
+}
+.music-app[data-chrome="menu"] .source-menu { left: auto; right: 0; }
+.music-app[data-source-menu="open"] .music-header { z-index: 51; }
+@keyframes source-menu-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.music-app.reduce-motion .source-menu { animation: none; }
 .music-app .topnav-menu-only,
 .music-app .topnav-menu-value,
 .music-app .music-topnav .topnav-menu-button {
@@ -169,6 +244,13 @@
   gap: 8px;
   min-width: 0;
 }
+.music-app .music-topnav .now-playing-link {
+  gap: 8px;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+}
+.music-app .now-playing-link[aria-disabled="true"] { cursor: default; }
 .music-app[data-now="none"] .now-playing {
   display: none;
 }
@@ -266,9 +348,11 @@
   background: var(--line);
 }
 .music-app .play-ring[data-ring="plain"]::before {
-  background: var(--ink);
-  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
-  mask: radial-gradient(circle closest-side, transparent calc(100% - 1px), #000 calc(100% - 1px));
+  box-sizing: border-box;
+  border: 1px solid var(--ink);
+  background: transparent;
+  -webkit-mask: none;
+  mask: none;
 }
 .music-app .play-ring .transport-glyph {
   position: absolute;
@@ -337,9 +421,12 @@
   .music-app .play-ring::before {
     background: conic-gradient(Highlight 0 var(--progress, 0%), currentColor var(--progress, 0%) 100%);
   }
-  .music-app .play-ring[data-ring="unknown"]::before,
-  .music-app .play-ring[data-ring="plain"]::before {
+  .music-app .play-ring[data-ring="unknown"]::before {
     background: currentColor;
+  }
+  .music-app .play-ring[data-ring="plain"]::before {
+    border-color: currentColor;
+    background: transparent;
   }
   .music-app .play-ring {
     border-radius: 50%;
@@ -544,15 +631,6 @@
   .music-app[data-layout="desktop"] .music-brand strong {
     font-size: 39px;
   }
-  .music-app[data-layout="desktop"] .go-current {
-    gap: 9px;
-    height: 28px;
-    margin-left: 36px;
-    font-size: 14px;
-  }
-  .music-app[data-layout="desktop"] .go-current > kbd {
-    font-size: 10px;
-  }
   .music-app[data-layout="desktop"] .music-topnav {
     gap: 26px;
     height: 28px;
@@ -581,12 +659,6 @@
 }
 .music-app[data-layout="compact"] .music-brand strong {
   font-size: 25px;
-}
-.music-app[data-layout="compact"] .go-current,
-.music-app[data-layout="portrait"] .go-current {
-  gap: 7px;
-  margin-left: 20px;
-  font-size: 11px;
 }
 .music-app[data-layout="compact"] .music-topnav,
 .music-app[data-layout="portrait"] .music-topnav {

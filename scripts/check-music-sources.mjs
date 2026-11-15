@@ -250,40 +250,29 @@ test('the app: one page per source, local playback and BGM only for 本地音乐
   assert.match(app, /if \(albums\.length && new URLSearchParams\(location\.search\)\.get\("scene"\) !== "archive" && !sourceSwitch\) \{\n\s*boot\?\.start\(performance\.now\(\) \/ 1000\);/);
   assert.match(app, /if \(sourceSwitch\) stage\.dataset\.switching = "true";/);
   assert.match(read('src/music.css'), /\.music-app\[data-switching="true"\] #music-loading \{\s*z-index: 5;\s*\}/);
-  assert.match(app, /if \(sourceSwitch\?\.panel && playerCurrent\) openPanel\("sources", true\);\nvoid start\(\);/);
+  assert.match(app, /if \(sourceSwitch\?\.panel\) openPanel\("sources", true\);\nvoid start\(\);/);
   assert.match(app, /let handedSession = sourceSwitch\?\.session;/);
   // Taken by the first snapshot that was read (one that failed says nothing of the session).
   assert.match(body(app, 'async function refreshExternal() {', '\n}\n'), /await externalMedia\.refresh\(\);[\s\S]*if \(handedSession && !externalMedia\.unread\) \{\s*const picked = handedSession;\s*handedSession = undefined;\s*if \(externalMedia\.selected\?\.id !== picked\) externalMedia\.select\(picked\);\s*\}[\s\S]*await netease\.refresh\(\);/);
   // The players are read for the chooser only while the 播放器 panel is open; a player connected there switches.
   const chooser = body(app, 'async function refreshChooser() {', '\n}\n');
-  assert.match(chooser, /if \(!playerChooser \|\| panel !== "sources" \|\| panelClosing \|\| sourceSwitching\) return;/);
-  assert.match(chooser, /if \(connected\) \{\s*choosePlayer\(connected\.id\);/);
-  assert.match(body(app, 'function choosePlayer(', '\n}\n'), /switchSource\("player", \{ panel: true, session: id \}\);/);
+  assert.match(chooser, /if \(!playerChooser \|\| !choosingSource\(\) \|\| sourceSwitching\) return;/);
+  assert.match(chooser, /await playerChooser\.refresh\(false\);/);
+  assert.doesNotMatch(chooser, /choosePlayer\(/);
+  assert.match(body(app, 'function choosePlayer(', '\n}\n'), /switchSource\("player", \{ panel: sourceSettingsOpen\(\), session: id \}\);/);
   assert.match(body(app, 'function closePanel(', '\n}\n'), /clearTimeout\(chooserPoll\);/);
   assert.match(app, /if \(target\.dataset\.mediaSource && playerChooser\) \{\n\s*if \(playerChooser\.select\(target\.dataset\.mediaSource\)\) choosePlayer\(target\.dataset\.mediaSource\);/);
-  assert.match(app, /case "local-source":\n\s*switchSource\("local"\);/);
+  assert.match(app, /case "local-source":\n\s*switchSource\("local", \{ panel: sourceSettingsOpen\(\) \}\);/);
 });
 
-test('the header row names both sources, the current one marked, and 本地音乐\'s own items only while it is current', () => {
+test('the header opens a compact source list; source controls are the first settings section', () => {
   const markup = body(app, 'function sourceButtons() {', '\n}\n');
-  assert.match(markup, /const players = isDesktop \|\| playerCurrent/, 'no 播放器 in a browser, where none can be connected');
-  assert.match(markup, /<button data-action="sources" class="topnav-source" aria-pressed="\$\{playerCurrent\}"/);
-  assert.match(markup, />播放器<span class="topnav-menu-only">来源<\/span><em class="topnav-menu-value" id="topnav-source"><\/em><\/button>/);
-  // The menu form's value: 网易云音乐 for either way NetEase is connected (2026-10-06, was NETEASE),
-  // never the window fallback's longer name; any other player as its module shows it.
-  assert.match(app, /setText\(name, !playerCurrent \? "选择" : source \? \(isNeteaseSource\(source\) \? NETEASE_NAME : source\.name\) : "未连接"\);/);
-  assert.doesNotMatch(app, /"NETEASE"/);
-  assert.match(markup, /<button data-action="local-source" class="topnav-source" aria-pressed="\$\{!playerCurrent\}"/);
-  assert.match(markup, /const tools = playerCurrent \? ""\n\s*: '<button data-action="library" aria-label="音乐库">音乐库<\/button><button data-action="search" aria-label="搜索">搜索/);
-  assert.match(markup, /return players \+ local \+ tools;/);
-  assert.match(app, /<div class="topnav-modes" id="topnav-modes">\n\s*\$\{sourceButtons\(\)\}\n\s*<div class="topnav-theme">/, 'Claude Design\'s order: 播放器 · 本地音乐 · theme · 设置');
-  const css = read('src/music-chrome.css');
-  assert.match(css, /\.music-app \.music-topnav \.topnav-source \{\s*color: var\(--muted\);\s*font-weight: 400;\s*\}\s*\.music-app \.music-topnav \.topnav-source\[aria-pressed="true"\] \{\s*color: var\(--ink\);\s*font-weight: 600;\s*\}/);
-  // The theme words are marked the same way.
-  assert.match(read('src/music-theme-switch.css'), /\.music-app \.theme-switch button\[data-theme\]\[aria-pressed="true"\] \{\s*color: var\(--ink\);\s*font-weight: 600;/);
-  // No mode in what the window says.
-  const shown = app.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
-  assert.doesNotMatch(shown, /皮肤|本地模式|外部播放器模式|返回本地音乐/);
+  assert.match(markup, /data-action="source-menu"/);
+  assert.doesNotMatch(markup, /data-action="sources"|data-action="local-source"/);
+  assert.match(markup, /const tools = playerCurrent \? ""/);
+  assert.match(app, /role="menu" aria-label="切换音乐来源"/);
+  assert.match(app, /\["source", `当前来源：\$\{currentSourceName\(\)\}`\]/);
+  assert.doesNotMatch(app, /SOURCES_ABOUT|CHOOSER_ABOUT|CONNECT YOUR PLAYER/);
 });
 
 test('the package carries the program, its interface and the licences: no launcher, no mode', () => {

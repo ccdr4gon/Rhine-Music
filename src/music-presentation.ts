@@ -19,9 +19,11 @@ export interface MusicPresentationPorts {
   returnCamera(): void;
   select(selection: AlbumSelection): void;
   switchDetail(selection: AlbumSelection): void;
+  /** Detail-to-detail navigation can crossfade its document alongside the moving cases. */
+  switchTogether?(): boolean;
   prepareMenu(): void;
   showMenu(): void;
-  hideMenu(done: () => void): void;
+  hideMenu(done: () => void, together?: boolean): void;
   hideBrowse(done: () => void): void;
   showBrowse(): void;
   mode(mode: "archive" | "detail"): void;
@@ -34,10 +36,12 @@ export class MusicPresentation {
   private wantsDetail = false;
   private revision = 0;
   private browseHidden = false;
+  private together = false;
 
   constructor(private readonly ports: MusicPresentationPorts) {}
 
   get openingOrDetail() { return this.wantsDetail; }
+  get switchingTogether() { return this.phase === "switching" && this.together; }
 
   open() {
     this.wantsDetail = true;
@@ -71,6 +75,7 @@ export class MusicPresentation {
   swapMenu(change: () => void) {
     if (this.phase !== "detail" && !(this.phase === "switching" && this.browseHidden)) return false;
     const revision = ++this.revision;
+    this.together = false;
     this.phase = "switch-hiding";
     this.ports.hideMenu(() => {
       if (revision !== this.revision) return;
@@ -108,12 +113,14 @@ export class MusicPresentation {
   update() {
     if (this.phase === "switching") {
       if (this.pendingSelection) {
+        if (this.together) this.ports.hideMenu(() => {}, true);
         this.commitDetailSwitch();
         return; // Read readiness only after the scene has advanced the new target.
       }
       if (this.browseHidden && this.ports.presentationReady()) {
         this.phase = "detail";
-        this.ports.showMenu();
+        if (!this.together) this.ports.showMenu();
+        this.together = false;
       }
       return;
     }
@@ -154,6 +161,7 @@ export class MusicPresentation {
     this.pendingSelection = undefined;
     this.wantsDetail = false;
     this.browseHidden = false;
+    this.together = false;
     this.phase = "archive";
     this.ports.mode("archive");
   }
@@ -173,6 +181,7 @@ export class MusicPresentation {
   private beginExit() {
     if (this.phase === "hiding" || this.phase === "returning" || this.phase === "switch-hiding") return;
     const revision = ++this.revision;
+    this.together = false;
     this.phase = "hiding";
     this.ports.hideMenu(() => {
       if (revision !== this.revision) return;
@@ -182,6 +191,14 @@ export class MusicPresentation {
 
   private beginDetailSwitch() {
     const revision = ++this.revision;
+    this.together = this.browseHidden && !!this.ports.switchTogether?.();
+    if (this.together) {
+      this.phase = "switching";
+      // Both exits and both entrances start in this turn, not in a fade/readiness callback.
+      this.ports.hideMenu(() => {}, true);
+      this.commitDetailSwitch();
+      return;
+    }
     this.phase = "switch-hiding";
     // An input may arrive during the very first opening's browse exit.
     if (!this.browseHidden) this.ports.hideBrowse(() => {
@@ -205,6 +222,7 @@ export class MusicPresentation {
     this.pendingSelection = undefined;
     this.ports.switchDetail(request);
     this.ports.prepareMenu();
+    if (this.together) this.ports.showMenu();
   }
 
   private returnToArchive() {

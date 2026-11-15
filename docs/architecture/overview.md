@@ -76,3 +76,31 @@ QQ 音乐只用它发布的系统媒体会话（用户 2026-10-06 的要求）�
 记住连上的播放器（用户 2026-10-06 的要求）：`external_player/external-media.ts` 的 `ExternalMediaConnection` 记住它连上的播放器（`SourceLink`：已知播放器的模块编号，或会话的应用标识与名称），每次变化时通过 `remember` 告诉应用；`music-sources.ts` 的 `playerLinks` 把偏好里保存的 `playerLink`（经 `readSourceLink` 检查）、已知的播放器和网易云这个从没连上过时的默认连接交给它；`music-app.ts` 把记住的播放器和当前来源（`source`）随其他偏好保存，经 `save_preferences` 写入 `data/preferences.json`。`main.rs` 的 `opens_player` 在启动时读取这两项（旧版本的 `playerMode` 在页面改写之前同样读取），决定打开播放器（`?source=player`）还是本地音乐；没有启动参数。`remembers_source` 与 `readSourceLink` 接受相同的值，`check:media` 对照两边。快照里系统媒体会话的应用标识（`app`）由 `media/windows_media.rs` 填写，网易云的窗口标题回退没有应用标识，按模块记住。
 
 一个应用、一个当前来源（用户 2026-10-06：“let's delete the concept of skin mode or local music mode, now we only have the different concept”）：`music-app.ts` 在载入时由地址决定当前来源（`pageSource`），整页只显示这一个来源。播放器为当前来源时创建 `ExternalMediaConnection`（`externalMedia`），不创建本地 MusicPlayer；本地音乐为当前来源时创建本地播放器，并在“播放器”面板打开期间另用一个同样设置的连接（`playerChooser`）列出播放器，用户选中一个、或默认连接连上一个时调用 `switchSource`。`switchSource` 先停止并释放本地播放器，把 `source` 写入偏好并等待写入 `data/preferences.json`，在 `sessionStorage` 中留下一次性的切换信息（`markSourceSwitch`：是否重开“播放器”面板、用户选中的会话编号），再载入另一个来源的地址（`sourceAddress`）。新页面载入时取走这条信息（`takeSourceSwitch`，只用一次）：不启动开场动画（走与 `?scene=archive` 相同的路径），载入遮罩留在页眉与面板之下（`data-switching`），需要时立即重开面板，并在第一次读取后连接交来的会话。在播放器之间更换仍在同一页面完成。
+
+
+## 2026-11-15 来源入口与详情切换
+
+`music-app.ts` 的 `sourceButtons` 现在只提供当前来源按钮，`setSourceMenu` 管理小型列表；播放器设置统一由设置的 `source` 页承载，来源列表在开关之后，独立播放器面板和它的关于页不再显示。旧 `sources` 动作只作为内部入口转到当前来源设置。本地音乐下，`playerChooser.refresh(false)` 只发现会话，选中一项才切换并保存；已经以播放器为当前来源时，原有默认连接与重连不变。切换时的单次 `panel` 信息继续表示在新来源上保持设置打开。
+
+详情内切换采用 `MusicPresentation` 的 `switchTogether` 通道：当详情已显示，文字退场、盒子移动与新文字进入在同一轮执行；`switchingTogether` 期间文字更新继续，不等相机到位。旧文字副本只保留一个且不可交互；场景准备完成时不重复入场。搜索、首次打开与详情／选歌场景之间切换继续沿用原来的路线。
+
+
+同日追加：详情的 `#detail-copy` 只装标题与歌曲资料，退场副本仅覆盖这一部分。`writeSongDetailHead` 持有与专辑架相同的数字滚动控制器，`ensureDetailBody` 按 local／queue／live 类型复用播放控制、进度和歌词节点。页眉歌名通过 `headerPlayingTarget` 与 `showPlayingDetail` 只做定位和详情跳转，不调用播放请求；未完成的跳转由主循环继续处理，Esc 清除。
+
+
+窗口按钮由 `window-frame.ts` 提供，`.window-controls-slot` 在页眉末尾预留宽度，`music-app.ts/fitChrome` 将位置交给独立顶层 `.window-bar` 中的按钮；页面面板与开场的 inert 不影响它们。全屏入口共用 `toggleWindowFullscreen`，通过 Tauri 查询／切换实际窗口全屏，新增的能力仅为 `allow-is-fullscreen` 和 `allow-set-fullscreen`。
+
+
+跨歌单进入详情的修正：`scene.relayout` 的行变化与列变化一样整体改换坐标，同时移动 rail、shoulder、coordinateOrigin、返回副本及波纹，不再以 `relayoutRows` 单独补偿选中盒的 Z。`NeteaseSession.refreshQueue` 在已有队列且自己发出的歌单播放请求尚未超过 15 秒时，忽略中间的 missing／空队列，不改变 stamp；其余清空、退出和关闭开关语义保持。
+
+
+两侧歌单名称：`lanePlaces` 缓存 `LaneLabelPlane` 的四角坐标；`laneCameraSlots` 只在镜头入场／返回且文字可见时，用当前相机投影并以 `anchorLaneMatrix` 保留原屏幕锚点。`LaneNameLayer` 继续使用原字号与宽度缓存，无逐帧文字测量；选中列的大标题不走此路径。
+
+
+场景导航统一放在页眉下方的 `#scene-nav`，由 `music-app.ts/syncSceneNavigation` 按当前／待进入场景、来源能力和快捷键更新；状态未变时不重写。`SongListView` 不再持有详情跳转按钮及其定位测量。`lane-names.ts` 将导航作为独立避让区域观察，返回项用 visibility 隐藏以保持区域稳定。
+
+
+发布前最终布局：`#scene-nav` 移入 `.music-identity` 与标志并排，`fitChrome` 使用整组标题栏左侧宽度计算右侧播放区；`#go-current` 独立放在左侧。`lane-names.ts` 将标题栏整条和这个返回按钮分别作为避让区域。
+
+
+最终 B 方案：`#scene-nav` 放回页眉下方左侧，当前场景按钮通过 aria-current 对应的 CSS 隐藏，保留另外两个入口和键位提示；`#go-current` 同组排列并用 visibility 按需隐藏。`lane-names.ts` 避开整组导航。顶部横排仅为比较方案，未用于最终发布。

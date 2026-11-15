@@ -332,6 +332,10 @@ export class NeteaseSession {
     await this.refreshPlaylists();
     await this.refreshDebug();
   }
+  /** Retain known display data only while our own playlist replacement is still in flight. */
+  private changingPlaylist(now = performance.now()) {
+    return !!this.playlistAsked && now - this.playlistAsked.at <= PLAYLIST_JUMP_TIMEOUT_MS;
+  }
   private async refreshQueue() {
     if (!this.host.preferences.neteaseQueue || !this.current()) {
       this.externalQueue = undefined;
@@ -341,6 +345,13 @@ export class NeteaseSession {
     try {
       // The playlist the queue came from is asked for only with playlist columns on.
       const reply = await this.ports.queue.read(this.queueStamp, this.host.preferences.playlistColumns);
+      // playingList may be absent or empty between the old and new queue. Do not replace all
+      // playlist columns with one media card for that intermediate read, then rebuild them again.
+      if (this.externalQueue && this.changingPlaylist() &&
+        (reply.status === "missing" || (reply.status === "queue" && !reply.tracks.length))) {
+        this.queueStatus = "网易云正在切换歌单，等待新的播放队列…";
+        return;
+      }
       if (reply.status === "missing") {
         this.externalQueue = undefined;
         this.queueStamp = undefined;

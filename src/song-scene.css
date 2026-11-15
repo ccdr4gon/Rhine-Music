@@ -14,7 +14,6 @@
   --songs-rail-x: 22.4vw;
   --songs-card-top: 34.89vh;
   --songs-card-bottom: 66.29vh;
-  --songs-card-right: 43vw;
   --songs-marker-y: 28.22vh;
   --songs-glass-x: calc(100vw - 102.34vh);
   --songs-glass-y: 11.98vh;
@@ -72,35 +71,6 @@
 .music-song[data-rail="none"] .song-rail,
 .music-song:not([data-rail="marker"]) .song-marker {
   display: none;
-}
-/* The two ways out (back to the shelf, on to the opened case's details) stand where the details'
-   do, 16 px apart; music-detail.css styles the buttons for both scenes. */
-.song-exits {
-  position: absolute;
-  left: var(--scene-side);
-  top: calc(var(--scene-top) + 4px);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-.song-exits .music-back > span {
-  white-space: nowrap;
-}
-/* Portrait: over the card's top left, which a narrow window brings close. */
-.music-app[data-layout="portrait"] .song-exits {
-  top: 146px;
-}
-/* 这首歌 (on to the song's details) stands over the large card's top right, ending with the case's
-   right edge as it is seen, its middle level with the second line of the selected song's title on
-   the pane (--songs-details-y: SongListView.alignDetails), where the owner marked it (2026-10-10:
-   "move the song detail button here", "parallel with this"; until then it stood under 返回专辑架).
-   It keeps that place whatever the title's length. Before the pane is measured, and in portrait
-   (the title is under the card), just over the card's drawn top edge. */
-.song-chrome .song-details {
-  position: absolute;
-  right: calc(100% - var(--songs-card-right));
-  top: var(--songs-details-y, calc(var(--songs-card-top) - 16px));
-  transform: translateY(-50%);
 }
 /* The column's name, bottom left, as in the details: a 34 x 5 bar from the window's edge. */
 .song-caption {

@@ -53,7 +53,8 @@
  * pixels the way the shelf slides (along the neighbours' plane), as a function of its column's
  * offset from the sideways track alone (laneLabelShares). With reduced motion they swap at half
  * a column, without the drift. Opening an album or the song scene fades the names where they
- * stand. In the portrait layout the title and the navigation lie over the column nearer the
+ * stand; during entry and return the neighbouring planes use the live camera so their baselines
+ * keep following the cases' horizontal edges. The selected heading remains flat. In the portrait layout the title and the navigation lie over the column nearer the
  * lens, which is not named there.
  */
 
@@ -287,7 +288,13 @@ export interface LaneLabelView { width: number; height: number; portrait: boolea
  * how long (in its own px) it may be there, and where it is on the column (its row, and how far
  * along the case's top edge it starts, in world units).
  */
-export interface LanePlace { matrix: readonly number[]; reach: number; row: number; along: number }
+export interface LaneLabelPlane {
+  corners: readonly (readonly [number, number, number])[];
+  width: number;
+  height: number;
+  baseline: number;
+}
+export interface LanePlace { matrix: readonly number[]; reach: number; row: number; along: number; plane?: LaneLabelPlane }
 /**
  * Where a role's name is. A flat one (the selected): where its block starts and its name's first
  * baseline. One on a plane (the neighbours): `matrix`, from its line's box to the picture, and
@@ -300,6 +307,7 @@ export interface LaneLabelSlot {
   width: number;
   shown: boolean;
   matrix?: readonly number[];
+  plane?: LaneLabelPlane;
   place?: string;
   /** A flat name that ends where its slot ends (left of the bracket): its lines end at x + width. */
   align?: "end";
@@ -325,6 +333,14 @@ export function quadMatrix(w: number, h: number, quad: readonly LanePoint[]): nu
 export function mapPoint(m: readonly number[], x: number, y: number): LanePoint {
   const w = m[6] * x + m[7] * y + m[8];
   return { x: (m[0] * x + m[1] * y + m[2]) / w, y: (m[3] * x + m[4] * y + m[5]) / w };
+}
+
+/** Translate a projected plane without changing its directions or perspective. */
+export function anchorLaneMatrix(matrix: readonly number[], baseline: number, anchor: LanePoint): number[] {
+  const current = mapPoint(matrix, 0, baseline), dx = anchor.x - current.x, dy = anchor.y - current.y;
+  return [matrix[0] + dx * matrix[6], matrix[1] + dx * matrix[7], matrix[2] + dx * matrix[8],
+    matrix[3] + dy * matrix[6], matrix[4] + dy * matrix[7], matrix[5] + dy * matrix[8],
+    matrix[6], matrix[7], matrix[8]];
 }
 
 /** A homography as a CSS matrix3d (for an element whose transform origin is its top left), moved by (dx, dy) px in the picture. */
@@ -528,7 +544,7 @@ export function laneLabelSlots(
     if (!best) return hidden("none");
     const m = best.place.matrix, base = mapPoint(m, 0, set.ascent);
     taken.push([mapPoint(m, 0, 0), mapPoint(m, best.width, 0), mapPoint(m, best.width, height), mapPoint(m, 0, height)]);
-    return { x: base.x, y: base.y, width: best.width, shown: true, matrix: m, place: `row ${best.place.row}, ${best.place.along}` };
+    return { x: base.x, y: base.y, width: best.width, shown: true, matrix: m, ...(best.place.plane ? { plane: best.place.plane } : {}), place: `row ${best.place.row}, ${best.place.along}` };
   };
   const further = neighbour("further");
   return { selected, further, nearer: neighbour("nearer") };

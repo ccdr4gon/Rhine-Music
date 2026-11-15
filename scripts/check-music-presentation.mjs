@@ -438,13 +438,13 @@ test('production document swap rises and fades before switching the detail album
   assert.deepEqual(f.detailSelections(), [{ index: 6 }]);
   assert.equal(f.events.at(-1), 'menu:prepare');
   assert.ok(!f.events.includes('camera:return'));
-  // Back from where it went, 250 ms after a 70 ms pause, once shown again.
+  // Back from where it went, 250 ms with no entry pause.
   transition.show(false);
   assert.equal(article.style.visibility, '');
   assert.equal(latest('transform').options.duration, 250);
-  assert.equal(latest('transform').options.delay, 70);
+  assert.equal(latest('transform').options.delay, 0);
   assert.equal(latest('transform').frames[0].transform, 'translateY(-6px)');
-  assert.equal(latest('opacity').options.delay, 70);
+  assert.equal(latest('opacity').options.delay, 0);
   assert.equal(latest('opacity').frames[0].opacity, '0');
 });
 
@@ -660,4 +660,55 @@ test('a menu swap right after another one reverses it without visiting the shelf
   assert.equal(f.motion.phase, 'detail');
   assert.equal(f.events.filter((event) => event === 'menu:show').length, 1);
   assert.ok(!f.events.includes('camera:return'));
+});
+
+
+test('detail text and cases switch in the same turn and do not re-enter when the camera settles', () => {
+  const f = fixture();
+  f.openDetail();
+  f.events.length = 0;
+  f.ports.switchTogether = () => true;
+  f.ports.hideMenu = (done, together) => {
+    f.events.push(together ? 'menu:crossfade' : 'menu:hide');
+    if (!together) f.menuExits.push(done);
+  };
+  f.motion.select({ index: 4 }, true);
+  assert.deepEqual(f.events, ['menu:crossfade', { switchDetail: { index: 4 } }, 'menu:prepare', 'menu:show']);
+  assert.equal(f.motion.switchingTogether, true);
+  assert.equal(f.ready.presentation, false, 'text starts while the new box is still moving');
+  f.motion.select({ index: 5 }, true);
+  f.motion.select({ index: 6 }, true);
+  f.motion.update();
+  assert.deepEqual(f.detailSelections(), [{ index: 4 }, { index: 6 }]);
+  assert.equal(f.events.filter(e => e === 'menu:show').length, 2);
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'detail');
+  assert.equal(f.events.filter(e => e === 'menu:show').length, 2, 'settling never starts another text entrance');
+  f.motion.select({ index: 7 }, true);
+  f.motion.back();
+  assert.equal(f.motion.switchingTogether, false);
+  f.finishMenu();
+  f.ready.archive = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'archive');
+  assert.equal(f.motion.pendingSelection, undefined);
+});
+
+test('search during a parallel switch retains the archive route; reset invalidates its exit', () => {
+  const f = fixture();
+  f.openDetail();
+  f.ports.switchTogether = () => true;
+  f.ports.hideMenu = (done, together) => { if (!together) f.menuExits.push(done); };
+  f.motion.select({ index: 1 }, true);
+  f.motion.select({ index: 9, route: 'archive' }, true);
+  f.finishMenu();
+  f.ready.archive = true;
+  f.motion.update();
+  assert.deepEqual(f.selections(), [{ index: 9, route: 'archive' }]);
+  f.motion.reset();
+  f.ready.presentation = true;
+  f.motion.update();
+  assert.equal(f.motion.phase, 'archive');
+  assert.equal(f.motion.switchingTogether, false);
 });

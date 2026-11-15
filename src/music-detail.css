@@ -67,16 +67,6 @@
   outline: 1px solid var(--ink);
   outline-offset: 4px;
 }
-.music-app .detail-exits {
-  position: absolute;
-  left: var(--scene-side);
-  top: calc(var(--scene-top) + 4px);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
-}
-/* (The song scene's two stand where these do: .song-exits, song-scene.css.) */
 
 /* The column's name, bottom left: a 34 x 5 bar from the window's edge, then the name. */
 .music-app .detail-caption {
@@ -134,10 +124,10 @@
   flex-direction: column;
 }
 /* (No weight of their own: the document's body and the lyrics below say how they grow.) */
-.music-app :where(#album-detail-content, #detail-body) > * {
+.music-app :where(#album-detail-content, .detail-body) > * {
   flex: none;
 }
-.music-app #album-detail-content > #detail-body {
+.music-app #album-detail-content > .detail-body {
   display: flex;
   flex-direction: column;
   flex: 1 0 auto;
@@ -294,7 +284,6 @@
   height: 48px;
   margin-top: 22px;
   border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--line);
 }
 .music-app .detail-control {
   display: flex;
@@ -429,74 +418,45 @@
 
 /* 播放位置 and the times, then the timeline: a 1 px line, the 2 px ink fill to the position and
    a 9 px square head; dashed, with neither, while the position is unknown. */
-.music-app .detail-timeline {
-  display: block;
-  margin-top: 18px;
-}
-/* The timeline is the song's that plays (music-app.ts syncDetailTimeline; the owner, 2026-10-09): on
-   another song's details it is folded away, and when that song starts it emerges, opening downwards as
-   its line draws in from the left; when another song plays it folds away again. The fold is a grid of
-   one row that runs between 0fr and 1fr; its clip is a block of its own (the timeline's top margin
-   stays inside, so the fold closes to nothing) and lets the slider's head and focus ring reach past its
-   sides. data-motion is off for a document just written and with reduced motion. */
 .music-app .detail-timeline-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
+  position: relative;
+  height: 9px;
+  margin-top: -4px;
+  flex: none;
 }
-.music-app .detail-timeline-clip {
-  display: flow-root;
-  min-height: 0;
-  overflow: clip;
-  overflow-clip-margin: 8px;
+/* The transport's bottom rule is always here, including on a song that is not playing. */
+.music-app .detail-timeline-wrap::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  height: 1px;
+  background: var(--line);
+  pointer-events: none;
 }
-.music-app .detail-timeline-wrap[data-timeline="hidden"] {
-  grid-template-rows: 0fr;
-}
-.music-app .detail-timeline-wrap[data-timeline="hidden"] .detail-timeline {
-  opacity: 0;
-  visibility: hidden;
-}
-.music-app .detail-timeline-wrap[data-motion="on"] {
-  transition: grid-template-rows 420ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.music-app .detail-timeline-wrap[data-motion="on"] .detail-timeline {
-  transition: opacity 280ms ease 120ms, visibility 0s linear 0s;
-}
-.music-app .detail-timeline-wrap[data-motion="on"][data-timeline="hidden"] {
-  transition-duration: 260ms;
-}
-.music-app .detail-timeline-wrap[data-motion="on"][data-timeline="hidden"] .detail-timeline {
-  transition: opacity 160ms ease, visibility 0s linear 160ms;
-}
-.music-app .detail-timeline-wrap[data-motion="on"][data-timeline="shown"] input.detail-seek {
-  animation: detail-timeline-draw 560ms cubic-bezier(0.22, 1, 0.36, 1) 140ms backwards;
-}
-@keyframes detail-timeline-draw {
-  from {
-    clip-path: inset(0 100% 0 0);
-  }
-  to {
-    clip-path: inset(0 0 0 0);
-  }
-}
-.music-app .detail-timeline-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-}
-.music-app .detail-timeline-head > span {
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 400;
-  color: var(--muted);
-}
+.music-app .detail-timeline { display: block; margin: 0; }
 .music-app .detail-timeline output {
+  position: absolute;
+  right: 0;
+  bottom: 23px;
   font-size: 11px;
   line-height: 1;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  color: var(--muted);
+}
+.music-app .detail-timeline-wrap[data-timeline="hidden"] :is(output, input) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.music-app .detail-timeline-wrap[data-motion="on"] :is(output, input) {
+  transition: opacity 280ms ease, visibility 0s linear 0s;
+}
+.music-app .detail-timeline-wrap[data-motion="on"][data-timeline="hidden"] :is(output, input) {
+  transition: opacity 160ms ease, visibility 0s linear 160ms;
 }
 .music-app input.detail-seek {
   --fill: 0;
@@ -505,7 +465,7 @@
   display: block;
   width: calc(100% + 9px);
   height: 9px;
-  margin: 10px -4.5px 0;
+  margin: 0 -4.5px;
   padding: 0;
   background: transparent;
   cursor: pointer;
@@ -549,7 +509,7 @@
   background: var(--ink);
 }
 .music-app input.detail-seek[data-known="false"]::-webkit-slider-runnable-track {
-  background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 9px) 4.5px 4px / calc(100% - 9px) 1px no-repeat;
+  background: transparent;
 }
 .music-app input.detail-seek[data-known="false"]::-webkit-slider-thumb,
 .music-app input.detail-seek:disabled::-webkit-slider-thumb {
@@ -626,6 +586,11 @@
   overflow-wrap: anywhere;
   transition: color 280ms ease;
 }
+/* Unsung lines are 20% lighter than the previous 78% muted ink; past lines keep their tone. */
+.music-app .detail-lyrics[data-synced="true"] .lyric-line[aria-current="true"] ~ .lyric-line,
+.music-app .detail-lyrics[data-synced="true"]:not(:has(.lyric-line[aria-current="true"])) .lyric-line {
+  color: color-mix(in srgb, var(--muted) 62.4%, transparent);
+}
 .music-app .lyric-line[aria-current="true"] {
   color: var(--ink);
 }
@@ -646,7 +611,7 @@
 /* In a line timed word by word each word turns to ink when it is sung (lyrics-view.ts marks it at
    its time; no transition: nothing runs between words, see DESIGN); unsung, it stays muted. */
 .music-app .detail-lyrics[data-words="on"] .lyric-line[aria-current="true"] .lyric-word {
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
 }
 .music-app .detail-lyrics[data-words="on"] .lyric-line[aria-current="true"] .lyric-word.sung {
   color: var(--ink);
@@ -1013,10 +978,7 @@
   .music-app[data-layout="desktop"] .music-back kbd {
     font-size: 10px;
   }
-  .music-app[data-layout="desktop"] .detail-exits {
-    gap: 19px;
-  }
-  .music-app[data-layout="desktop"] .detail-tag-row {
+    .music-app[data-layout="desktop"] .detail-tag-row {
     min-height: 30px;
   }
   .music-app[data-layout="desktop"] .detail-tag-group {
@@ -1064,17 +1026,8 @@
     width: 35px;
     height: 35px;
   }
-  .music-app[data-layout="desktop"] .detail-timeline {
-    margin-top: 21px;
-  }
-  .music-app[data-layout="desktop"] .detail-timeline-head > span {
-    font-size: 12px;
-  }
   .music-app[data-layout="desktop"] .detail-timeline output {
     font-size: 13px;
-  }
-  .music-app[data-layout="desktop"] input.detail-seek {
-    margin-top: 12px;
   }
   .music-app[data-layout="desktop"] .detail-warning {
     font-size: 13px;
@@ -1137,9 +1090,6 @@
   gap: 12px;
   font-size: 12px;
 }
-.music-app[data-layout="compact"] .detail-exits {
-  gap: 14px;
-}
 .music-app[data-layout="compact"] .detail-title,
 .music-app[data-layout="compact"] .detail-title-probe {
   font-size: 28px;
@@ -1173,9 +1123,6 @@
   width: 26px;
   height: 26px;
 }
-.music-app[data-layout="compact"] .detail-timeline {
-  margin-top: 14px;
-}
 .music-app[data-layout="compact"] .detail-lyrics {
   min-height: 140px;
   margin-top: 20px;
@@ -1199,18 +1146,9 @@
    second way out would stand (from about 16:9 down to the compact width); both go on one line,
    at the first one's height, which the case clears. */
 @media (max-height: 700px) {
-  .music-app:is([data-layout="desktop"], [data-layout="compact"]) .detail-exits {
-    flex-direction: row;
-    gap: 22px;
   }
-}
 
 /* ---- portrait: the ways out on one line under the header, the document in the lower half --- */
-.music-app[data-layout="portrait"] .detail-exits {
-  top: calc(var(--chrome-bottom, 46px) + 20px);
-  flex-direction: row;
-  gap: 24px;
-}
 .music-app[data-layout="portrait"] .music-back {
   gap: 10px;
   font-size: 12px;
@@ -1254,9 +1192,6 @@
   width: 26px;
   height: 26px;
 }
-.music-app[data-layout="portrait"] .detail-timeline {
-  margin-top: 14px;
-}
 .music-app[data-layout="portrait"] .detail-lyrics {
   min-height: 140px;
   margin-top: 18px;
@@ -1285,3 +1220,11 @@
     font-size: 25px;
   }
 }
+
+/* The retiring document has no interactive or accessible duplicate controls. */
+.music-app .detail-copy-frame { position: relative; }
+.music-app #detail-copy, .music-app .detail-swap-copy { display: flow-root; }
+.music-app .detail-swap-copy { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.music-app .detail-tag-of { display: inline-flex; align-items: baseline; gap: 4px; }
+.music-app .detail-tag .music-rolling-number,
+.music-app .detail-tag-of .music-rolling-number { vertical-align: baseline; }

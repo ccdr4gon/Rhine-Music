@@ -594,7 +594,7 @@
   font-size: 13px;
   color: var(--muted);
 }
-.music-app .settings-tabs > button > span {
+.music-app .settings-tabs > button > span:first-child {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -700,6 +700,21 @@
   margin: 0;
   font-size: 18px;
   font-weight: 400;
+}
+.music-app .settings-tabs .source-tab-name {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.music-app .source-tab-value {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.music-app .source-switch-heading {
+  margin-top: 28px;
 }
 /* One line a setting: its name, then its control. */
 .music-app .settings-panel .settings-row {

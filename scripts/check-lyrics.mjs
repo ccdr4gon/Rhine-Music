@@ -479,8 +479,8 @@ test('the lyrics\' box: a column that follows the song, lit line in ink, its wor
   assert.match(css, /\.music-app \.detail-lyrics:is\(\[data-lyrics="off"\], \[data-lyrics="none"\]\) \{\s*display: none;\s*\}/);
   assert.match(css, /\.music-app \.lyrics-list \{\s*padding: calc\(38cqh - 16px\) 0 calc\(62cqh - 16px\);\s*\}/);
   assert.match(css, /\.music-app \.detail-lyrics\[data-motion="on"\]\[data-lyrics="shown"\] \.lyrics-list \{\s*animation: detail-lyrics-rise/);
-  assert.match(css, /\.music-app \.detail-lyrics\[data-words="on"\] \.lyric-line\[aria-current="true"\] \.lyric-word \{\s*color: var\(--muted\);\s*\}\s*\.music-app \.detail-lyrics\[data-words="on"\] \.lyric-line\[aria-current="true"\] \.lyric-word\.sung \{\s*color: var\(--ink\);\s*\}/);
-  assert.match(css, /\.music-app #album-detail-content > #detail-body \{\s*display: flex;\s*flex-direction: column;\s*flex: 1 0 auto;\s*\}/);
+  assert.match(css, /\.music-app \.detail-lyrics\[data-words="on"\] \.lyric-line\[aria-current="true"\] \.lyric-word \{\s*color: color-mix\(in srgb, var\(--muted\) 80%, transparent\);\s*\}\s*\.music-app \.detail-lyrics\[data-words="on"\] \.lyric-line\[aria-current="true"\] \.lyric-word\.sung \{\s*color: var\(--ink\);\s*\}/);
+  assert.match(css, /\.music-app #album-detail-content > \.detail-body \{\s*display: flex;\s*flex-direction: column;\s*flex: 1 0 auto;\s*\}/);
   assert.match(app, /function scrollsNatively\(target: EventTarget \| null\)/);
 });
 

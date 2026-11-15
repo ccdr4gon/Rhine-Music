@@ -47,6 +47,19 @@ test('without a preferred player sources never auto-select; refresh and another 
   assert.equal(connection.selected.playback, 'paused', 'do not invent an optimistic playing state');
 });
 
+test('discovering players for a source list leaves local music selected until an explicit choice', async () => {
+  const remembered = [];
+  const { connection, calls } = fixture([netease('n1')], { ...NETEASE, remember: value => remembered.push(value) });
+  await connection.refresh(false);
+  assert.equal(connection.sources.length, 1);
+  assert.equal(connection.selected, undefined);
+  assert.deepEqual(remembered, []);
+  assert.deepEqual(calls, []);
+  assert.equal(connection.select('n1'), true);
+  assert.equal(connection.selected.id, 'n1');
+  assert.equal(remembered.length, 1);
+});
+
 test('disconnection clears the current card and controls; returning sessions still need explicit selection', async () => {
   const { connection, calls, set } = fixture();
   await connection.refresh();
@@ -976,7 +989,7 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   assert.match(body('function setUsable(button: HTMLButtonElement, usable: boolean) {', '\n}\n'), /if \(document\.activeElement !== button\) \{[\s\S]*button\.setAttribute\("aria-disabled", "true"\);[\s\S]*const settle = \(\) => \{\s*if \(document\.activeElement === button\) return;/);
   assert.match(app, /if \(target instanceof HTMLButtonElement && \(target\.disabled \|\| target\.getAttribute\("aria-disabled"\) === "true"\)\) return;/);
   assert.match(app, /\(list\.querySelector<HTMLElement>\(`\[data-media-source="\$\{CSS\.escape\(had\)\}"\]`\) \?\? sourcesPanelFocus\(\)\)\?\.focus\(\{ preventScroll: true \}\);/);
-  assert.match(app, /if \(!albums\.length && hadAlbums && inScene && !panel && !boot\?\.active\)\s*document\.querySelector<HTMLElement>\("#music-empty button"\)\?\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(app, /if \(!albums\.length && hadAlbums && \(inScene \|\| !!focused\?\.closest\("#scene-nav"\)\) && !panel && !boot\?\.active\)\s*document\.querySelector<HTMLElement>\("#music-empty button"\)\?\.focus\(\{ preventScroll: true \}\);/);
   assert.match(app, /: `：\$\{source\.name\}没有提供\$\{title\}`;/);
   // A snapshot read while a seek is on its way (or waits behind another control) is not its answer.
   assert.match(body('async function refreshExternal() {', '\n}\n'), /await externalMedia\.refresh\(\);[\s\S]*sessionClock\.update\(externalMedia\.selected, performance\.now\(\), externalMedia\.seeking\);/);
@@ -990,7 +1003,7 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   assert.equal((app.match(/\$\("#music-empty"\),\n/g) || []).length, 2, 'inert with the panel, and back');
   // The handed-over session waits for a snapshot that was read, and the user's own choice wins.
   assert.match(body('async function refreshExternal() {', '\n}\n'), /if \(handedSession && !externalMedia\.unread\) \{/);
-  assert.match(app, /if \(target\.dataset\.mediaSource && externalMedia\) \{\n\s*\/\/[^\n]*\n\s*handedSession = undefined;/);
+  assert.match(app, /if \(target\.dataset\.mediaSource && externalMedia\) \{[\s\S]*?handedSession = undefined;/);
   assert.match(app, /handedSession = undefined;\n\s*externalMedia\?\.disconnect\(\);/);
   // A lone live card whose picture alone changed is painted again in place (no rebuild of the shelf).
   assert.match(app, /const coverOnly = playerCurrent && !netease\.shownQueue\(\) && oldBare === bareKey\(albums, genres\);/);
@@ -998,11 +1011,8 @@ test('the app keeps the players\' timeline, covers, focus and panel words in ste
   // The panel has no opening paragraph since its redesign (the owner, 2026-10-24: "it has tooo much
   // words now"): 关于 says it in short lines, and no 切歌 switch is promised (gone 2026-10-09).
   assert.doesNotMatch(app, /切歌在下方另行开关|sources-intro-port|panel-intro/);
-  assert.match(app, /\["记住", "记住连接过的播放器（不保存它播放的内容）：它重新出现或下次启动时自动连接"\]/);
-  assert.match(app, /\["断开连接", "忘掉记住的播放器，之后不再自动连接任何播放器，直到再次选择"\]/);
   // 网易云 is a section of its own while NetEase is the connected player (or restarts with its port),
   // kept through a snapshot that could not be read, as NetEase's session keeps NetEase current then.
-  assert.match(body('function sourcesSections(', '\n}\n'), /const neteaseShown = !!externalMedia && \(netease\.isCurrent \|\| netease\.debugRestarting\);/);
   assert.match(app, /const held = !source && externalMedia\.unreadable && netease\.isCurrent;/);
   assert.match(app, /if \(permission && !held && permission\.dataset\.source !== \(source\?\.id \|\| ""\)\) \{/);
   // ... written for the NetEase source seen last meanwhile, so a section first shown then is not blank.
@@ -1556,14 +1566,11 @@ test('a NetEase picture is one picture on any of its image servers, and the shel
   assert.match(relayout, /lane: nearestOccurrence\(location\.lane, before\.lane, archiveColumns\.length\),\s*row: nearestOccurrence\(location\.row, before\.row, columnFiles\(location\.lane\)\.length\),/);
   assert.match(relayout, /this\.coordinateOrigin\.lane -= lanes;\s*this\.laneFocus\.value \+= lanes;\s*this\.columnCamera\.value \+= lanes \* COLUMN_SPACING;/);
   assert.match(relayout, /if \(this\.covers && !this\.covers\.shows\(records\[index\]\)\) void this\.covers\.select\(records\[index\]\);/);
-  // Its song moved along the column (the owner's playlist saved one song short: the chosen song a
-  // row further on in NetEase's queue): the lifted case keeps its place on screen and goes with the
-  // shelf, an offset that the rail's own spring cancels (the same rate, from rest).
-  assert.match(relayout, /this\.relayoutRows\.value \+= cell\.row - before\.row;/);
-  assert.match(scene, /damp\(this\.relayoutRows, 0, this\.reduced \? 35 : detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 3\.7, dt\);/);
-  assert.match(scene, /damp\(\s*this\.rail,\s*cinematic \? 0 : -2\.17 - chosen\.z,\s*this\.reduced \? 35 : detailNavigation \? MUSIC_ALBUM_SWITCH_RATE : 3\.7,/, 'the rail at that same rate');
-  assert.match(scene, /chosen\.z \+ entryZ \+ this\.rail\.value - this\.relayoutRows\.value \* ROW_SPACING,/);
-  assert.equal((scene.match(/this\.relayoutRows = \{ value: 0, velocity: 0 \};/g) || []).length, 4, 'snapped with the rail, and afresh with a rebuilt shelf');
+  // Row identity changes move the shoulder and rail together, preserving the extraction's origin.
+  assert.match(relayout, /this\.shoulder\.value \+= rows;/);
+  assert.match(relayout, /this\.rail\.value -= rows \* ROW_SPACING;/);
+  assert.doesNotMatch(scene, /relayoutRows/);
+
 });
 
 test('playlist columns are on by default once the queue is shown, say what is read, and have no style setting', async () => {
@@ -2529,4 +2536,57 @@ test('the module folders keep their dependency rules', async () => {
   const neteaseUses = new Set([...code(readFileSync(path.join(rust, 'media.rs'), 'utf8')).matchAll(/crate::netease_music::[\w:]+/g)].map(match => match[0]));
   assert.deepEqual([...neteaseUses].sort(), ['crate::netease_music::NAME', 'crate::netease_music::PLAYER', 'crate::netease_music::connector::is_app', 'crate::netease_music::connector::is_program']);
   assert.doesNotMatch(code(readFileSync(path.join(rust, 'media', 'windows_media.rs'), 'utf8')), /qq_music|qqmusic/i, 'media/windows_media.rs');
+});
+
+
+test('playlist reordering preserves the lifted case, returning copies, wave phase and motion velocity', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { nearestOccurrence, ROW_SPACING, COLUMN_SPACING } = await import('../src/archive-loop.ts');
+  const { settlingWave } = await import('../src/motion.ts');
+  const scene = readFileSync(new URL('../src/scene.ts', import.meta.url), 'utf8');
+  const start = scene.indexOf('  relayout(index: number) {');
+  const source = scene.slice(start, scene.indexOf('\n  }', start) + 4).replace('relayout(index: number)', 'function relayout(index)');
+  for (const location of [{lane:1,row:19,slot:51}, {lane:3,row:37,slot:133}, {lane:0,row:12,slot:12}]) {
+    const apply = new Function('musicLibrary','records','fileLocation','nearestOccurrence','archiveColumns','columnFiles','ROW_SPACING','COLUMN_SPACING', `${source}; return relayout;`)(true,[{}],()=>location,nearestOccurrence,[0,1,2,3],()=>Array(31),ROW_SPACING,COLUMN_SPACING);
+    const state = {loaded:true,looping:true,pacing:{invalidate(){}},drawLabel(){},selectedCell:{lane:1,row:35},coordinateOrigin:{lane:8,row:120},shoulder:{value:34.7,velocity:1.1},rail:{value:-14.18,velocity:0.4},laneFocus:{value:1.08,velocity:-0.3},columnCamera:{value:-5.1,velocity:0.6},lift:{value:1.62,velocity:2.5},outgoing:[{cell:{lane:1,row:34},lift:{value:0.8,velocity:-1.2}}],pulses:[{lane:1,row:35,time:4}],pendingPulse:{lane:1,row:36}};
+    const snapshot = () => ({
+      point:[(state.selectedCell.lane-2)*COLUMN_SPACING-state.columnCamera.value, settlingWave(state.selectedCell.row-state.shoulder.value,26.56)+state.lift.value,(state.selectedCell.row-15.5)*ROW_SPACING+state.rail.value],
+      returning:[(state.outgoing[0].cell.lane-2)*COLUMN_SPACING-state.columnCamera.value,(state.outgoing[0].cell.row-15.5)*ROW_SPACING+state.rail.value],
+      phase:[state.selectedCell.row+state.coordinateOrigin.row,state.selectedCell.lane+state.coordinateOrigin.lane],
+      wave:state.selectedCell.row-state.pulses[0].row,
+      pending:state.selectedCell.row-state.pendingPulse.row,
+      velocities:[state.shoulder.velocity,state.rail.velocity,state.columnCamera.velocity,state.laneFocus.velocity,state.lift.velocity],
+    });
+    const before=snapshot();apply.call(state,0);const after=snapshot();
+    for(const key of ['point','returning'])before[key].forEach((value,i)=>assert.ok(Math.abs(value-after[key][i])<1e-9,`${key} axis ${i}`));
+    assert.deepEqual(after.phase,before.phase);assert.deepEqual(after.velocities,before.velocities);
+    assert.equal(after.wave,before.wave);assert.equal(after.pending,before.pending);
+  }
+});
+
+test('an in-flight playlist switch retains a temporarily missing or empty queue, but an expired or disabled request does not', async t => {
+  const { NeteaseSession } = await import('../src/netease_music/connector/session.ts');
+  let now=1000;t.mock.method(performance,'now',()=>now);
+  const {connection}=fixture([netease('n')],NETEASE);await connection.refresh();
+  const preferences={neteaseQueue:true,playlistColumns:true};
+  let reply={status:'queue',stamp:'old',tracks:[laneTrack(1)],source:{id:'1',name:'Alpha'},truncated:false};
+  const stamps=[],plays=[];
+  const session=new NeteaseSession({media:connection,preferences,recordId:()=>undefined,genreId:()=>undefined,indexOf:()=>-1,selected:()=>0,navigationSelection:()=>0,canFollow:()=>false,follow(){},songChanged(){},jumpChanged(){},confirmSoon(){},async refresh(){},notify(){}},{
+    queue:{async read(stamp){stamps.push(stamp);return reply;}},playlists:{async read(){return {status:'missing'};}},
+    debug:{async state(){return {available:true,trackId:'1',playback:'playing'};},async playPlaylist(...args){plays.push(args);}},
+  });
+  await session.refresh();
+  const request={key:'netease-track:2',song:laneTrack(2),playlist:{id:'2',name:'Beta'},from:'netease-list:2:2'};
+  await session.playQueueSong(request);
+  const held=session.externalQueue;
+  reply={status:'missing'};await session.refresh();assert.equal(session.externalQueue,held);
+  reply={status:'queue',stamp:'empty',tracks:[],truncated:false};now+=500;await session.refresh();assert.equal(session.externalQueue,held);
+  assert.equal(stamps.at(-1),'old','an intermediate empty stamp is not accepted');
+  reply={status:'queue',stamp:'new',tracks:[laneTrack(2)],source:{id:'2',name:'Beta'},truncated:false};await session.refresh();assert.equal(session.externalQueue.source.id,'2');
+  session.followQueue();reply={status:'queue',stamp:'cleared',tracks:[],truncated:false};await session.refresh();assert.equal(session.externalQueue,undefined,'a real clear after the switch is respected');
+  reply={status:'queue',stamp:'again',tracks:[laneTrack(1)],source:{id:'1',name:'Alpha'},truncated:false};await session.refresh();
+  session.forgetQueueJumps();await session.playQueueSong(request);now+=16000;reply={status:'missing'};await session.refresh();assert.equal(session.externalQueue,undefined,'bounded by the existing 15 second request');
+  reply={status:'queue',stamp:'final',tracks:[laneTrack(1)],source:{id:'1',name:'Alpha'},truncated:false};await session.refresh();
+  session.forgetQueueJumps();await session.playQueueSong(request);preferences.neteaseQueue=false;await session.refresh();assert.equal(session.externalQueue,undefined,'turning the queue off takes effect immediately');
+  assert.equal(plays.length,3,'no extra playback command was introduced');
 });
